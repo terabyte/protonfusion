@@ -1,7 +1,10 @@
 """CSS selectors for ProtonMail UI elements.
 
-Update these if ProtonMail changes their UI. Settings are now served from
-account.proton.me (not mail.proton.me), accessed via the settings gear icon.
+All UI selectors are centralized here. When ProtonMail changes their UI,
+update these selectors and run the E2E test to verify.
+
+Settings are served from account.proton.me, accessed via the settings gear icon
+in the mail app at mail.proton.me.
 """
 
 # Login page
@@ -15,9 +18,19 @@ ALL_SETTINGS_LINK = 'a:has-text("All settings")'
 FILTERS_NAV_LINK = 'a[href="/u/0/mail/filters"]'
 COMPOSE_BUTTON = '[data-testid="sidebar:compose"]'
 
-# Filter settings page (account.proton.me/u/0/mail/filters)
+# Filter list page (account.proton.me/u/0/mail/filters)
 ADD_FILTER_BUTTON = 'button:has-text("Add filter")'
 FILTER_ACTIONS_DROPDOWN = '[data-testid="dropdownActions:dropdown"]'
+FILTER_TABLE_ROWS = 'table.simple-table tbody tr'
+FILTER_TABLE_ROWS_FALLBACK = (
+    '[class*="filter"] [class*="item"], '
+    '[class*="filters-list"] > div, '
+    '.item-container'
+)
+FILTER_EDIT_BUTTON = 'button[aria-label*="Edit filter"]'
+FILTER_EDIT_BUTTON_ALT = 'button:has-text("Edit")'
+FILTER_TOGGLE = 'input[type="checkbox"], .toggle-label input'
+FILTER_NAME_FALLBACK = '.text-ellipsis, [title], span'
 
 # Filter creation wizard - Name step
 FILTER_MODAL_NAME = '[data-testid="filter-modal:name-input"]'
@@ -27,6 +40,7 @@ FILTER_MODAL_CLOSE = '[data-testid="modal:close"]'
 # Filter creation wizard - Conditions step
 FILTER_CONDITION_ROW = '[data-testid="filter-modal:condition-0"]'
 FILTER_CONDITION_ROW_N = '[data-testid="filter-modal:condition-{}"]'
+FILTER_CONDITION_ROWS = '[data-testid*="filter-modal:condition"]'
 
 # Filter creation wizard - Actions step
 FILTER_ACTION_FOLDER_ROW = '[data-testid="filter-modal:folder-row"]'
@@ -34,16 +48,34 @@ FILTER_ACTION_LABEL_ROW = '[data-testid="filter-modal:label-row"]'
 FILTER_ACTION_MARK_AS_ROW = '[data-testid="filter-modal:mark-as-row"]'
 
 # Sieve editor
-SIEVE_TAB = '[data-testid="settings:sieve-editor"]'
-SIEVE_EDITOR = '.cm-content'
-SIEVE_SAVE_BUTTON = '[data-testid="filter:sieve:save-button"]'
+SIEVE_TAB = '[data-testid*="sieve"], button:has-text("Sieve"), [href*="sieve"]'
+SIEVE_EDITOR = '.cm-content, .CodeMirror, textarea[class*="sieve"], textarea'
+SIEVE_SAVE_BUTTON = '[data-testid*="save"], button:has-text("Save")'
 
-# Misc
+# Dialogs
 LOADING_SPINNER = '.loading-animation'
-# The delete confirmation dialog uses a <dialog class="prompt"> element
 DELETE_CONFIRM_DIALOG = 'dialog.prompt'
 DELETE_CONFIRM_BUTTON = 'dialog.prompt button:has-text("Delete")'
 
 # Custom dropdown interaction (Proton uses button.select + li.dropdown-item)
 CUSTOM_SELECT_BUTTON = 'button.select'
 DROPDOWN_ITEM = 'li.dropdown-item'
+
+# Value input elements within condition rows
+CONDITION_VALUE_TAGS = '[class*="tag"], [class*="chip"], [class*="pill"]'
+CONDITION_VALUE_INPUT = 'input[type="text"]'
+CONDITION_INSERT_BUTTON = 'button:has-text("Insert")'
+
+# Mark as checkboxes
+MARK_READ_CHECKBOX = 'label:has-text("Read") input[type="checkbox"]'
+MARK_READ_LABEL = 'label:has-text("Read")'
+MARK_STARRED_CHECKBOX = 'label:has-text("Starred") input[type="checkbox"]'
+MARK_STARRED_LABEL = 'label:has-text("Starred")'
+
+# Move to folder selector (in Actions step)
+FOLDER_SELECT = (
+    'button.select[aria-label="Do not move"], '
+    'button.select[aria-label*="move"]'
+)
+SAVE_BUTTON = 'button:has-text("Save")'
+CANCEL_BUTTON = 'button:has-text("Cancel")'
