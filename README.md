@@ -1,324 +1,199 @@
 # ProtonFusion
 
-A safe, reversible tool for consolidating your ProtonMail filters into fewer entries using Sieve scripts.
+A safe, reversible tool for consolidating your ProtonMail filters into optimized Sieve scripts. If you have dozens (or hundreds) of filters cluttering your ProtonMail settings, ProtonFusion merges them into clean, efficient Sieve rules.
 
-## ⚠️ Safety First
+## What It Does
 
-This tool is designed with **safety and reversibility** as top priorities:
+ProtonMail lets you create filters one at a time through the UI. Over time, you might end up with hundreds of filters that do similar things. ProtonFusion:
 
-- ✅ **Backup before changes**: Always creates a backup before any modifications
-- ✅ **Never destructive by default**: Old filters are disabled, not deleted
-- ✅ **Preview changes**: See what will change before applying with `diff`
-- ✅ **Easy rollback**: Restore to any previous backup with one command
-- ✅ **Checksum verification**: Backups include SHA256 checksums to prevent corruption
+1. **Scrapes** your existing filters from ProtonMail's settings UI using browser automation
+2. **Backs them up** to timestamped JSON files (with checksums for integrity)
+3. **Consolidates** redundant filters into optimized Sieve rules (e.g., 50 "delete spam from X" filters become 1 Sieve rule)
+4. **Generates** a clean Sieve script you can upload to ProtonMail
+5. **Syncs** the Sieve script to your account and disables the old UI filters (non-destructively)
 
-**⚠️ ALWAYS backup before syncing changes!**
-
-## Features
-
-- 🔍 **Scrape**: Extract filters from ProtonMail UI
-- 💾 **Backup**: Save filters to timestamped JSON with state tracking
-- 🔀 **Consolidate**: Merge filters into optimized Sieve scripts
-- 👁️ **Diff**: Preview changes before applying
-- 🔄 **Sync**: Upload Sieve and disable old UI filters (non-destructive)
-- ↩️ **Restore**: Rollback to any previous backup
-- 🧹 **Cleanup**: Delete disabled filters (optional, separate command)
-- 📊 **Analyze**: View filter statistics and consolidation opportunities
-
-## Installation
-
-### Requirements
-
-- Python 3.9+
-- pip
-
-### Setup
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Install Playwright browsers
-playwright install chromium
+**Before** (3 separate UI filters):
+```
+Filter 1: from = "alice@company.com" -> move to "Work"
+Filter 2: from = "bob@company.com"   -> move to "Work"
+Filter 3: from = "charlie@company.com" -> move to "Work"
 ```
 
-## Usage
-
-### Manual Mode (Default - Most Secure)
-
-Browser opens for manual login - supports 2FA and security keys:
-
-```bash
-# Backup current filters
-python -m src.main backup
-
-# Generate consolidated Sieve
-python -m src.main consolidate --backup latest --output filters.sieve
-
-# Preview changes
-python -m src.main diff --backup latest
-
-# Apply changes (disable old filters, upload Sieve)
-python -m src.main sync --sieve filters.sieve --backup latest
-
-# If needed, restore to previous state
-python -m src.main restore --backup backups/<timestamp>.json
-```
-
-### Automated Mode (For Testing/CI)
-
-Uses credentials from `.credentials` file for headless operation:
-
-```bash
-# Backup with automated login
-python -m src.main backup --headless --credentials-file .credentials
-
-# All commands support --headless and --credentials-file flags
-python -m src.main consolidate --backup latest --output filters.sieve
-python -m src.main sync --sieve filters.sieve --backup latest --headless --credentials-file .credentials
-```
-
-## Commands
-
-### `backup`
-
-Scrape and save current filters to a timestamped backup.
-
-```bash
-python -m src.main backup [OPTIONS]
-
-Options:
-  --headless              Run browser in headless mode
-  --credentials-file TEXT Path to credentials file (default: .credentials)
-  --no-credentials        Force manual login
-```
-
-### `list-backups`
-
-Show all available backups with statistics.
-
-```bash
-python -m src.main list-backups
-```
-
-### `analyze`
-
-View filter statistics and consolidation opportunities.
-
-```bash
-python -m src.main analyze --backup latest [OPTIONS]
-```
-
-### `consolidate`
-
-Generate optimized Sieve script from backup (local only, no ProtonMail changes).
-
-```bash
-python -m src.main consolidate --backup latest --output filters.sieve [OPTIONS]
-
-Options:
-  --backup TEXT       Backup identifier (timestamp or "latest")
-  --output TEXT       Output file for Sieve script
-  --strategies TEXT   Consolidation strategies (comma-separated)
-```
-
-### `diff`
-
-Compare backups or current state vs backup to preview changes.
-
-```bash
-python -m src.main diff [OPTIONS]
-
-Options:
-  --backup TEXT           Compare current vs backup
-  --backup1 TEXT          Compare two backups
-  --backup2 TEXT          Compare two backups
-  --headless              Run browser in headless mode
-  --credentials-file TEXT Credentials file for current state comparison
-```
-
-### `sync`
-
-Upload Sieve script and disable old UI filters (reversible).
-
-```bash
-python -m src.main sync --sieve filters.sieve --backup latest [OPTIONS]
-
-Options:
-  --sieve TEXT            Path to Sieve script to upload
-  --backup TEXT           Backup to reference for disabling filters
-  --headless              Run browser in headless mode
-  --credentials-file TEXT Credentials file
-```
-
-### `restore`
-
-Restore filters to previous backup state (re-enable/disable as needed).
-
-```bash
-python -m src.main restore --backup <timestamp> [OPTIONS]
-
-Options:
-  --backup TEXT           Backup timestamp to restore from
-  --headless              Run browser in headless mode
-  --credentials-file TEXT Credentials file
-```
-
-### `cleanup`
-
-Delete all disabled filters (optional, with confirmation).
-
-```bash
-python -m src.main cleanup [OPTIONS]
-
-Options:
-  --dry-run               Preview what will be deleted without deleting
-  --headless              Run browser in headless mode
-  --credentials-file TEXT Credentials file
-```
-
-## Credentials File Format
-
-Create `.credentials` file for automated testing:
-
-```
-Username: your_username
-Password: your_password
-```
-
-⚠️ **NEVER commit `.credentials` file to git!** It's in `.gitignore`.
-
-## Backup File Format
-
-Backups are stored in `backups/` with this structure:
-
-```json
-{
-  "version": "1.0",
-  "timestamp": "2026-02-08T19:30:45.123456",
-  "metadata": {
-    "filter_count": 253,
-    "enabled_count": 253,
-    "disabled_count": 0,
-    "account_email": "[email protected]",
-    "tool_version": "0.1.0"
-  },
-  "filters": [
-    {
-      "name": "Work emails",
-      "enabled": true,
-      "priority": 1,
-      "logic": "and",
-      "conditions": [...],
-      "actions": [...]
-    }
-  ],
-  "checksum": "sha256:..."
-}
-```
-
-## Consolidation Example
-
-**Before** (3 separate filters):
-```
-Filter 1: from = "alice@company.com" → move to "Work"
-Filter 2: from = "bob@company.com" → move to "Work"
-Filter 3: from = "charlie@company.com" → move to "Work"
-```
-
-**After** (1 consolidated Sieve rule):
+**After** (1 Sieve rule):
 ```sieve
 require "fileinto";
 
-# Work emails (consolidated from 3 filters)
 if address :is "from" ["alice@company.com", "bob@company.com", "charlie@company.com"] {
     fileinto "INBOX.Work";
 }
 ```
 
-## How It Works
+## Quick Start
 
-### Safe Workflow
-
-1. **Create backup**: Scrapes current filters, saves to timestamped JSON
-2. **Analyze**: Review filter patterns and consolidation opportunities
-3. **Consolidate**: Generate optimized Sieve script (local only)
-4. **Diff**: Compare backup vs current state to see what will change
-5. **Sync**: Upload Sieve and disable old UI filters (old filters preserved, just disabled)
-6. **Verify**: Check that consolidation worked as expected
-7. **Restore** (if needed): Re-enable/disable filters to match backup if something goes wrong
-
-### Consolidation Strategies
-
-The tool applies multiple strategies to minimize the resulting Sieve:
-
-- **Group by Action**: Merge filters with same action using OR logic
-- **Merge Conditions**: Convert multiple conditions to arrays
-- **Optimize Ordering**: Place important rules first, use `stop` statements
-
-## Testing
-
-### Unit Tests
+### 1. Install dependencies
 
 ```bash
-pytest tests/ -v
-```
-
-### End-to-End Integration Test
-
-```bash
-bash test_workflow.sh
-```
-
-This runs a complete cycle: backup → consolidate → sync → restore → verify
-
-## Architecture
-
-- **src/models/**: Data models (Pydantic)
-- **src/scraper/**: ProtonMail browser automation (Playwright)
-- **src/parser/**: Convert scraped data to models
-- **src/backup/**: Backup management, diff engine, restore logic
-- **src/consolidator/**: Filter optimization strategies
-- **src/generator/**: Sieve script generation
-- **src/main.py**: CLI entry point
-
-## Troubleshooting
-
-### "Login failed" error
-
-- **Manual mode**: Check that you're entering credentials correctly
-- **Automated mode**: Verify `.credentials` file exists and has correct format
-- **2FA enabled**: Disable 2FA for test account or use manual mode
-
-### Playwright browser not found
-
-```bash
+pip install -r requirements.txt
 playwright install chromium
 ```
 
-### ProtonMail UI changed
+### 2. Back up your filters
 
-If selectors don't work:
-1. Inspect ProtonMail filter page: Settings → Filters
-2. Update selectors in `src/scraper/selectors.py`
-3. Test with a small backup first
+```bash
+# Opens a browser window - log in manually (supports 2FA)
+python -m src.main backup
+```
 
-## Contributing
+### 3. See what you've got
 
-To add new consolidation strategies or features, see `ARCHITECTURE.md`.
+```bash
+python -m src.main analyze --backup latest
+```
+
+### 4. Generate consolidated Sieve script
+
+```bash
+python -m src.main consolidate --backup latest --output my-filters.sieve
+```
+
+### 5. Review and upload
+
+Review the generated `.sieve` file, then:
+
+```bash
+python -m src.main sync --sieve my-filters.sieve --backup latest
+```
+
+## Setting Up a Test Account for Development
+
+If you want to develop or test ProtonFusion, you should use a **dedicated test account** rather than your real ProtonMail account.
+
+### Create a free ProtonMail account
+
+1. Go to [https://account.proton.me/signup](https://account.proton.me/signup)
+2. Choose the **Free** plan
+3. Pick a username (e.g., `mytestaccount`) and password
+4. Complete the signup (you may need to verify via CAPTCHA or secondary email)
+5. **Do not enable 2FA** on the test account - automated/headless login doesn't support it
+
+### Set up credentials for automated testing
+
+Create a `.credentials` file in the project root:
+
+```
+Username: mytestaccount
+Password: mypassword123
+```
+
+This file is in `.gitignore` and will never be committed. The automated test workflow reads from this file to log in headlessly.
+
+### Run the tests
+
+```bash
+# Unit tests (no ProtonMail account needed, runs offline)
+python -m pytest tests/ -v
+
+# End-to-end test (requires test account credentials in .credentials)
+bash test_workflow.sh
+```
+
+The E2E test creates a filter on ProtonMail, backs it up, consolidates it, verifies the Sieve output, runs the unit tests, and cleans up after itself.
+
+**Note:** Free ProtonMail accounts are limited to 1 custom filter at a time.
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `backup` | Scrape current filters and save to a timestamped backup |
+| `list-backups` | Show all available backups with statistics |
+| `analyze` | View filter statistics and consolidation opportunities |
+| `consolidate` | Generate optimized Sieve script from a backup |
+| `diff` | Compare two backups or a backup vs current state |
+| `sync` | Upload Sieve script and disable old UI filters |
+| `restore` | Restore filters to a previous backup state |
+| `cleanup` | Delete disabled filters (with confirmation) |
+
+All commands that interact with ProtonMail accept these flags:
+
+- `--headless` - Run browser without a visible window
+- `--credentials-file .credentials` - Use stored credentials instead of manual login
+- `--manual-login` - Force manual login even if credentials file exists
+
+### Examples
+
+```bash
+# Automated backup
+python -m src.main backup --headless --credentials-file .credentials
+
+# List all backups
+python -m src.main list-backups
+
+# Analyze a specific backup
+python -m src.main analyze --backup latest
+
+# Generate Sieve script
+python -m src.main consolidate --backup latest --output filters.sieve
+
+# Preview what sync would change
+python -m src.main sync --sieve filters.sieve --backup latest --dry-run
+
+# Compare two backups
+python -m src.main diff --backup1 backups/20260208_193045.json --backup2 backups/20260209_100000.json
+
+# Restore to a previous state
+python -m src.main restore --backup 20260208_193045 --headless --credentials-file .credentials
+```
+
+## Safety Design
+
+ProtonFusion is designed to be non-destructive:
+
+- **Backup first**: Every operation starts from a backup. Your original filter state is always preserved.
+- **Disable, don't delete**: When syncing, old UI filters are disabled (not deleted). You can re-enable them anytime.
+- **Dry-run mode**: Preview what `sync` and `cleanup` will do before committing.
+- **Checksums**: Backups include SHA256 checksums to detect corruption.
+- **Restore**: One command to roll back to any previous backup.
+
+## Architecture
+
+```
+src/
+  main.py              # CLI entry point (Typer)
+  models/              # Pydantic data models for filters and backups
+  scraper/             # Playwright browser automation
+    selectors.py       # CSS selectors for ProtonMail UI elements
+    protonmail_scraper.py  # Read-only scraping of filters
+    protonmail_sync.py     # Write operations (create/delete filters, upload Sieve)
+  parser/              # Convert scraped HTML data into models
+  backup/              # Backup management, diffing, restore logic
+  consolidator/        # Filter optimization engine
+    strategies/        # Pluggable consolidation strategies
+  generator/           # Sieve script generation
+  utils/               # Config, credentials, constants
+```
+
+### When ProtonMail Changes Their UI
+
+ProtonMail occasionally updates their web UI, which can break the Playwright selectors. When this happens:
+
+1. Open ProtonMail settings manually: Settings gear -> All settings -> Filters
+2. Use browser dev tools to inspect the new element structure
+3. Update the selectors in `src/scraper/selectors.py`
+4. Run the E2E test: `bash test_workflow.sh`
+
+All UI selectors are centralized in `selectors.py` to make this straightforward.
+
+## Troubleshooting
+
+**"Login failed"** - Check that your `.credentials` file has the right format (`Username: ...` / `Password: ...`). If your account has 2FA, use `--manual-login` instead.
+
+**"Playwright browser not found"** - Run `playwright install chromium`.
+
+**E2E test hangs** - ProtonMail may be slow to load. The tool uses a 60-second page load timeout. Try running with `--headless` flag to reduce resource usage.
+
+**Selectors not working** - ProtonMail likely updated their UI. See "When ProtonMail Changes Their UI" above.
 
 ## License
 
 MIT
-
-## Safety Reminders
-
-- 🔒 Keep `.credentials` file secure and never commit it
-- 💾 Always backup before running sync
-- 👁️ Review diff output before applying changes
-- 📝 Check generated Sieve script before upload
-- ↩️ Know how to restore if something goes wrong
-
----
-
-**Questions?** Check the inline documentation in source files or review test files for usage examples.
