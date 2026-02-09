@@ -1,0 +1,33 @@
+# Backups and outputs (may contain PII)
+backups/
+output/
+
+# Credentials (CRITICAL - never commit)
+.credentials
+.env
+*.pem
+*.key
+.test-acct-recovery-phrase
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# IDE / tool config
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
