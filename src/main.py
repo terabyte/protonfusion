@@ -98,6 +98,101 @@ def backup(
     asyncio.run(_run())
 
 
+@app.command()
+def show(
+    headless: bool = typer.Option(False, "--headless", help="Run browser in headless mode"),
+    credentials_file: str = typer.Option("", "--credentials-file", help="Path to credentials file"),
+    manual_login: bool = typer.Option(False, "--manual-login", help="Force manual login"),
+):
+    """Read and display your current filters (read-only, no changes made).
+
+    This is a safe way to verify the tool can connect to your account and
+    read your filters before running any other commands.
+    """
+    from src.scraper.protonmail_scraper import ProtonMailScraper
+
+    creds = _get_credentials(credentials_file, manual_login)
+
+    async def _run():
+        scraper = ProtonMailScraper(headless=headless, credentials=creds)
+        try:
+            with console.status("[bold green]Initializing browser..."):
+                await scraper.initialize()
+
+            with console.status("[bold green]Logging in..."):
+                await scraper.login()
+
+            with console.status("[bold green]Navigating to filters..."):
+                await scraper.navigate_to_filters()
+
+            with console.status("[bold green]Reading filters..."):
+                raw_filters = await scraper.scrape_all_filters()
+
+            filters = parse_scraped_filters(raw_filters)
+            _display_filters(filters)
+
+        finally:
+            await scraper.close()
+
+    asyncio.run(_run())
+
+
+@app.command("show-backup")
+def show_backup(
+    backup_id: str = typer.Option("latest", "--backup", help="Backup identifier (timestamp or 'latest')"),
+):
+    """Display filters from a backup file (offline, no login needed)."""
+    manager = BackupManager()
+    bkup = manager.load_backup(backup_id)
+    _display_filters(bkup.filters, source=f"backup '{backup_id}'")
+
+
+def _display_filters(filters: list, source: str = "ProtonMail account"):
+    """Display a list of filters in a readable table."""
+    if not filters:
+        console.print(f"[yellow]No filters found in {source}.")
+        return
+
+    enabled_count = sum(1 for f in filters if f.enabled)
+    disabled_count = len(filters) - enabled_count
+
+    console.print(Panel(
+        f"[bold]Found {len(filters)} filters[/] in {source}\n"
+        f"Enabled: [green]{enabled_count}[/]  Disabled: [yellow]{disabled_count}[/]",
+        title="Filter Summary",
+    ))
+
+    table = Table(title="Filters")
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("Name", style="cyan", max_width=40)
+    table.add_column("Status", justify="center")
+    table.add_column("Conditions", max_width=50)
+    table.add_column("Actions", max_width=30)
+
+    for i, f in enumerate(filters, 1):
+        status = "[green]ON[/]" if f.enabled else "[yellow]OFF[/]"
+
+        # Format conditions
+        cond_parts = []
+        for c in f.conditions:
+            cond_parts.append(f"{c.type.value} {c.operator.value} \"{c.value}\"")
+        conds_str = f" {f.logic.value.upper()} ".join(cond_parts) if cond_parts else "[dim]none[/]"
+
+        # Format actions
+        action_parts = []
+        for a in f.actions:
+            if a.parameters:
+                params = ", ".join(f"{v}" for v in a.parameters.values())
+                action_parts.append(f"{a.type.value}({params})")
+            else:
+                action_parts.append(a.type.value)
+        actions_str = ", ".join(action_parts) if action_parts else "[dim]none[/]"
+
+        table.add_row(str(i), f.name, status, conds_str, actions_str)
+
+    console.print(table)
+
+
 @app.command("list-backups")
 def list_backups():
     """Show all available backups with statistics."""

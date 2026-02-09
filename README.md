@@ -37,26 +37,33 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
-### 2. Back up your filters
+### 2. See what you've got (read-only)
 
 ```bash
-# Opens a browser window - log in manually (supports 2FA)
+# Opens a browser, reads your filters, and displays them - no changes made
+python -m src.main show
+```
+
+### 3. Back up your filters
+
+```bash
+# Same as show, but saves to a timestamped JSON file
 python -m src.main backup
 ```
 
-### 3. See what you've got
+### 4. Analyze consolidation opportunities
 
 ```bash
 python -m src.main analyze --backup latest
 ```
 
-### 4. Generate consolidated Sieve script
+### 5. Generate consolidated Sieve script
 
 ```bash
 python -m src.main consolidate --backup latest --output my-filters.sieve
 ```
 
-### 5. Review and upload
+### 6. Review and upload
 
 Review the generated `.sieve` file, then:
 
@@ -105,6 +112,8 @@ The E2E test creates a filter on ProtonMail, backs it up, consolidates it, verif
 
 | Command | Description |
 |---------|-------------|
+| `show` | Read and display your current filters (read-only, no changes) |
+| `show-backup` | Display filters from a backup file (offline, no login) |
 | `backup` | Scrape current filters and save to a timestamped backup |
 | `list-backups` | Show all available backups with statistics |
 | `analyze` | View filter statistics and consolidation opportunities |
