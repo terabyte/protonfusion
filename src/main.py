@@ -1,4 +1,4 @@
-"""CLI entry point for ProtonMail Filter Consolidation Tool."""
+"""CLI entry point for ProtonFusion."""
 
 import asyncio
 import json
@@ -25,8 +25,8 @@ from src.consolidator.consolidation_engine import ConsolidationEngine
 from src.generator.sieve_generator import SieveGenerator
 
 app = typer.Typer(
-    name="protonmail-filters",
-    help="ProtonMail Filter Consolidation Tool - safely consolidate your filters into Sieve scripts.",
+    name="protonfusion",
+    help="ProtonFusion - safely consolidate your ProtonMail filters into Sieve scripts.",
     add_completion=False,
 )
 console = Console()

@@ -1,4 +1,4 @@
-# ProtonMail Filter Consolidation Tool
+# ProtonFusion
 
 A safe, reversible tool for consolidating your ProtonMail filters into fewer entries using Sieve scripts.
 

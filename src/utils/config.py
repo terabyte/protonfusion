@@ -1,4 +1,4 @@
-"""Configuration management for ProtonMail Filter Tool."""
+"""Configuration management for ProtonFusion."""
 
 import os
 from pathlib import Path

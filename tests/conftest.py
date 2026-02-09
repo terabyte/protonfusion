@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for ProtonMail Filter Tool tests."""
+"""Shared pytest fixtures for ProtonFusion tests."""
 
 import pytest
 from datetime import datetime

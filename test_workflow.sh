@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "=== ProtonMail Filter Tool - End-to-End Test ==="
+echo "=== ProtonFusion - End-to-End Test ==="
 echo "Using test account credentials from .credentials"
 echo "Note: Free-tier accounts are limited to 1 filter at a time."
 echo ""
