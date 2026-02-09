@@ -6,7 +6,7 @@ from pathlib import Path
 
 from src.models.filter_models import (
     ProtonMailFilter, FilterCondition, FilterAction, ConsolidatedFilter,
-    ConditionType, Operator, ActionType, LogicType,
+    ConditionGroup, ConditionType, Operator, ActionType, LogicType,
 )
 from src.models.backup_models import Backup, BackupMetadata
 
@@ -137,11 +137,10 @@ def sample_consolidated_filter():
     """Sample consolidated filter."""
     return ConsolidatedFilter(
         name="Delete spam (consolidated from 3 filters)",
-        logic=LogicType.OR,
-        conditions=[
-            FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam1@test.com"),
-            FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam2@test.com"),
-            FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam3@test.com"),
+        condition_groups=[
+            ConditionGroup(conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam1@test.com")]),
+            ConditionGroup(conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam2@test.com")]),
+            ConditionGroup(conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam3@test.com")]),
         ],
         actions=[
             FilterAction(type=ActionType.DELETE, parameters={}),

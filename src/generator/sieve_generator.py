@@ -4,7 +4,7 @@ import logging
 from typing import List, Set
 
 from src.models.filter_models import (
-    ConsolidatedFilter, FilterCondition, FilterAction,
+    ConsolidatedFilter, ConditionGroup, FilterCondition, FilterAction,
     ConditionType, Operator, ActionType, LogicType,
 )
 
@@ -92,34 +92,60 @@ class SieveGenerator:
                 if ext:
                     extensions.add(ext)
 
-            # Check if we need relational or other comparators
-            for cond in f.conditions:
-                if cond.operator == Operator.MATCHES:
-                    extensions.add("regex")
+            for group in f.condition_groups:
+                for cond in group.conditions:
+                    if cond.operator == Operator.MATCHES:
+                        extensions.add("regex")
 
         return extensions
 
     def _generate_conditions(self, f: ConsolidatedFilter) -> str:
-        """Generate the Sieve condition expression."""
-        if not f.conditions:
+        """Generate the Sieve condition expression from condition groups."""
+        if not f.condition_groups:
             return ""
 
-        condition_parts = []
-        for cond in f.conditions:
+        # Filter out empty groups
+        non_empty = [g for g in f.condition_groups if g.conditions]
+        if not non_empty:
+            return ""
+
+        if len(non_empty) == 1:
+            return self._generate_group(non_empty[0])
+
+        # Multiple groups - OR them together (any group matching triggers action)
+        parts = []
+        for group in non_empty:
+            part = self._generate_group(group)
+            if part:
+                parts.append(part)
+
+        if not parts:
+            return ""
+        if len(parts) == 1:
+            return parts[0]
+
+        inner = ",\n    ".join(parts)
+        return f"anyof (\n    {inner}\n)"
+
+    def _generate_group(self, group: ConditionGroup) -> str:
+        """Generate conditions for a single ConditionGroup."""
+        if not group.conditions:
+            return ""
+
+        parts = []
+        for cond in group.conditions:
             sieve_cond = self._condition_to_sieve(cond)
             if sieve_cond:
-                condition_parts.append(sieve_cond)
+                parts.append(sieve_cond)
 
-        if not condition_parts:
+        if not parts:
             return ""
+        if len(parts) == 1:
+            return parts[0]
 
-        if len(condition_parts) == 1:
-            return condition_parts[0]
-
-        # Multiple conditions - use anyof (OR) or allof (AND)
-        joiner = "anyof" if f.logic == LogicType.OR else "allof"
-        inner = ",\n    ".join(condition_parts)
-        return f"{joiner} (\n    {inner}\n)"
+        joiner = "anyof" if group.logic == LogicType.OR else "allof"
+        inner = ",\n        ".join(parts)
+        return f"{joiner} (\n        {inner}\n    )"
 
     def _condition_to_sieve(self, cond: FilterCondition) -> str:
         """Convert a single condition to Sieve syntax."""

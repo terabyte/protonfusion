@@ -1,54 +1,74 @@
-"""Strategy: Merge similar conditions into array format."""
+"""Strategy: Merge compatible single-condition groups into array format."""
 
 import logging
 from typing import List, Dict
 
 from src.models.filter_models import (
-    ConsolidatedFilter, FilterCondition, ConditionType, Operator,
+    ConsolidatedFilter, ConditionGroup, FilterCondition, ConditionType, Operator,
 )
 
 logger = logging.getLogger(__name__)
 
 
 def merge_conditions(filters: List[ConsolidatedFilter]) -> List[ConsolidatedFilter]:
-    """Merge conditions of the same type+operator into combined conditions.
+    """Merge compatible condition groups within each consolidated filter.
 
-    For example, 3 conditions checking "sender contains X" become one check
-    with multiple values (used for Sieve array syntax).
+    Only single-condition groups with the same type and operator can be merged.
+    Multi-condition groups (AND/OR with multiple conditions) are never merged
+    because that would change the filter's behavior.
+
+    Example (safe to merge):
+        Group 1: sender contains "alice"    (single condition)
+        Group 2: sender contains "bob"      (single condition)
+        → Merged: sender contains ["alice", "bob"]  (one group, array values)
+
+    Example (NOT merged):
+        Group 1: sender contains "alice" AND subject contains "urgent"
+        Group 2: sender contains "bob"
+        → Left as-is (two separate groups)
     """
     result = []
 
     for f in filters:
-        if len(f.conditions) <= 1:
+        if len(f.condition_groups) <= 1:
             result.append(f)
             continue
 
-        # Group conditions by type + operator
-        groups: Dict[str, List[FilterCondition]] = {}
-        for cond in f.conditions:
-            key = f"{cond.type.value}|{cond.operator.value}"
-            if key not in groups:
-                groups[key] = []
-            groups[key].append(cond)
+        # Separate single-condition groups from multi-condition groups
+        single_groups: Dict[str, List[ConditionGroup]] = {}
+        multi_groups: List[ConditionGroup] = []
 
-        # Create merged conditions
-        merged_conditions = []
-        for key, conds in groups.items():
-            if len(conds) == 1:
-                merged_conditions.append(conds[0])
+        for group in f.condition_groups:
+            if len(group.conditions) == 1:
+                cond = group.conditions[0]
+                key = f"{cond.type.value}|{cond.operator.value}"
+                if key not in single_groups:
+                    single_groups[key] = []
+                single_groups[key].append(group)
             else:
-                # Combine values - store as comma-separated for Sieve array generation
-                values = [c.value for c in conds if c.value]
-                merged_conditions.append(FilterCondition(
-                    type=conds[0].type,
-                    operator=conds[0].operator,
-                    value="|".join(values),  # Pipe-delimited for array expansion
+                # Multi-condition group: preserve as-is
+                multi_groups.append(group)
+
+        # Merge compatible single-condition groups
+        merged_groups = []
+        for key, groups in single_groups.items():
+            if len(groups) == 1:
+                merged_groups.append(groups[0])
+            else:
+                # Combine values with pipe delimiter for Sieve array expansion
+                values = [g.conditions[0].value for g in groups if g.conditions[0].value]
+                merged_groups.append(ConditionGroup(
+                    logic=groups[0].logic,
+                    conditions=[FilterCondition(
+                        type=groups[0].conditions[0].type,
+                        operator=groups[0].conditions[0].operator,
+                        value="|".join(values),
+                    )],
                 ))
 
         result.append(ConsolidatedFilter(
             name=f.name,
-            logic=f.logic,
-            conditions=merged_conditions,
+            condition_groups=merged_groups + multi_groups,
             actions=f.actions,
             source_filters=f.source_filters,
             filter_count=f.filter_count,

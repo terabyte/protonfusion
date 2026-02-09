@@ -4,7 +4,7 @@ import pytest
 
 from src.generator.sieve_generator import SieveGenerator, EXTENSION_MAP
 from src.models.filter_models import (
-    ConsolidatedFilter, FilterCondition, FilterAction,
+    ConsolidatedFilter, ConditionGroup, FilterCondition, FilterAction,
     ConditionType, Operator, ActionType, LogicType,
 )
 
@@ -26,7 +26,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
-            conditions=[],
+            condition_groups=[],
             actions=[FilterAction(type=ActionType.DELETE)]
         )
 
@@ -41,7 +41,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
-            conditions=[],
+            condition_groups=[],
             actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "Test"})]
         )
 
@@ -55,9 +55,9 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Delete Spam",
-            conditions=[
+            condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam@test.com")
-            ],
+            ])],
             actions=[FilterAction(type=ActionType.DELETE)]
         )
 
@@ -74,9 +74,9 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Move to Spam",
-            conditions=[
+            condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent")
-            ],
+            ])],
             actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "Spam"})]
         )
 
@@ -90,7 +90,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Mark Read",
-            conditions=[],
+            condition_groups=[],
             actions=[FilterAction(type=ActionType.MARK_READ)]
         )
 
@@ -104,7 +104,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Star",
-            conditions=[],
+            condition_groups=[],
             actions=[FilterAction(type=ActionType.STAR)]
         )
 
@@ -118,7 +118,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Archive",
-            conditions=[],
+            condition_groups=[],
             actions=[FilterAction(type=ActionType.ARCHIVE)]
         )
 
@@ -132,7 +132,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Label",
-            conditions=[],
+            condition_groups=[],
             actions=[FilterAction(type=ActionType.LABEL, parameters={"label": "Important"})]
         )
 
@@ -146,9 +146,9 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
-            conditions=[
+            condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test@example.com")
-            ],
+            ])],
             actions=[FilterAction(type=ActionType.DELETE)]
         )
 
@@ -163,9 +163,9 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
-            conditions=[
+            condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.RECIPIENT, operator=Operator.IS, value="me@example.com")
-            ],
+            ])],
             actions=[FilterAction(type=ActionType.DELETE)]
         )
 
@@ -180,9 +180,9 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
-            conditions=[
+            condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent")
-            ],
+            ])],
             actions=[FilterAction(type=ActionType.DELETE)]
         )
 
@@ -197,9 +197,9 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
-            conditions=[
+            condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test")
-            ],
+            ])],
             actions=[FilterAction(type=ActionType.DELETE)]
         )
 
@@ -212,9 +212,9 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
-            conditions=[
+            condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="test@example.com")
-            ],
+            ])],
             actions=[FilterAction(type=ActionType.DELETE)]
         )
 
@@ -227,9 +227,9 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
-            conditions=[
+            condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.MATCHES, value="*@spam.com")
-            ],
+            ])],
             actions=[FilterAction(type=ActionType.DELETE)]
         )
 
@@ -239,16 +239,18 @@ class TestSieveGenerator:
         assert "require" in script
         assert "regex" in script
 
-    def test_generate_or_logic(self):
-        """Test generating OR logic (anyof)."""
+    def test_generate_or_logic_within_group(self):
+        """Test generating OR logic (anyof) within a single condition group."""
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
-            logic=LogicType.OR,
-            conditions=[
-                FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam1"),
-                FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam2"),
-            ],
+            condition_groups=[ConditionGroup(
+                logic=LogicType.OR,
+                conditions=[
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam1"),
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam2"),
+                ],
+            )],
             actions=[FilterAction(type=ActionType.DELETE)]
         )
 
@@ -256,16 +258,18 @@ class TestSieveGenerator:
 
         assert "anyof" in script
 
-    def test_generate_and_logic(self):
-        """Test generating AND logic (allof)."""
+    def test_generate_and_logic_within_group(self):
+        """Test generating AND logic (allof) within a single condition group."""
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
-            logic=LogicType.AND,
-            conditions=[
-                FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test"),
-                FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
-            ],
+            condition_groups=[ConditionGroup(
+                logic=LogicType.AND,
+                conditions=[
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test"),
+                    FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
+                ],
+            )],
             actions=[FilterAction(type=ActionType.DELETE)]
         )
 
@@ -278,9 +282,9 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
-            conditions=[
+            condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam1@test.com|spam2@test.com|spam3@test.com")
-            ],
+            ])],
             actions=[FilterAction(type=ActionType.DELETE)]
         )
 
@@ -296,7 +300,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
-            conditions=[],
+            condition_groups=[],
             actions=[
                 FilterAction(type=ActionType.LABEL, parameters={"label": "Important"}),
                 FilterAction(type=ActionType.MARK_READ),
@@ -315,7 +319,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Consolidated",
-            conditions=[],
+            condition_groups=[],
             actions=[FilterAction(type=ActionType.DELETE)],
             source_filters=["Filter 1", "Filter 2", "Filter 3"],
             filter_count=3
@@ -331,7 +335,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Consolidated",
-            conditions=[],
+            condition_groups=[],
             actions=[FilterAction(type=ActionType.DELETE)],
             source_filters=[f"Filter {i}" for i in range(10)],
             filter_count=10
@@ -358,12 +362,16 @@ class TestSieveGenerator:
         filters = [
             ConsolidatedFilter(
                 name="Delete Spam",
-                conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam")],
+                condition_groups=[ConditionGroup(conditions=[
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam")
+                ])],
                 actions=[FilterAction(type=ActionType.DELETE)]
             ),
             ConsolidatedFilter(
                 name="Archive News",
-                conditions=[FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="newsletter")],
+                condition_groups=[ConditionGroup(conditions=[
+                    FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="newsletter")
+                ])],
                 actions=[FilterAction(type=ActionType.ARCHIVE)]
             ),
         ]
@@ -379,7 +387,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Unconditional",
-            conditions=[],
+            condition_groups=[],
             actions=[FilterAction(type=ActionType.DELETE)]
         )
 
@@ -393,7 +401,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
-            conditions=[],
+            condition_groups=[],
             actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "Test"})]
         )
 
@@ -406,7 +414,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
-            conditions=[],
+            condition_groups=[],
             actions=[FilterAction(type=ActionType.MARK_READ)]
         )
 
@@ -419,7 +427,9 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
-            conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.MATCHES, value=".*")],
+            condition_groups=[ConditionGroup(conditions=[
+                FilterCondition(type=ConditionType.SENDER, operator=Operator.MATCHES, value=".*")
+            ])],
             actions=[FilterAction(type=ActionType.DELETE)]
         )
 
@@ -432,10 +442,12 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Delete spam (consolidated from 5 filters)",
-            logic=LogicType.OR,
-            conditions=[
-                FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam1@test.com|spam2@test.com|spam3@test.com"),
-            ],
+            condition_groups=[ConditionGroup(
+                logic=LogicType.OR,
+                conditions=[
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam1@test.com|spam2@test.com|spam3@test.com"),
+                ],
+            )],
             actions=[FilterAction(type=ActionType.DELETE)],
             source_filters=["Spam Filter 1", "Spam Filter 2", "Spam Filter 3"],
             filter_count=3
@@ -447,3 +459,77 @@ class TestSieveGenerator:
         assert "Delete spam" in script or "Spam Filter" in script
         assert "discard;" in script
         assert "spam1@test.com" in script
+
+    def test_generate_multiple_condition_groups_anyof(self):
+        """Test that multiple condition groups produce outer anyof."""
+        gen = SieveGenerator()
+        cf = ConsolidatedFilter(
+            name="Consolidated",
+            condition_groups=[
+                ConditionGroup(conditions=[
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="alice")
+                ]),
+                ConditionGroup(conditions=[
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="bob")
+                ]),
+            ],
+            actions=[FilterAction(type=ActionType.DELETE)]
+        )
+
+        script = gen.generate([cf])
+
+        assert "anyof" in script
+        assert "alice" in script
+        assert "bob" in script
+
+    def test_generate_and_group_produces_allof(self):
+        """Test that an AND condition group renders as allof."""
+        gen = SieveGenerator()
+        cf = ConsolidatedFilter(
+            name="AND test",
+            condition_groups=[ConditionGroup(
+                logic=LogicType.AND,
+                conditions=[
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="alice"),
+                    FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
+                ],
+            )],
+            actions=[FilterAction(type=ActionType.DELETE)]
+        )
+
+        script = gen.generate([cf])
+
+        assert "allof" in script
+        assert "alice" in script
+        assert "urgent" in script
+
+    def test_generate_mixed_and_or_groups(self):
+        """Test rendering consolidated filter with AND and single-condition groups."""
+        gen = SieveGenerator()
+        cf = ConsolidatedFilter(
+            name="Mixed",
+            condition_groups=[
+                # AND group: sender=alice AND subject=urgent
+                ConditionGroup(
+                    logic=LogicType.AND,
+                    conditions=[
+                        FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="alice"),
+                        FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
+                    ],
+                ),
+                # Single-condition group: sender=bob
+                ConditionGroup(conditions=[
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="bob"),
+                ]),
+            ],
+            actions=[FilterAction(type=ActionType.DELETE)]
+        )
+
+        script = gen.generate([cf])
+
+        # Outer anyof (multiple groups), inner allof (AND group)
+        assert "anyof" in script
+        assert "allof" in script
+        assert "alice" in script
+        assert "urgent" in script
+        assert "bob" in script

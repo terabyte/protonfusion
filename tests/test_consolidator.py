@@ -8,7 +8,7 @@ from src.consolidator.strategies.merge_conditions import merge_conditions
 from src.consolidator.strategies.optimize_ordering import optimize_ordering
 from src.models.filter_models import (
     ProtonMailFilter, FilterCondition, FilterAction, ConsolidatedFilter,
-    ConditionType, Operator, ActionType, LogicType,
+    ConditionGroup, ConditionType, Operator, ActionType, LogicType,
 )
 
 
@@ -51,8 +51,7 @@ class TestGroupByAction:
 
         assert len(result) == 1
         assert result[0].filter_count == 3
-        assert len(result[0].conditions) == 3
-        assert result[0].logic == LogicType.OR
+        assert len(result[0].condition_groups) == 3
 
     def test_group_filters_different_actions(self):
         """Test that filters with different actions are not grouped."""
@@ -159,6 +158,131 @@ class TestGroupByAction:
         assert "Delete" in result[0].name
         assert "consolidated from 2 filters" in result[0].name
 
+    def test_preserves_and_logic_in_condition_group(self):
+        """Test that a filter with AND logic keeps its conditions as an AND group."""
+        filters = [
+            ProtonMailFilter(
+                name="AND filter",
+                logic=LogicType.AND,
+                conditions=[
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="alice"),
+                    FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
+                ],
+                actions=[FilterAction(type=ActionType.DELETE)]
+            ),
+        ]
+
+        result = group_by_action(filters)
+
+        assert len(result) == 1
+        assert len(result[0].condition_groups) == 1
+        group = result[0].condition_groups[0]
+        assert group.logic == LogicType.AND
+        assert len(group.conditions) == 2
+
+    def test_preserves_or_logic_in_condition_group(self):
+        """Test that a filter with OR logic keeps its conditions as an OR group."""
+        filters = [
+            ProtonMailFilter(
+                name="OR filter",
+                logic=LogicType.OR,
+                conditions=[
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="alice"),
+                    FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
+                ],
+                actions=[FilterAction(type=ActionType.DELETE)]
+            ),
+        ]
+
+        result = group_by_action(filters)
+
+        assert len(result) == 1
+        group = result[0].condition_groups[0]
+        assert group.logic == LogicType.OR
+        assert len(group.conditions) == 2
+
+    def test_and_filter_not_flattened_with_single_condition_filter(self):
+        """Test the critical bug fix: AND filter conditions are NOT flattened
+        into an OR with single-condition filters.
+
+        Original behavior (WRONG):
+          Filter A: sender=alice AND subject=urgent -> delete
+          Filter B: sender=bob -> delete
+          Consolidated: sender=alice OR subject=urgent OR sender=bob -> delete
+          (This would delete emails from alice even without "urgent" subject!)
+
+        Correct behavior:
+          Consolidated: (sender=alice AND subject=urgent) OR (sender=bob) -> delete
+        """
+        filters = [
+            ProtonMailFilter(
+                name="Multi-condition AND",
+                logic=LogicType.AND,
+                conditions=[
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="alice"),
+                    FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
+                ],
+                actions=[FilterAction(type=ActionType.DELETE)]
+            ),
+            ProtonMailFilter(
+                name="Single condition",
+                conditions=[
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="bob"),
+                ],
+                actions=[FilterAction(type=ActionType.DELETE)]
+            ),
+        ]
+
+        result = group_by_action(filters)
+
+        assert len(result) == 1
+        cf = result[0]
+        # Must have 2 separate condition groups, not flat conditions
+        assert len(cf.condition_groups) == 2
+
+        # First group: AND with 2 conditions
+        and_group = cf.condition_groups[0]
+        assert and_group.logic == LogicType.AND
+        assert len(and_group.conditions) == 2
+        values = {c.value for c in and_group.conditions}
+        assert values == {"alice", "urgent"}
+
+        # Second group: single condition
+        single_group = cf.condition_groups[1]
+        assert len(single_group.conditions) == 1
+        assert single_group.conditions[0].value == "bob"
+
+    def test_multiple_and_filters_stay_separate(self):
+        """Test that multiple AND filters each become their own group."""
+        filters = [
+            ProtonMailFilter(
+                name="Filter A",
+                logic=LogicType.AND,
+                conditions=[
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="alice"),
+                    FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
+                ],
+                actions=[FilterAction(type=ActionType.DELETE)]
+            ),
+            ProtonMailFilter(
+                name="Filter B",
+                logic=LogicType.AND,
+                conditions=[
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="bob"),
+                    FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="sale"),
+                ],
+                actions=[FilterAction(type=ActionType.DELETE)]
+            ),
+        ]
+
+        result = group_by_action(filters)
+
+        assert len(result) == 1
+        cf = result[0]
+        assert len(cf.condition_groups) == 2
+        assert cf.condition_groups[0].logic == LogicType.AND
+        assert cf.condition_groups[1].logic == LogicType.AND
+
 
 class TestMergeConditions:
     """Test merge_conditions strategy."""
@@ -168,27 +292,12 @@ class TestMergeConditions:
         result = merge_conditions([])
         assert result == []
 
-    def test_single_condition_not_merged(self):
-        """Test that single condition is not merged."""
+    def test_single_group_not_merged(self):
+        """Test that single condition group is not merged."""
         cf = ConsolidatedFilter(
             name="Test",
-            conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test")],
-            actions=[]
-        )
-
-        result = merge_conditions([cf])
-
-        assert len(result) == 1
-        assert len(result[0].conditions) == 1
-
-    def test_merge_same_type_operator(self):
-        """Test merging conditions with same type and operator."""
-        cf = ConsolidatedFilter(
-            name="Test",
-            conditions=[
-                FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam1"),
-                FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam2"),
-                FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam3"),
+            condition_groups=[
+                ConditionGroup(conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test")])
             ],
             actions=[]
         )
@@ -196,50 +305,68 @@ class TestMergeConditions:
         result = merge_conditions([cf])
 
         assert len(result) == 1
-        assert len(result[0].conditions) == 1
-        assert "spam1" in result[0].conditions[0].value
-        assert "spam2" in result[0].conditions[0].value
-        assert "spam3" in result[0].conditions[0].value
-        assert "|" in result[0].conditions[0].value
+        assert len(result[0].condition_groups) == 1
+
+    def test_merge_compatible_single_condition_groups(self):
+        """Test merging single-condition groups with same type and operator."""
+        cf = ConsolidatedFilter(
+            name="Test",
+            condition_groups=[
+                ConditionGroup(conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam1")]),
+                ConditionGroup(conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam2")]),
+                ConditionGroup(conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam3")]),
+            ],
+            actions=[]
+        )
+
+        result = merge_conditions([cf])
+
+        assert len(result) == 1
+        # 3 single-condition groups should merge into 1
+        assert len(result[0].condition_groups) == 1
+        merged_value = result[0].condition_groups[0].conditions[0].value
+        assert "spam1" in merged_value
+        assert "spam2" in merged_value
+        assert "spam3" in merged_value
+        assert "|" in merged_value
 
     def test_different_types_not_merged(self):
-        """Test that conditions with different types are not merged."""
+        """Test that single-condition groups with different types are not merged."""
         cf = ConsolidatedFilter(
             name="Test",
-            conditions=[
-                FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test1"),
-                FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="test2"),
+            condition_groups=[
+                ConditionGroup(conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test1")]),
+                ConditionGroup(conditions=[FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="test2")]),
             ],
             actions=[]
         )
 
         result = merge_conditions([cf])
 
-        assert len(result[0].conditions) == 2
+        assert len(result[0].condition_groups) == 2
 
     def test_different_operators_not_merged(self):
-        """Test that conditions with different operators are not merged."""
+        """Test that single-condition groups with different operators are not merged."""
         cf = ConsolidatedFilter(
             name="Test",
-            conditions=[
-                FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test1"),
-                FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="test2"),
+            condition_groups=[
+                ConditionGroup(conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test1")]),
+                ConditionGroup(conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="test2")]),
             ],
             actions=[]
         )
 
         result = merge_conditions([cf])
 
-        assert len(result[0].conditions) == 2
+        assert len(result[0].condition_groups) == 2
 
     def test_merge_preserves_other_fields(self):
         """Test that merging preserves other filter fields."""
         cf = ConsolidatedFilter(
             name="Original Name",
-            logic=LogicType.OR,
-            conditions=[
-                FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="a"),
-                FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="b"),
+            condition_groups=[
+                ConditionGroup(conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="a")]),
+                ConditionGroup(conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="b")]),
             ],
             actions=[FilterAction(type=ActionType.DELETE)],
             source_filters=["A", "B"],
@@ -249,22 +376,71 @@ class TestMergeConditions:
         result = merge_conditions([cf])
 
         assert result[0].name == "Original Name"
-        assert result[0].logic == LogicType.OR
         assert len(result[0].actions) == 1
         assert result[0].filter_count == 2
 
-    def test_no_merge_for_single_condition_filter(self):
-        """Test that filters with single condition pass through unchanged."""
+    def test_multi_condition_groups_not_merged(self):
+        """Test that multi-condition AND groups are never merged with others."""
         cf = ConsolidatedFilter(
-            name="Single",
-            conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test")],
-            actions=[]
+            name="Test",
+            condition_groups=[
+                # Multi-condition AND group - must be preserved as-is
+                ConditionGroup(
+                    logic=LogicType.AND,
+                    conditions=[
+                        FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="alice"),
+                        FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
+                    ]
+                ),
+                # Single-condition group
+                ConditionGroup(conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="bob")]),
+            ],
+            actions=[FilterAction(type=ActionType.DELETE)],
         )
 
         result = merge_conditions([cf])
 
-        # Should be unchanged
-        assert result[0] == cf
+        # Both groups should be preserved (multi-condition can't merge with single)
+        assert len(result[0].condition_groups) == 2
+
+        # Find the multi-condition group - verify it's intact
+        multi = [g for g in result[0].condition_groups if len(g.conditions) == 2]
+        assert len(multi) == 1
+        assert multi[0].logic == LogicType.AND
+        assert {c.value for c in multi[0].conditions} == {"alice", "urgent"}
+
+    def test_merge_single_groups_alongside_multi_groups(self):
+        """Test that compatible single-condition groups merge while
+        multi-condition groups are preserved separately."""
+        cf = ConsolidatedFilter(
+            name="Test",
+            condition_groups=[
+                # These two single-condition groups can merge
+                ConditionGroup(conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam1")]),
+                ConditionGroup(conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam2")]),
+                # This multi-condition group must stay separate
+                ConditionGroup(
+                    logic=LogicType.AND,
+                    conditions=[
+                        FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="alice"),
+                        FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
+                    ]
+                ),
+            ],
+            actions=[FilterAction(type=ActionType.DELETE)],
+        )
+
+        result = merge_conditions([cf])
+
+        # Should be 2 groups: 1 merged single + 1 preserved multi
+        assert len(result[0].condition_groups) == 2
+
+        singles = [g for g in result[0].condition_groups if len(g.conditions) == 1]
+        multis = [g for g in result[0].condition_groups if len(g.conditions) == 2]
+        assert len(singles) == 1
+        assert len(multis) == 1
+        assert "|" in singles[0].conditions[0].value  # merged
+        assert multis[0].logic == LogicType.AND
 
 
 class TestOptimizeOrdering:
@@ -279,7 +455,7 @@ class TestOptimizeOrdering:
         """Test single filter ordering."""
         cf = ConsolidatedFilter(
             name="Test",
-            conditions=[],
+            condition_groups=[],
             actions=[FilterAction(type=ActionType.DELETE)]
         )
 
@@ -514,3 +690,90 @@ class TestConsolidationEngine:
         assert report.consolidated_count == 2
         # Delete should come first (higher priority)
         assert consolidated[0].actions[0].type == ActionType.DELETE
+
+    def test_pipeline_preserves_and_logic(self):
+        """Test that the full pipeline preserves AND logic through all strategies."""
+        filters = [
+            ProtonMailFilter(
+                name="AND filter",
+                logic=LogicType.AND,
+                conditions=[
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="alice"),
+                    FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
+                ],
+                actions=[FilterAction(type=ActionType.DELETE)]
+            ),
+            ProtonMailFilter(
+                name="Simple filter",
+                conditions=[
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="bob"),
+                ],
+                actions=[FilterAction(type=ActionType.DELETE)]
+            ),
+        ]
+        engine = ConsolidationEngine()
+
+        consolidated, report = engine.consolidate(filters)
+
+        assert len(consolidated) == 1
+        cf = consolidated[0]
+
+        # The AND group must survive as a separate multi-condition group
+        multi_groups = [g for g in cf.condition_groups if len(g.conditions) == 2]
+        assert len(multi_groups) == 1
+        assert multi_groups[0].logic == LogicType.AND
+
+    def test_pipeline_mixed_and_or_single(self):
+        """Test pipeline with a mix of AND, OR, and single-condition filters."""
+        filters = [
+            # AND filter: must stay as allof
+            ProtonMailFilter(
+                name="AND filter",
+                logic=LogicType.AND,
+                conditions=[
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="alice"),
+                    FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
+                ],
+                actions=[FilterAction(type=ActionType.DELETE)]
+            ),
+            # OR filter: must stay as anyof
+            ProtonMailFilter(
+                name="OR filter",
+                logic=LogicType.OR,
+                conditions=[
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="charlie"),
+                    FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="sale"),
+                ],
+                actions=[FilterAction(type=ActionType.DELETE)]
+            ),
+            # Two single-condition filters that CAN be merged
+            ProtonMailFilter(
+                name="Single 1",
+                conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam1")],
+                actions=[FilterAction(type=ActionType.DELETE)]
+            ),
+            ProtonMailFilter(
+                name="Single 2",
+                conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam2")],
+                actions=[FilterAction(type=ActionType.DELETE)]
+            ),
+        ]
+        engine = ConsolidationEngine()
+
+        consolidated, report = engine.consolidate(filters)
+
+        assert len(consolidated) == 1
+        cf = consolidated[0]
+
+        # Should have: 1 merged single-condition group + 1 AND group + 1 OR group = 3 groups
+        assert len(cf.condition_groups) == 3
+
+        and_groups = [g for g in cf.condition_groups if g.logic == LogicType.AND and len(g.conditions) == 2]
+        or_groups = [g for g in cf.condition_groups if g.logic == LogicType.OR and len(g.conditions) == 2]
+        merged_singles = [g for g in cf.condition_groups if len(g.conditions) == 1 and "|" in g.conditions[0].value]
+
+        assert len(and_groups) == 1
+        assert len(or_groups) == 1
+        assert len(merged_singles) == 1
+        assert "spam1" in merged_singles[0].conditions[0].value
+        assert "spam2" in merged_singles[0].conditions[0].value

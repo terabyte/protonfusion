@@ -5,7 +5,7 @@ from datetime import datetime
 
 from src.models.filter_models import (
     ProtonMailFilter, FilterCondition, FilterAction, ConsolidatedFilter,
-    ConditionType, Operator, ActionType, LogicType,
+    ConditionGroup, ConditionType, Operator, ActionType, LogicType,
 )
 from src.models.backup_models import Backup, BackupMetadata
 
@@ -194,8 +194,7 @@ class TestConsolidatedFilter:
         """Test creating a consolidated filter."""
         cf = ConsolidatedFilter(name="Consolidated")
         assert cf.name == "Consolidated"
-        assert cf.logic == LogicType.OR  # Default for consolidated
-        assert cf.conditions == []
+        assert cf.condition_groups == []
         assert cf.actions == []
         assert cf.source_filters == []
         assert cf.filter_count == 0
@@ -204,10 +203,13 @@ class TestConsolidatedFilter:
         """Test consolidated filter with source tracking."""
         cf = ConsolidatedFilter(
             name="Delete spam (consolidated from 3 filters)",
-            logic=LogicType.OR,
-            conditions=[
-                FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam1"),
-                FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam2"),
+            condition_groups=[
+                ConditionGroup(conditions=[
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam1"),
+                ]),
+                ConditionGroup(conditions=[
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam2"),
+                ]),
             ],
             actions=[
                 FilterAction(type=ActionType.DELETE)
@@ -218,20 +220,44 @@ class TestConsolidatedFilter:
         assert cf.filter_count == 3
         assert len(cf.source_filters) == 3
         assert cf.source_filters == ["Filter 1", "Filter 2", "Filter 3"]
+        assert len(cf.condition_groups) == 2
 
     def test_consolidated_filter_serialization(self):
         """Test consolidated filter serialization."""
         cf = ConsolidatedFilter(
             name="Test",
-            logic=LogicType.OR,
+            condition_groups=[ConditionGroup(
+                logic=LogicType.OR,
+                conditions=[
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test"),
+                ],
+            )],
             source_filters=["A", "B"],
             filter_count=2
         )
         data = cf.model_dump()
         assert data["name"] == "Test"
-        assert data["logic"] == "or"
+        assert data["condition_groups"][0]["logic"] == "or"
         assert data["source_filters"] == ["A", "B"]
         assert data["filter_count"] == 2
+
+    def test_condition_group_model(self):
+        """Test ConditionGroup model."""
+        group = ConditionGroup(
+            logic=LogicType.AND,
+            conditions=[
+                FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="alice"),
+                FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
+            ],
+        )
+        assert group.logic == LogicType.AND
+        assert len(group.conditions) == 2
+
+    def test_condition_group_defaults(self):
+        """Test ConditionGroup default values."""
+        group = ConditionGroup()
+        assert group.logic == LogicType.AND
+        assert group.conditions == []
 
 
 class TestBackupMetadata:

@@ -54,11 +54,25 @@ class ProtonMailFilter(BaseModel):
     actions: List[FilterAction] = Field(default_factory=list)
 
 
-class ConsolidatedFilter(BaseModel):
-    """Optimized filter with source tracking."""
-    name: str
-    logic: LogicType = LogicType.OR
+class ConditionGroup(BaseModel):
+    """A group of conditions from a single original filter, preserving its logic.
+
+    When filters are consolidated, each original filter's conditions become
+    a ConditionGroup. Groups are OR'd together (any group matching triggers
+    the action), while conditions within a group keep their original logic.
+    """
+    logic: LogicType = LogicType.AND
     conditions: List[FilterCondition] = Field(default_factory=list)
+
+
+class ConsolidatedFilter(BaseModel):
+    """Optimized filter with source tracking.
+
+    condition_groups are OR'd together: if any group matches, the actions fire.
+    Each group preserves the original filter's internal logic (AND/OR).
+    """
+    name: str
+    condition_groups: List[ConditionGroup] = Field(default_factory=list)
     actions: List[FilterAction] = Field(default_factory=list)
     source_filters: List[str] = Field(default_factory=list)  # original filter names
     filter_count: int = 0  # how many filters were merged
