@@ -36,8 +36,6 @@ def group_by_action(filters: List[ProtonMailFilter]) -> List[ConsolidatedFilter]
     groups: Dict[str, List[ProtonMailFilter]] = {}
 
     for f in filters:
-        if not f.enabled:
-            continue
         key = _actions_key(f.actions)
         if key not in groups:
             groups[key] = []

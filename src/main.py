@@ -14,7 +14,7 @@ from rich.panel import Panel
 from rich import print as rprint
 
 from src.utils.config import (
-    load_credentials, BACKUPS_DIR, OUTPUT_DIR, TOOL_VERSION,
+    load_credentials, BACKUPS_DIR, OUTPUT_DIR, STATE_DIR, TOOL_VERSION,
 )
 from src.models.filter_models import ProtonMailFilter
 from src.models.backup_models import Backup
@@ -23,6 +23,42 @@ from src.backup.diff_engine import DiffEngine
 from src.parser.filter_parser import parse_scraped_filters
 from src.consolidator.consolidation_engine import ConsolidationEngine
 from src.generator.sieve_generator import SieveGenerator
+
+PENDING_SYNC_PATH = STATE_DIR / "pending-sync.json"
+LAST_SYNC_PATH = STATE_DIR / "last-sync.json"
+
+
+def _load_synced_filter_hashes() -> set[str] | None:
+    """Load filter content hashes from last-sync manifest, if it exists."""
+    if not LAST_SYNC_PATH.exists():
+        return None
+    data = json.loads(LAST_SYNC_PATH.read_text())
+    return set(data.get("filter_hashes", []))
+
+
+def _write_pending_manifest(filters: list, sieve_file: str):
+    """Write pending-sync manifest with content hashes of processed filters."""
+    from datetime import datetime, timezone
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "filter_hashes": sorted(set(f.content_hash for f in filters)),
+        "filter_names": sorted(set(f.name for f in filters)),
+        "filter_count": len(filters),
+        "sieve_file": sieve_file,
+    }
+    PENDING_SYNC_PATH.write_text(json.dumps(manifest, indent=2))
+
+
+def _promote_pending_manifest():
+    """Promote pending-sync.json to last-sync.json after successful sync."""
+    if not PENDING_SYNC_PATH.exists():
+        return False
+    data = PENDING_SYNC_PATH.read_text()
+    LAST_SYNC_PATH.write_text(data)
+    PENDING_SYNC_PATH.unlink()
+    return True
+
 
 app = typer.Typer(
     name="protonfusion",
@@ -228,13 +264,24 @@ def list_backups():
 @app.command()
 def analyze(
     backup_id: str = typer.Option("latest", "--backup", help="Backup identifier (timestamp or 'latest')"),
+    include_disabled: bool = typer.Option(False, "--include-disabled", help="Include disabled filters in analysis"),
 ):
     """Analyze filter patterns and consolidation opportunities."""
     manager = BackupManager()
     bkup = manager.load_backup(backup_id)
 
+    synced_filter_hashes = None
+    if not include_disabled:
+        synced_filter_hashes = _load_synced_filter_hashes()
+        if synced_filter_hashes:
+            console.print(f"[cyan]Including previously synced filters from manifest ({len(synced_filter_hashes)} hashes)")
+
     engine = ConsolidationEngine()
-    stats = engine.analyze(bkup.filters)
+    stats = engine.analyze(
+        bkup.filters,
+        include_disabled=include_disabled,
+        synced_filter_hashes=synced_filter_hashes,
+    )
 
     console.print(Panel(
         f"[bold]Filter Statistics[/]\n\n"
@@ -276,13 +323,24 @@ def analyze(
 def consolidate(
     backup_id: str = typer.Option("latest", "--backup", help="Backup identifier"),
     output_file: str = typer.Option("", "--output", help="Output file for Sieve script"),
+    include_disabled: bool = typer.Option(False, "--include-disabled", help="Include disabled filters in consolidation"),
 ):
     """Generate optimized Sieve script from backup (local only, no ProtonMail changes)."""
     manager = BackupManager()
     bkup = manager.load_backup(backup_id)
 
+    synced_filter_hashes = None
+    if not include_disabled:
+        synced_filter_hashes = _load_synced_filter_hashes()
+        if synced_filter_hashes:
+            console.print(f"[cyan]Including previously synced filters from manifest ({len(synced_filter_hashes)} hashes)")
+
     engine = ConsolidationEngine()
-    consolidated, report = engine.consolidate(bkup.filters)
+    consolidated, report = engine.consolidate(
+        bkup.filters,
+        include_disabled=include_disabled,
+        synced_filter_hashes=synced_filter_hashes,
+    )
 
     generator = SieveGenerator()
     sieve_script = generator.generate(consolidated)
@@ -295,15 +353,27 @@ def consolidate(
     out_path.write_text(sieve_script)
     console.print(f"[green]Sieve script saved to: {out_path}")
 
-    console.print(Panel(
-        f"[bold]Consolidation Report[/]\n\n"
-        f"Original filters: {report.original_count}\n"
-        f"Enabled (processed): {report.enabled_count}\n"
-        f"Disabled (skipped): {report.disabled_skipped}\n"
-        f"Consolidated rules: {report.consolidated_count}\n"
-        f"[bold green]Reduction: {report.reduction_percent:.1f}%[/]",
-        title="Consolidation Complete",
-    ))
+    # Collect all processed filters and write pending manifest
+    all_source_names = set()
+    for cf in consolidated:
+        all_source_names.update(cf.source_filters)
+    processed_filters = [f for f in bkup.filters if f.name in all_source_names]
+    _write_pending_manifest(processed_filters, str(out_path))
+    console.print(f"[cyan]Pending sync manifest written ({len(processed_filters)} filters)")
+
+    # Build report display
+    report_lines = [
+        f"[bold]Consolidation Report[/]\n",
+        f"Original filters: {report.original_count}",
+        f"Processed: {report.enabled_count}",
+        f"Disabled (skipped): {report.disabled_skipped}",
+    ]
+    if report.disabled_included > 0:
+        report_lines.append(f"Disabled (included via manifest): {report.disabled_included}")
+    report_lines.append(f"Consolidated rules: {report.consolidated_count}")
+    report_lines.append(f"[bold green]Reduction: {report.reduction_percent:.1f}%[/]")
+
+    console.print(Panel("\n".join(report_lines), title="Consolidation Complete"))
 
     if len(sieve_script) < 3000:
         console.print(Panel(sieve_script, title="Generated Sieve Script", border_style="blue"))
@@ -444,6 +514,9 @@ def sync(
             console.print("[bold green]Disabling old UI filters...")
             disabled = await sync_client.disable_all_ui_filters()
             console.print(f"[green]Disabled {disabled} filters")
+
+            if _promote_pending_manifest():
+                console.print("[cyan]Sync manifest updated")
 
             console.print(Panel(
                 f"[bold green]Sync complete![/]\n\n"

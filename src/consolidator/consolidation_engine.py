@@ -1,7 +1,7 @@
 """Main consolidation engine that applies strategies to optimize filters."""
 
 import logging
-from typing import List, Dict
+from typing import List, Dict, Optional, Set
 from dataclasses import dataclass, field
 
 from src.models.filter_models import ProtonMailFilter, ConsolidatedFilter
@@ -19,29 +19,64 @@ class ConsolidationReport:
     consolidated_count: int = 0
     enabled_count: int = 0
     disabled_skipped: int = 0
+    disabled_included: int = 0
     groups: Dict[str, int] = field(default_factory=dict)  # action -> count of merged filters
     reduction_percent: float = 0.0
+
+
+def _select_filters(
+    filters: List[ProtonMailFilter],
+    include_disabled: bool = False,
+    synced_filter_hashes: Optional[Set[str]] = None,
+) -> tuple[List[ProtonMailFilter], int, int]:
+    """Select which filters to process based on enabled status and sync manifest.
+
+    Returns (selected_filters, disabled_skipped_count, disabled_included_count).
+    """
+    if include_disabled:
+        return list(filters), 0, sum(1 for f in filters if not f.enabled)
+
+    selected = []
+    disabled_skipped = 0
+    disabled_included = 0
+
+    for f in filters:
+        if f.enabled:
+            selected.append(f)
+        elif synced_filter_hashes and f.content_hash in synced_filter_hashes:
+            selected.append(f)
+            disabled_included += 1
+        else:
+            disabled_skipped += 1
+
+    return selected, disabled_skipped, disabled_included
 
 
 class ConsolidationEngine:
     """Consolidates filters using composable strategies."""
 
-    def consolidate(self, filters: List[ProtonMailFilter]) -> tuple[List[ConsolidatedFilter], ConsolidationReport]:
+    def consolidate(
+        self,
+        filters: List[ProtonMailFilter],
+        include_disabled: bool = False,
+        synced_filter_hashes: Optional[Set[str]] = None,
+    ) -> tuple[List[ConsolidatedFilter], ConsolidationReport]:
         """Apply all consolidation strategies and return optimized filters + report."""
         report = ConsolidationReport()
         report.original_count = len(filters)
 
-        # Count enabled/disabled
-        enabled = [f for f in filters if f.enabled]
-        disabled = [f for f in filters if not f.enabled]
-        report.enabled_count = len(enabled)
-        report.disabled_skipped = len(disabled)
+        selected, disabled_skipped, disabled_included = _select_filters(
+            filters, include_disabled, synced_filter_hashes
+        )
+        report.enabled_count = len(selected)
+        report.disabled_skipped = disabled_skipped
+        report.disabled_included = disabled_included
 
-        logger.info("Starting consolidation: %d total, %d enabled, %d disabled",
-                     len(filters), len(enabled), len(disabled))
+        logger.info("Starting consolidation: %d total, %d selected, %d disabled-skipped, %d disabled-included",
+                     len(filters), len(selected), disabled_skipped, disabled_included)
 
         # Strategy 1: Group by action
-        consolidated = group_by_action(enabled)
+        consolidated = group_by_action(selected)
 
         # Strategy 2: Merge similar conditions
         consolidated = merge_conditions(consolidated)
@@ -66,14 +101,21 @@ class ConsolidationEngine:
 
         return consolidated, report
 
-    def analyze(self, filters: List[ProtonMailFilter]) -> dict:
+    def analyze(
+        self,
+        filters: List[ProtonMailFilter],
+        include_disabled: bool = False,
+        synced_filter_hashes: Optional[Set[str]] = None,
+    ) -> dict:
         """Analyze filters without consolidating. Returns statistics."""
-        enabled = [f for f in filters if f.enabled]
-        disabled = [f for f in filters if not f.enabled]
+        selected, disabled_skipped, disabled_included = _select_filters(
+            filters, include_disabled, synced_filter_hashes
+        )
+        disabled = len(filters) - len(selected)
 
         # Count by action type
         action_counts = {}
-        for f in enabled:
+        for f in selected:
             for action in f.actions:
                 key = action.type.value
                 if action.parameters.get("folder"):
@@ -82,7 +124,7 @@ class ConsolidationEngine:
 
         # Count by condition type
         condition_counts = {}
-        for f in enabled:
+        for f in selected:
             for cond in f.conditions:
                 condition_counts[cond.type.value] = condition_counts.get(cond.type.value, 0) + 1
 
@@ -91,10 +133,11 @@ class ConsolidationEngine:
 
         return {
             "total_filters": len(filters),
-            "enabled": len(enabled),
-            "disabled": len(disabled),
+            "enabled": len(selected),
+            "disabled": disabled,
+            "disabled_included": disabled_included,
             "action_distribution": dict(sorted(action_counts.items(), key=lambda x: -x[1])),
             "condition_distribution": dict(sorted(condition_counts.items(), key=lambda x: -x[1])),
             "consolidation_opportunities": dict(sorted(opportunities.items(), key=lambda x: -x[1])),
-            "potential_reduction": len(enabled) - len(opportunities) if opportunities else 0,
+            "potential_reduction": len(selected) - len(opportunities) if opportunities else 0,
         }

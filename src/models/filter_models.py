@@ -1,3 +1,4 @@
+import hashlib
 from enum import Enum
 from typing import List, Optional
 from pydantic import BaseModel, Field
@@ -52,6 +53,24 @@ class ProtonMailFilter(BaseModel):
     logic: LogicType = LogicType.AND
     conditions: List[FilterCondition] = Field(default_factory=list)
     actions: List[FilterAction] = Field(default_factory=list)
+
+    @property
+    def content_hash(self) -> str:
+        """Content-addressable hash of filter identity (name + logic + conditions + actions).
+
+        Excludes enabled/priority since those don't define the filter's purpose.
+        """
+        parts = [
+            f"name={self.name}",
+            f"logic={self.logic.value}",
+        ]
+        for c in self.conditions:
+            parts.append(f"cond:{c.type.value}|{c.operator.value}|{c.value}")
+        for a in self.actions:
+            params = ",".join(f"{k}={v}" for k, v in sorted(a.parameters.items()))
+            parts.append(f"act:{a.type.value}|{params}")
+        raw = "\n".join(parts)
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 class ConditionGroup(BaseModel):

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 BACKUPS_DIR = PROJECT_ROOT / "backups"
 OUTPUT_DIR = PROJECT_ROOT / "output"
+STATE_DIR = PROJECT_ROOT / "state"
 DEFAULT_CREDENTIALS_FILE = PROJECT_ROOT / ".credentials"
 
 # Tool info
@@ -28,6 +29,7 @@ ELEMENT_TIMEOUT_MS = 10000
 # Ensure directories exist
 BACKUPS_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
+STATE_DIR.mkdir(exist_ok=True)
 
 
 @dataclass

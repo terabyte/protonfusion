@@ -72,8 +72,8 @@ class TestGroupByAction:
 
         assert len(result) == 2
 
-    def test_skip_disabled_filters(self):
-        """Test that disabled filters are skipped."""
+    def test_processes_all_filters_passed_to_it(self):
+        """Test that the strategy processes all filters it receives (filtering is the engine's job)."""
         filters = [
             ProtonMailFilter(
                 name="Enabled",
@@ -92,7 +92,7 @@ class TestGroupByAction:
         result = group_by_action(filters)
 
         assert len(result) == 1
-        assert result[0].source_filters == ["Enabled"]
+        assert set(result[0].source_filters) == {"Enabled", "Disabled"}
 
     def test_group_with_same_folder(self):
         """Test grouping filters with same folder destination."""
@@ -777,3 +777,234 @@ class TestConsolidationEngine:
         assert len(merged_singles) == 1
         assert "spam1" in merged_singles[0].conditions[0].value
         assert "spam2" in merged_singles[0].conditions[0].value
+
+
+class TestDisabledFilterHandling:
+    """Test include_disabled and synced_filter_hashes parameters."""
+
+    def _make_filter(self, name, enabled=True, action_type=ActionType.DELETE):
+        return ProtonMailFilter(
+            name=name,
+            enabled=enabled,
+            conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value=f"{name}@test.com")],
+            actions=[FilterAction(type=action_type)],
+        )
+
+    def test_disabled_skipped_by_default(self):
+        """Default behavior: disabled filters are skipped."""
+        filters = [
+            self._make_filter("Enabled1"),
+            self._make_filter("Enabled2"),
+            self._make_filter("Disabled1", enabled=False),
+        ]
+        engine = ConsolidationEngine()
+
+        consolidated, report = engine.consolidate(filters)
+
+        assert report.original_count == 3
+        assert report.enabled_count == 2
+        assert report.disabled_skipped == 1
+        assert report.disabled_included == 0
+        all_sources = []
+        for cf in consolidated:
+            all_sources.extend(cf.source_filters)
+        assert "Disabled1" not in all_sources
+
+    def test_include_disabled_processes_all(self):
+        """With include_disabled=True, all filters are processed."""
+        filters = [
+            self._make_filter("Enabled1"),
+            self._make_filter("Disabled1", enabled=False),
+            self._make_filter("Disabled2", enabled=False),
+        ]
+        engine = ConsolidationEngine()
+
+        consolidated, report = engine.consolidate(filters, include_disabled=True)
+
+        assert report.enabled_count == 3  # all selected
+        assert report.disabled_skipped == 0
+        assert report.disabled_included == 2
+        all_sources = []
+        for cf in consolidated:
+            all_sources.extend(cf.source_filters)
+        assert "Enabled1" in all_sources
+        assert "Disabled1" in all_sources
+        assert "Disabled2" in all_sources
+
+    def test_synced_hashes_includes_matching_disabled(self):
+        """Disabled filters whose content hashes match the synced set are included."""
+        synced_filter = self._make_filter("SyncedDisabled", enabled=False)
+        filters = [
+            self._make_filter("Enabled1"),
+            synced_filter,
+        ]
+        engine = ConsolidationEngine()
+
+        consolidated, report = engine.consolidate(
+            filters, synced_filter_hashes={synced_filter.content_hash}
+        )
+
+        assert report.enabled_count == 2  # both selected
+        assert report.disabled_skipped == 0
+        assert report.disabled_included == 1
+        all_sources = []
+        for cf in consolidated:
+            all_sources.extend(cf.source_filters)
+        assert "SyncedDisabled" in all_sources
+
+    def test_synced_hashes_ignores_non_matching_disabled(self):
+        """Disabled filters not in the synced set are still skipped."""
+        synced_filter = self._make_filter("SyncedDisabled", enabled=False)
+        filters = [
+            self._make_filter("Enabled1"),
+            synced_filter,
+            self._make_filter("UserDisabled", enabled=False),
+        ]
+        engine = ConsolidationEngine()
+
+        consolidated, report = engine.consolidate(
+            filters, synced_filter_hashes={synced_filter.content_hash}
+        )
+
+        assert report.enabled_count == 2
+        assert report.disabled_skipped == 1
+        assert report.disabled_included == 1
+        all_sources = []
+        for cf in consolidated:
+            all_sources.extend(cf.source_filters)
+        assert "SyncedDisabled" in all_sources
+        assert "UserDisabled" not in all_sources
+
+    def test_synced_hashes_plus_new_enabled(self):
+        """Repeat-use scenario: synced disabled + new enabled all processed."""
+        old_filters = [
+            self._make_filter("Old1", enabled=False),
+            self._make_filter("Old2", enabled=False),
+            self._make_filter("Old3", enabled=False),
+        ]
+        filters = old_filters + [
+            self._make_filter("New1", enabled=True),
+            self._make_filter("New2", enabled=True),
+        ]
+        synced_hashes = {f.content_hash for f in old_filters}
+        engine = ConsolidationEngine()
+
+        consolidated, report = engine.consolidate(
+            filters, synced_filter_hashes=synced_hashes
+        )
+
+        assert report.enabled_count == 5  # all 5 selected
+        assert report.disabled_skipped == 0
+        assert report.disabled_included == 3
+        all_sources = []
+        for cf in consolidated:
+            all_sources.extend(cf.source_filters)
+        assert set(all_sources) == {"Old1", "Old2", "Old3", "New1", "New2"}
+
+    def test_include_disabled_overrides_synced_hashes(self):
+        """include_disabled=True includes everything regardless of synced set."""
+        disabled1 = self._make_filter("Disabled1", enabled=False)
+        filters = [
+            self._make_filter("Enabled1"),
+            disabled1,
+            self._make_filter("Disabled2", enabled=False),
+        ]
+        engine = ConsolidationEngine()
+
+        consolidated, report = engine.consolidate(
+            filters, include_disabled=True, synced_filter_hashes={disabled1.content_hash}
+        )
+
+        assert report.enabled_count == 3
+        assert report.disabled_skipped == 0
+        all_sources = []
+        for cf in consolidated:
+            all_sources.extend(cf.source_filters)
+        assert "Disabled2" in all_sources
+
+    def test_analyze_respects_include_disabled(self):
+        """Analyze method also respects include_disabled flag."""
+        filters = [
+            self._make_filter("Enabled1"),
+            self._make_filter("Disabled1", enabled=False),
+        ]
+        engine = ConsolidationEngine()
+
+        stats = engine.analyze(filters, include_disabled=True)
+
+        assert stats["enabled"] == 2
+        assert stats["disabled"] == 0
+
+    def test_analyze_respects_synced_filter_hashes(self):
+        """Analyze method also respects synced_filter_hashes."""
+        synced_filter = self._make_filter("SyncedDisabled", enabled=False)
+        filters = [
+            self._make_filter("Enabled1"),
+            synced_filter,
+            self._make_filter("UserDisabled", enabled=False),
+        ]
+        engine = ConsolidationEngine()
+
+        stats = engine.analyze(filters, synced_filter_hashes={synced_filter.content_hash})
+
+        assert stats["enabled"] == 2
+        assert stats["disabled"] == 1
+        assert stats["disabled_included"] == 1
+
+    def test_same_name_different_content_distinguished(self):
+        """Two filters with the same name but different conditions have different hashes."""
+        filter_a = ProtonMailFilter(
+            name="Newsletter",
+            enabled=False,
+            conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="news@a.com")],
+            actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "News"})],
+        )
+        filter_b = ProtonMailFilter(
+            name="Newsletter",
+            enabled=False,
+            conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="news@b.com")],
+            actions=[FilterAction(type=ActionType.MARK_READ)],
+        )
+
+        assert filter_a.content_hash != filter_b.content_hash
+
+        # Only filter_a was synced — filter_b should be skipped
+        filters = [filter_a, filter_b]
+        engine = ConsolidationEngine()
+
+        consolidated, report = engine.consolidate(
+            filters, synced_filter_hashes={filter_a.content_hash}
+        )
+
+        assert report.disabled_included == 1
+        assert report.disabled_skipped == 1
+        all_sources = []
+        for cf in consolidated:
+            all_sources.extend(cf.source_filters)
+        # filter_a included, filter_b skipped (both named "Newsletter")
+        assert all_sources.count("Newsletter") == 1
+
+    def test_edited_filter_not_matched(self):
+        """A filter that was synced then edited by the user gets a new hash and is not auto-included."""
+        original = ProtonMailFilter(
+            name="Block spam",
+            enabled=False,
+            conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam@old.com")],
+            actions=[FilterAction(type=ActionType.DELETE)],
+        )
+        edited = ProtonMailFilter(
+            name="Block spam",
+            enabled=False,
+            conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam@new.com")],
+            actions=[FilterAction(type=ActionType.DELETE)],
+        )
+        synced_hashes = {original.content_hash}
+
+        engine = ConsolidationEngine()
+        consolidated, report = engine.consolidate(
+            [edited], synced_filter_hashes=synced_hashes
+        )
+
+        # Edited filter has different hash, should NOT be auto-included
+        assert report.disabled_skipped == 1
+        assert report.disabled_included == 0
