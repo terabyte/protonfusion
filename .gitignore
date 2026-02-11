@@ -1,6 +1,8 @@
-# Backups and outputs (may contain PII)
+# Backups, outputs, and state (may contain PII)
 backups/
 output/
+state/
+*.sieve
 
 # Credentials (CRITICAL - never commit)
 .credentials
