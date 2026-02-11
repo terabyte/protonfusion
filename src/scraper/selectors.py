@@ -62,7 +62,7 @@ CUSTOM_SELECT_BUTTON = 'button.select'
 DROPDOWN_ITEM = 'li.dropdown-item'
 
 # Value input elements within condition rows
-CONDITION_VALUE_TAGS = '[class*="tag"], [class*="chip"], [class*="pill"]'
+CONDITION_VALUE_TAGS = '.condition-token [title]'
 CONDITION_VALUE_INPUT = 'input[type="text"]'
 CONDITION_INSERT_BUTTON = 'button:has-text("Insert")'
 

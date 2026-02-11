@@ -86,6 +86,38 @@ print(f'  Enabled: {bkup.metadata.enabled_count}, Disabled: {bkup.metadata.disab
 print(f'  Checksum valid: {is_valid}')
 assert is_valid, 'Checksum verification failed!'
 assert count >= 1, f'Expected at least 1 filter, got {count}'
+
+# Find the test filter we created and verify every scraped field
+f = next((f for f in bkup.filters if 'E2E' in f.name), None)
+assert f is not None, f'Test filter not found in backup. Filter names: {[x.name for x in bkup.filters]}'
+
+# Name: must match exactly, not fall back to 'Filter N'
+assert f.name == 'E2E Delete spam-offers', f'Name wrong: {f.name!r}'
+print(f'  name: {f.name!r} OK')
+
+# Enabled: created as enabled, must not silently default
+assert f.enabled is True, f'Expected enabled=True, got {f.enabled!r}'
+print(f'  enabled: {f.enabled} OK')
+
+# Logic: created as AND (default), must not be wrong
+assert f.logic.value == 'and', f'Logic wrong: {f.logic.value!r}'
+print(f'  logic: {f.logic.value!r} OK')
+
+# Conditions: exactly 1, with correct type/operator/value
+assert len(f.conditions) == 1, f'Expected 1 condition, got {len(f.conditions)}'
+c = f.conditions[0]
+assert c.type.value == 'sender', f'Condition type wrong: {c.type.value!r}'
+assert c.operator.value == 'contains', f'Condition operator wrong: {c.operator.value!r}'
+assert 'spam-offers@junk.com' in c.value, f'Condition value wrong: {c.value!r}'
+print(f'  condition: {c.type.value} {c.operator.value} {c.value!r} OK')
+
+# Actions: exactly 1 delete action
+assert len(f.actions) >= 1, f'Expected at least 1 action, got {len(f.actions)}'
+a = f.actions[0]
+assert a.type.value == 'delete', f'Action type wrong: {a.type.value!r}'
+print(f'  action: {a.type.value} OK')
+
+print('  All scraped fields verified!')
 "
 echo ""
 
@@ -139,8 +171,12 @@ sieve = Path('output/test_consolidated.sieve').read_text()
 print(f'  Sieve script length: {len(sieve)} chars')
 print(f'  Lines: {len(sieve.splitlines())}')
 
-# Should contain at least one rule (if block or require)
-assert 'if' in sieve.lower() or 'require' in sieve.lower(), 'Sieve script should have rules'
+# Verify the Sieve script contains the actual scraped data, not just structure
+assert 'if ' in sieve, 'Sieve script missing if statement'
+assert 'discard;' in sieve, 'Sieve script missing discard action for delete filter'
+assert 'spam-offers@junk.com' in sieve, 'Sieve script missing condition value - scraper likely returned empty values'
+assert 'From' in sieve, 'Sieve script missing From header for sender condition'
+print('  Sieve content: condition values and actions present')
 
 # Print first 20 lines for inspection
 lines = sieve.splitlines()
