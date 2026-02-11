@@ -22,7 +22,9 @@ class BackupManager:
         self.backups_dir = backups_dir or BACKUPS_DIR
         self.backups_dir.mkdir(parents=True, exist_ok=True)
 
-    def create_backup(self, filters: List[ProtonMailFilter], account_email: str = "") -> Backup:
+    def create_backup(
+        self, filters: List[ProtonMailFilter], account_email: str = "", sieve_script: str = "",
+    ) -> Backup:
         """Create a new backup from a list of filters."""
         now = datetime.now()
 
@@ -41,11 +43,16 @@ class BackupManager:
             timestamp=now,
             metadata=metadata,
             filters=filters,
+            sieve_script=sieve_script,
         )
 
-        # Calculate checksum
-        filters_json = json.dumps([f.model_dump() for f in filters], sort_keys=True, default=str)
-        backup.checksum = "sha256:" + hashlib.sha256(filters_json.encode()).hexdigest()
+        # Calculate checksum (includes sieve_script for integrity)
+        checksum_data = {
+            "filters": [f.model_dump() for f in filters],
+            "sieve_script": sieve_script,
+        }
+        checksum_json = json.dumps(checksum_data, sort_keys=True, default=str)
+        backup.checksum = "sha256:" + hashlib.sha256(checksum_json.encode()).hexdigest()
 
         # Save to file
         filename = now.strftime("%Y-%m-%d_%H-%M-%S") + ".json"
@@ -115,8 +122,12 @@ class BackupManager:
             logger.warning("Backup has no checksum")
             return False
 
-        filters_json = json.dumps([f.model_dump() for f in backup.filters], sort_keys=True, default=str)
-        computed = "sha256:" + hashlib.sha256(filters_json.encode()).hexdigest()
+        checksum_data = {
+            "filters": [f.model_dump() for f in backup.filters],
+            "sieve_script": backup.sieve_script,
+        }
+        checksum_json = json.dumps(checksum_data, sort_keys=True, default=str)
+        computed = "sha256:" + hashlib.sha256(checksum_json.encode()).hexdigest()
 
         is_valid = computed == backup.checksum
         if not is_valid:

@@ -1,6 +1,7 @@
 """Generate Sieve scripts from consolidated filters."""
 
 import logging
+import re
 from typing import List, Set
 
 from src.models.filter_models import (
@@ -9,6 +10,10 @@ from src.models.filter_models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Section markers for coexistence with user's custom Sieve rules
+SECTION_BEGIN = "# === BEGIN ProtonFusion ==="
+SECTION_END = "# === END ProtonFusion ==="
 
 # Sieve extensions needed for various features
 EXTENSION_MAP = {
@@ -214,3 +219,86 @@ class SieveGenerator:
     def _escape_sieve(self, value: str) -> str:
         """Escape special characters for Sieve strings."""
         return value.replace("\\", "\\\\").replace('"', '\\"')
+
+    @staticmethod
+    def parse_require_extensions(script: str) -> Set[str]:
+        """Extract extension names from require lines in a Sieve script."""
+        extensions = set()
+        for match in re.finditer(r'require\s+\[([^\]]+)\]\s*;', script):
+            for ext in re.findall(r'"([^"]+)"', match.group(1)):
+                extensions.add(ext)
+        return extensions
+
+    @staticmethod
+    def strip_require_lines(script: str) -> str:
+        """Remove require statements from a Sieve script."""
+        lines = script.split("\n")
+        filtered = [l for l in lines if not re.match(r'\s*require\s+\[', l)]
+        return "\n".join(filtered)
+
+    @staticmethod
+    def wrap_with_markers(script: str) -> str:
+        """Wrap a script's rules (after stripping require) in section markers."""
+        stripped = SieveGenerator.strip_require_lines(script)
+        # Remove leading/trailing blank lines
+        stripped = stripped.strip("\n")
+        return f"{SECTION_BEGIN}\n{stripped}\n{SECTION_END}"
+
+    @staticmethod
+    def merge_with_existing(generated_script: str, existing_script: str) -> str:
+        """Merge a generated ProtonFusion script with an existing Sieve script.
+
+        Preserves user rules outside the ProtonFusion section markers.
+        Deduplicates require extensions into a single sorted require statement at the top.
+        """
+        if not existing_script or not existing_script.strip():
+            # No existing script — just wrap generated with markers
+            require_exts = SieveGenerator.parse_require_extensions(generated_script)
+            rules = SieveGenerator.strip_require_lines(generated_script).strip("\n")
+            parts = []
+            if require_exts:
+                ext_list = ", ".join(f'"{e}"' for e in sorted(require_exts))
+                parts.append(f"require [{ext_list}];")
+                parts.append("")
+            parts.append(SECTION_BEGIN)
+            parts.append(rules)
+            parts.append(SECTION_END)
+            parts.append("")
+            return "\n".join(parts)
+
+        # Extract user section from existing script (everything outside markers)
+        begin_idx = existing_script.find(SECTION_BEGIN)
+        end_idx = existing_script.find(SECTION_END)
+
+        if begin_idx != -1 and end_idx != -1:
+            # Previous ProtonFusion section exists — replace it
+            before_section = existing_script[:begin_idx]
+            after_section = existing_script[end_idx + len(SECTION_END):]
+            user_section = before_section + after_section
+        else:
+            # No previous markers — entire existing script is user content
+            user_section = existing_script
+
+        # Collect require extensions from both scripts
+        gen_exts = SieveGenerator.parse_require_extensions(generated_script)
+        user_exts = SieveGenerator.parse_require_extensions(user_section)
+        all_exts = gen_exts | user_exts
+
+        # Strip require from both
+        gen_rules = SieveGenerator.strip_require_lines(generated_script).strip("\n")
+        user_rules = SieveGenerator.strip_require_lines(user_section).strip()
+
+        # Build final script
+        parts = []
+        if all_exts:
+            ext_list = ", ".join(f'"{e}"' for e in sorted(all_exts))
+            parts.append(f"require [{ext_list}];")
+            parts.append("")
+        parts.append(SECTION_BEGIN)
+        parts.append(gen_rules)
+        parts.append(SECTION_END)
+        if user_rules:
+            parts.append("")
+            parts.append(user_rules)
+        parts.append("")
+        return "\n".join(parts)

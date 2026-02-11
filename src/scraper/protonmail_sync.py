@@ -6,7 +6,9 @@ from typing import Dict, List, Optional
 from src.scraper import selectors
 from src.scraper.browser import (
     ProtonMailBrowser, MODAL_TRANSITION_MS, DROPDOWN_MS,
+    ALL_SETTINGS_LOAD_MS,
 )
+from src.utils.config import ELEMENT_TIMEOUT_MS
 
 # Maps our model condition types to ProtonMail UI dropdown labels
 CONDITION_TYPE_LABELS = {
@@ -39,35 +41,73 @@ logger = logging.getLogger(__name__)
 class ProtonMailSync(ProtonMailBrowser):
     """Handles sync operations: create/delete/toggle filters, upload Sieve."""
 
-    async def upload_sieve(self, sieve_script: str) -> bool:
-        """Upload a Sieve script to ProtonMail's Sieve editor."""
+    async def upload_sieve(
+        self, sieve_script: str, filter_name: str = "ProtonFusion Consolidated",
+    ) -> bool:
+        """Upload a Sieve script as a named sieve filter.
+
+        Creates a new sieve filter or updates an existing one.
+        Uses CodeMirror 5 JavaScript API for reliable content setting.
+        """
         page = self.page
 
         try:
-            # Click on Sieve editor tab
-            sieve_tab = await page.query_selector(selectors.SIEVE_TAB)
-            if sieve_tab:
-                await sieve_tab.click()
-                await page.wait_for_timeout(MODAL_TRANSITION_MS)
+            # Try to find and edit an existing filter with this name
+            editing_existing = await self._open_sieve_filter_by_name(filter_name)
 
-            # Find the editor
-            editor = await page.query_selector(selectors.SIEVE_EDITOR)
-            if editor:
-                await editor.click()
-                await page.keyboard.press("Control+A")
-                await page.keyboard.press("Delete")
-                await page.wait_for_timeout(DROPDOWN_MS)
+            if not editing_existing:
+                # Create new: click "Add sieve filter"
+                add_btn = await page.query_selector(selectors.ADD_SIEVE_FILTER_BUTTON)
+                if not add_btn or not await add_btn.is_visible():
+                    logger.error(
+                        "'Add sieve filter' button not available. "
+                        "On free tier, delete existing filters first."
+                    )
+                    return False
 
-                if await editor.get_attribute("contenteditable") != "true":
-                    await editor.fill(sieve_script)
-                else:
-                    await page.keyboard.type(sieve_script, delay=1)
+                await add_btn.click()
+                await page.wait_for_timeout(ALL_SETTINGS_LOAD_MS)
 
-                await page.wait_for_timeout(DROPDOWN_MS)
+                # Fill the filter name
+                name_input = await page.query_selector(selectors.SIEVE_FILTER_NAME_INPUT)
+                if name_input:
+                    await name_input.fill(filter_name)
+                    await page.wait_for_timeout(DROPDOWN_MS)
 
-            # Click save
+            # Wait for CodeMirror to initialize
+            try:
+                await page.wait_for_selector(
+                    selectors.SIEVE_EDITOR_CM, timeout=ELEMENT_TIMEOUT_MS,
+                )
+            except Exception:
+                logger.error("CodeMirror editor not found")
+                return False
+
+            # Set content via CodeMirror 5 API (triggers proper change events)
+            await page.evaluate(
+                """(script) => {
+                    const cm = document.querySelector('.CodeMirror');
+                    if (cm && cm.CodeMirror) {
+                        cm.CodeMirror.setValue(script);
+                    }
+                }""",
+                sieve_script,
+            )
+            await page.wait_for_timeout(DROPDOWN_MS)
+
+            # Wait for Save button to become enabled, then click it
             save_btn = await page.query_selector(selectors.SIEVE_SAVE_BUTTON)
             if save_btn:
+                # Wait up to 5s for the button to enable
+                for _ in range(10):
+                    if not await save_btn.is_disabled():
+                        break
+                    await page.wait_for_timeout(500)
+
+                if await save_btn.is_disabled():
+                    logger.warning("Save button still disabled after setting content")
+                    return False
+
                 await save_btn.click()
                 await page.wait_for_timeout(3000)
                 logger.info("Sieve script uploaded successfully")

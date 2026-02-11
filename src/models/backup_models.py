@@ -18,4 +18,5 @@ class Backup(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
     metadata: BackupMetadata = Field(default_factory=BackupMetadata)
     filters: List[ProtonMailFilter] = Field(default_factory=list)
+    sieve_script: str = ""
     checksum: str = ""

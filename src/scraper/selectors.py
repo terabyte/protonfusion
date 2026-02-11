@@ -47,10 +47,15 @@ FILTER_ACTION_FOLDER_ROW = '[data-testid="filter-modal:folder-row"]'
 FILTER_ACTION_LABEL_ROW = '[data-testid="filter-modal:label-row"]'
 FILTER_ACTION_MARK_AS_ROW = '[data-testid="filter-modal:mark-as-row"]'
 
-# Sieve editor
-SIEVE_TAB = '[data-testid*="sieve"], button:has-text("Sieve"), [href*="sieve"]'
-SIEVE_EDITOR = '.cm-content, .CodeMirror, textarea[class*="sieve"], textarea'
-SIEVE_SAVE_BUTTON = '[data-testid*="save"], button:has-text("Save")'
+# Sieve editor modal - opened by "Add sieve filter" button or editing an existing sieve filter
+ADD_SIEVE_FILTER_BUTTON = 'button:has-text("Add sieve filter")'
+SIEVE_EDITOR_CM = '.CodeMirror'  # CodeMirror 5 wrapper (use CM5 JS API to read/write)
+SIEVE_FILTER_NAME_INPUT = '[data-testid="filter-modal:name-input"], input[placeholder="Name"]'
+SIEVE_SAVE_BUTTON = 'button:has-text("Save"), button[type="submit"]'
+
+# Legacy selectors kept for compatibility
+SIEVE_TAB = ADD_SIEVE_FILTER_BUTTON
+SIEVE_EDITOR = '.CodeMirror textarea, textarea'
 
 # Dialogs
 LOADING_SPINNER = '.loading-animation'

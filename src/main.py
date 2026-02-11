@@ -22,7 +22,9 @@ from src.backup.backup_manager import BackupManager
 from src.backup.diff_engine import DiffEngine
 from src.parser.filter_parser import parse_scraped_filters
 from src.consolidator.consolidation_engine import ConsolidationEngine
-from src.generator.sieve_generator import SieveGenerator
+from src.generator.sieve_generator import SieveGenerator, SECTION_BEGIN
+
+SIEVE_FILTER_NAME = "ProtonFusion Consolidated"
 
 PENDING_SYNC_PATH = STATE_DIR / "pending-sync.json"
 LAST_SYNC_PATH = STATE_DIR / "last-sync.json"
@@ -113,21 +115,36 @@ def backup(
             raw_filters = await scraper.scrape_all_filters()
             console.print(f"[green]Scraped {len(raw_filters)} filters")
 
+            with console.status("[bold green]Reading existing Sieve script..."):
+                sieve_script = await scraper.read_sieve_script(
+                    filter_name=SIEVE_FILTER_NAME,
+                )
+
             # Parse filters
             filters = parse_scraped_filters(raw_filters)
 
             # Create backup
             manager = BackupManager()
-            bkup = manager.create_backup(filters)
+            bkup = manager.create_backup(filters, sieve_script=sieve_script)
 
-            console.print(Panel(
-                f"[bold green]Backup created successfully![/]\n\n"
-                f"Filters: {bkup.metadata.filter_count}\n"
-                f"Enabled: {bkup.metadata.enabled_count}\n"
-                f"Disabled: {bkup.metadata.disabled_count}\n"
+            backup_lines = [
+                f"[bold green]Backup created successfully![/]\n",
+                f"Filters: {bkup.metadata.filter_count}",
+                f"Enabled: {bkup.metadata.enabled_count}",
+                f"Disabled: {bkup.metadata.disabled_count}",
                 f"Checksum: {bkup.checksum[:30]}...",
-                title="Backup Complete",
-            ))
+            ]
+            if sieve_script:
+                backup_lines.append(f"\nSieve script captured: {len(sieve_script)} chars")
+                if SECTION_BEGIN not in sieve_script:
+                    backup_lines.append(
+                        "[yellow]Warning: existing script has no ProtonFusion markers.[/]\n"
+                        "[yellow]Running 'sync' will wrap it outside the managed section.[/]"
+                    )
+                preview = "\n".join(sieve_script.split("\n")[:5])
+                backup_lines.append(f"\n[dim]Preview:[/]\n[dim]{preview}[/]")
+
+            console.print(Panel("\n".join(backup_lines), title="Backup Complete"))
         finally:
             await scraper.close()
 
@@ -181,6 +198,10 @@ def show_backup(
     manager = BackupManager()
     bkup = manager.load_backup(backup_id)
     _display_filters(bkup.filters, source=f"backup '{backup_id}'")
+    if bkup.sieve_script:
+        console.print(f"\n[cyan]Backup includes Sieve script ({len(bkup.sieve_script)} chars)")
+        has_markers = SECTION_BEGIN in bkup.sieve_script
+        console.print(f"[cyan]ProtonFusion markers: {'yes' if has_markers else 'no'}")
 
 
 def _display_filters(filters: list, source: str = "ProtonMail account"):
@@ -494,6 +515,18 @@ def sync(
         console.print(Panel("[bold yellow]DRY RUN - No changes will be made"))
         console.print(f"\nWould upload Sieve script ({len(sieve_script)} chars)")
         console.print(f"Would disable {bkup.metadata.enabled_count} UI filters")
+
+        # Show merge preview if backup has an existing sieve script
+        if bkup.sieve_script:
+            merged = SieveGenerator.merge_with_existing(sieve_script, bkup.sieve_script)
+            console.print(f"\n[cyan]Existing Sieve script in backup: {len(bkup.sieve_script)} chars")
+            if SECTION_BEGIN not in bkup.sieve_script:
+                console.print("[yellow]User rules detected — will be preserved outside ProtonFusion section")
+            if len(merged) < 3000:
+                console.print(Panel(merged, title="Merged Script Preview", border_style="cyan"))
+            else:
+                preview = "\n".join(merged.split("\n")[:40])
+                console.print(Panel(preview + "\n...", title="Merged Script Preview (first 40 lines)", border_style="cyan"))
         return
 
     async def _run():
@@ -503,8 +536,24 @@ def sync(
             await sync_client.login()
             await sync_client.navigate_to_filters()
 
-            console.print("[bold green]Uploading Sieve script...")
-            success = await sync_client.upload_sieve(sieve_script)
+            # Read existing script and merge
+            with console.status("[bold green]Reading existing Sieve script..."):
+                existing_script = await sync_client.read_sieve_script(
+                    filter_name=SIEVE_FILTER_NAME,
+                )
+
+            if existing_script:
+                console.print(f"[cyan]Found existing Sieve script ({len(existing_script)} chars)")
+                merged_script = SieveGenerator.merge_with_existing(sieve_script, existing_script)
+                if SECTION_BEGIN not in existing_script:
+                    console.print("[yellow]User rules detected — preserving outside ProtonFusion section")
+            else:
+                merged_script = SieveGenerator.merge_with_existing(sieve_script, "")
+
+            console.print("[bold green]Uploading merged Sieve script...")
+            success = await sync_client.upload_sieve(
+                merged_script, filter_name=SIEVE_FILTER_NAME,
+            )
             if success:
                 console.print("[green]Sieve script uploaded successfully!")
             else:

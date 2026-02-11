@@ -156,6 +156,105 @@ class ProtonMailBrowser:
 
         logger.info("Navigated to filter settings at %s", page.url)
 
+    async def read_sieve_script(self, filter_name: str = "") -> str:
+        """Read an existing Sieve filter's script from ProtonMail.
+
+        If filter_name is provided, looks for that named filter and opens it.
+        Otherwise, opens the "Add sieve filter" modal to read the default content.
+        Returns the script text, or empty string if not found.
+        """
+        page = self.page
+
+        try:
+            opened = False
+
+            if filter_name:
+                opened = await self._open_sieve_filter_by_name(filter_name)
+                if not opened:
+                    logger.info("Sieve filter '%s' not found", filter_name)
+                    return ""
+            else:
+                # Try "Add sieve filter" button (only works if filter slot is available)
+                add_btn = await page.query_selector(selectors.ADD_SIEVE_FILTER_BUTTON)
+                if add_btn and await add_btn.is_visible():
+                    await add_btn.click()
+                    await page.wait_for_timeout(ALL_SETTINGS_LOAD_MS)
+                    opened = True
+                else:
+                    logger.info("No sieve filter to read (Add button not available)")
+                    return ""
+
+            if not opened:
+                return ""
+
+            # Wait for CodeMirror to initialize
+            try:
+                await page.wait_for_selector(
+                    selectors.SIEVE_EDITOR_CM, timeout=ELEMENT_TIMEOUT_MS,
+                )
+            except Exception:
+                logger.warning("CodeMirror editor not found in Sieve modal")
+                return ""
+
+            # Read content via CodeMirror 5 API
+            content = await page.evaluate(
+                "() => { const cm = document.querySelector('.CodeMirror'); "
+                "return cm && cm.CodeMirror ? cm.CodeMirror.getValue() : ''; }"
+            )
+
+            # Close the modal without saving
+            close_btn = await page.query_selector(
+                f'{selectors.FILTER_MODAL_CLOSE}, {selectors.CANCEL_BUTTON}'
+            )
+            if close_btn:
+                await close_btn.click()
+                await page.wait_for_timeout(MODAL_TRANSITION_MS)
+
+            script = (content or "").strip()
+            logger.info(
+                "Read Sieve script: %d chars, %d lines",
+                len(script),
+                script.count("\n") + 1 if script else 0,
+            )
+            return script
+
+        except Exception as e:
+            logger.error("Failed to read Sieve script: %s", e)
+            return ""
+
+    async def _open_sieve_filter_by_name(self, name: str) -> bool:
+        """Find a filter by name in the list and click its Edit button.
+
+        Returns True if the filter was found and the edit modal was opened.
+        """
+        page = self.page
+        rows = await page.query_selector_all(selectors.FILTER_TABLE_ROWS)
+
+        for row in rows:
+            # Check the Edit button aria-label for the name
+            edit_btn = await row.query_selector(selectors.FILTER_EDIT_BUTTON)
+            if edit_btn:
+                aria = await edit_btn.get_attribute("aria-label")
+                if aria and name in aria:
+                    await edit_btn.click()
+                    await page.wait_for_timeout(ALL_SETTINGS_LOAD_MS)
+                    return True
+
+            # Fallback: check cell text
+            tds = await row.query_selector_all("td")
+            for td in tds:
+                text = (await td.inner_text()).strip()
+                if text == name:
+                    edit_btn = await row.query_selector(
+                        f'{selectors.FILTER_EDIT_BUTTON}, {selectors.FILTER_EDIT_BUTTON_ALT}'
+                    )
+                    if edit_btn:
+                        await edit_btn.click()
+                        await page.wait_for_timeout(ALL_SETTINGS_LOAD_MS)
+                        return True
+
+        return False
+
     async def close(self):
         """Close the browser."""
         if self.browser:
