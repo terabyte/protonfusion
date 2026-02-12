@@ -243,6 +243,9 @@ class ProtonMailScraper(ProtonMailBrowser):
             folder_btn = await folder_row.query_selector(selectors.CUSTOM_SELECT_BUTTON)
             if folder_btn:
                 label = await folder_btn.get_attribute("aria-label")
+                # Strip hierarchy bullet prefix (e.g. " • myjunk" -> "myjunk")
+                if label:
+                    label = label.lstrip(" \t•·").strip()
                 if label and label != "Do not move":
                     folder_map = {
                         "Trash": "delete",
