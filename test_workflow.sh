@@ -12,6 +12,9 @@ cd "$(dirname "$0")"
 CREDS=".credentials"
 TOTAL_STEPS=12
 
+# Test isolation: use a temp directory for all snapshot data
+export PROTONFUSION_DATA_DIR=$(mktemp -d)
+
 # Helper: cleanup function to ensure all filters (UI and sieve) are deleted
 cleanup_filters() {
     echo ""
@@ -33,6 +36,7 @@ async def cleanup():
 
 asyncio.run(cleanup())
 " || echo "  WARNING: Cleanup may have failed, check account manually"
+    rm -rf "$PROTONFUSION_DATA_DIR"
 }
 
 # Trap EXIT to always clean up
@@ -69,8 +73,7 @@ echo ""
 # Step 2: Backup - scrape the filter we just created
 echo "[2/${TOTAL_STEPS}] Creating backup of test filters..."
 python -m src.main backup --headless --credentials-file "$CREDS"
-INITIAL_BACKUP=$(ls -t backups/*.json | grep -v latest | head -1)
-echo "  Backup saved: $INITIAL_BACKUP"
+echo "  Backup saved to: $PROTONFUSION_DATA_DIR"
 echo ""
 
 # Step 3: Verify backup has the right number of filters
@@ -121,9 +124,9 @@ print('  All scraped fields verified!')
 "
 echo ""
 
-# Step 4: List backups
-echo "[4/${TOTAL_STEPS}] Listing backups..."
-python -m src.main list-backups
+# Step 4: List snapshots
+echo "[4/${TOTAL_STEPS}] Listing snapshots..."
+python -m src.main list-snapshots
 echo ""
 
 # Step 5: Analyze filters
@@ -133,7 +136,7 @@ echo ""
 
 # Step 6: Consolidate and generate Sieve
 echo "[6/${TOTAL_STEPS}] Consolidating filters and generating Sieve script..."
-python -m src.main consolidate --backup latest --output output/test_consolidated.sieve
+python -m src.main consolidate --backup latest
 echo ""
 
 # Step 7: Verify consolidation round-trip
@@ -165,9 +168,12 @@ echo ""
 # Step 8: Verify Sieve script content
 echo "[8/${TOTAL_STEPS}] Verifying generated Sieve script content..."
 python -c "
-from pathlib import Path
+from src.backup.backup_manager import BackupManager
 
-sieve = Path('output/test_consolidated.sieve').read_text()
+mgr = BackupManager()
+snapshot_dir = mgr.snapshot_dir_for('latest')
+sieve_path = snapshot_dir / 'consolidated.sieve'
+sieve = sieve_path.read_text()
 print(f'  Sieve script length: {len(sieve)} chars')
 print(f'  Lines: {len(sieve.splitlines())}')
 
@@ -177,6 +183,13 @@ assert 'discard;' in sieve, 'Sieve script missing discard action for delete filt
 assert 'spam-offers@junk.com' in sieve, 'Sieve script missing condition value - scraper likely returned empty values'
 assert 'From' in sieve, 'Sieve script missing From header for sender condition'
 print('  Sieve content: condition values and actions present')
+
+# Verify manifest was written
+manifest = mgr.load_manifest(snapshot_dir)
+assert manifest is not None, 'Manifest not found in snapshot'
+assert manifest['filter_count'] >= 1, f'Expected >= 1 filter in manifest, got {manifest[\"filter_count\"]}'
+assert manifest['synced_at'] is None, 'Manifest should not be synced yet'
+print(f'  Manifest: {manifest[\"filter_count\"]} filters, synced_at={manifest[\"synced_at\"]}')
 
 # Print first 20 lines for inspection
 lines = sieve.splitlines()

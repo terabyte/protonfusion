@@ -219,11 +219,11 @@ def raw_filters_list(raw_filter_dict):
 
 
 @pytest.fixture
-def temp_backups_dir(tmp_path):
-    """Temporary directory for backups in tests."""
-    backups_dir = tmp_path / "backups"
-    backups_dir.mkdir()
-    return backups_dir
+def temp_snapshots_dir(tmp_path):
+    """Temporary directory for snapshots in tests."""
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    return snapshots_dir
 
 
 @pytest.fixture

@@ -8,10 +8,12 @@ from dataclasses import dataclass
 
 # Project paths
 PROJECT_ROOT = Path(__file__).parent.parent.parent
-BACKUPS_DIR = PROJECT_ROOT / "backups"
-OUTPUT_DIR = PROJECT_ROOT / "output"
-STATE_DIR = PROJECT_ROOT / "state"
 DEFAULT_CREDENTIALS_FILE = PROJECT_ROOT / ".credentials"
+
+# Snapshot directory (overridable via env var for test isolation)
+_data_dir = os.environ.get("PROTONFUSION_DATA_DIR")
+SNAPSHOTS_DIR = Path(_data_dir) if _data_dir else PROJECT_ROOT / "snapshots"
+SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Tool info
 TOOL_VERSION = "0.1.0"
@@ -25,11 +27,6 @@ PROTONMAIL_SIEVE_URL = "https://mail.proton.me/u/0/settings/filters#sieve"
 LOGIN_TIMEOUT_MS = 120000  # 2 minutes for manual login
 PAGE_LOAD_TIMEOUT_MS = 60000
 ELEMENT_TIMEOUT_MS = 10000
-
-# Ensure directories exist
-BACKUPS_DIR.mkdir(exist_ok=True)
-OUTPUT_DIR.mkdir(exist_ok=True)
-STATE_DIR.mkdir(exist_ok=True)
 
 
 @dataclass

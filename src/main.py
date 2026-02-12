@@ -14,7 +14,7 @@ from rich.panel import Panel
 from rich import print as rprint
 
 from src.utils.config import (
-    load_credentials, BACKUPS_DIR, OUTPUT_DIR, STATE_DIR, TOOL_VERSION,
+    load_credentials, SNAPSHOTS_DIR, TOOL_VERSION,
 )
 from src.models.filter_models import ProtonMailFilter
 from src.models.backup_models import Backup
@@ -25,41 +25,6 @@ from src.consolidator.consolidation_engine import ConsolidationEngine
 from src.generator.sieve_generator import SieveGenerator, SECTION_BEGIN
 
 SIEVE_FILTER_NAME = "ProtonFusion Consolidated"
-
-PENDING_SYNC_PATH = STATE_DIR / "pending-sync.json"
-LAST_SYNC_PATH = STATE_DIR / "last-sync.json"
-
-
-def _load_synced_filter_hashes() -> set[str] | None:
-    """Load filter content hashes from last-sync manifest, if it exists."""
-    if not LAST_SYNC_PATH.exists():
-        return None
-    data = json.loads(LAST_SYNC_PATH.read_text())
-    return set(data.get("filter_hashes", []))
-
-
-def _write_pending_manifest(filters: list, sieve_file: str):
-    """Write pending-sync manifest with content hashes of processed filters."""
-    from datetime import datetime, timezone
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    manifest = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "filter_hashes": sorted(set(f.content_hash for f in filters)),
-        "filter_names": sorted(set(f.name for f in filters)),
-        "filter_count": len(filters),
-        "sieve_file": sieve_file,
-    }
-    PENDING_SYNC_PATH.write_text(json.dumps(manifest, indent=2))
-
-
-def _promote_pending_manifest():
-    """Promote pending-sync.json to last-sync.json after successful sync."""
-    if not PENDING_SYNC_PATH.exists():
-        return False
-    data = PENDING_SYNC_PATH.read_text()
-    LAST_SYNC_PATH.write_text(data)
-    PENDING_SYNC_PATH.unlink()
-    return True
 
 
 app = typer.Typer(
@@ -94,7 +59,7 @@ def backup(
     manual_login: bool = typer.Option(False, "--manual-login", help="Force manual login"),
     output: str = typer.Option("", "--output", help="Custom output path for backup file"),
 ):
-    """Scrape current filters and save to a timestamped backup."""
+    """Scrape current filters and save to a timestamped snapshot."""
     from src.scraper.protonmail_scraper import ProtonMailScraper
 
     creds = _get_credentials(credentials_file, manual_login)
@@ -250,18 +215,18 @@ def _display_filters(filters: list, source: str = "ProtonMail account"):
     console.print(table)
 
 
-@app.command("list-backups")
-def list_backups():
-    """Show all available backups with statistics."""
+@app.command("list-snapshots")
+def list_snapshots():
+    """Show all available snapshots with statistics."""
     manager = BackupManager()
     backups = manager.list_backups()
 
     if not backups:
-        console.print("[yellow]No backups found. Run 'backup' first.")
+        console.print("[yellow]No snapshots found. Run 'backup' first.")
         return
 
-    table = Table(title="Available Backups")
-    table.add_column("Filename", style="cyan")
+    table = Table(title="Available Snapshots")
+    table.add_column("Snapshot", style="cyan")
     table.add_column("Timestamp", style="green")
     table.add_column("Filters", justify="right")
     table.add_column("Enabled", justify="right", style="green")
@@ -271,7 +236,7 @@ def list_backups():
     for b in backups:
         size_kb = b["size_bytes"] / 1024
         table.add_row(
-            b["filename"],
+            b["snapshot"],
             b["timestamp"][:19] if b["timestamp"] else "?",
             str(b["filter_count"]),
             str(b["enabled_count"]),
@@ -280,6 +245,13 @@ def list_backups():
         )
 
     console.print(table)
+
+
+# Keep list-backups as alias
+@app.command("list-backups", hidden=True)
+def list_backups():
+    """Show all available snapshots (alias for list-snapshots)."""
+    list_snapshots()
 
 
 @app.command()
@@ -293,7 +265,7 @@ def analyze(
 
     synced_filter_hashes = None
     if not include_disabled:
-        synced_filter_hashes = _load_synced_filter_hashes()
+        synced_filter_hashes = manager.load_synced_hashes()
         if synced_filter_hashes:
             console.print(f"[cyan]Including previously synced filters from manifest ({len(synced_filter_hashes)} hashes)")
 
@@ -343,16 +315,17 @@ def analyze(
 @app.command()
 def consolidate(
     backup_id: str = typer.Option("latest", "--backup", help="Backup identifier"),
-    output_file: str = typer.Option("", "--output", help="Output file for Sieve script"),
+    output_file: str = typer.Option("", "--output", help="Output file for Sieve script (default: inside snapshot dir)"),
     include_disabled: bool = typer.Option(False, "--include-disabled", help="Include disabled filters in consolidation"),
 ):
     """Generate optimized Sieve script from backup (local only, no ProtonMail changes)."""
     manager = BackupManager()
     bkup = manager.load_backup(backup_id)
+    snapshot_dir = manager.snapshot_dir_for(backup_id)
 
     synced_filter_hashes = None
     if not include_disabled:
-        synced_filter_hashes = _load_synced_filter_hashes()
+        synced_filter_hashes = manager.load_synced_hashes()
         if synced_filter_hashes:
             console.print(f"[cyan]Including previously synced filters from manifest ({len(synced_filter_hashes)} hashes)")
 
@@ -369,18 +342,18 @@ def consolidate(
     if output_file:
         out_path = Path(output_file)
     else:
-        out_path = OUTPUT_DIR / "consolidated.sieve"
+        out_path = snapshot_dir / "consolidated.sieve"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(sieve_script)
     console.print(f"[green]Sieve script saved to: {out_path}")
 
-    # Collect all processed filters and write pending manifest
+    # Collect all processed filters and write manifest into snapshot dir
     all_source_names = set()
     for cf in consolidated:
         all_source_names.update(cf.source_filters)
     processed_filters = [f for f in bkup.filters if f.name in all_source_names]
-    _write_pending_manifest(processed_filters, str(out_path))
-    console.print(f"[cyan]Pending sync manifest written ({len(processed_filters)} filters)")
+    manager.write_manifest(snapshot_dir, processed_filters, str(out_path))
+    console.print(f"[cyan]Manifest written to snapshot ({len(processed_filters)} filters)")
 
     # Build report display
     report_lines = [
@@ -492,7 +465,7 @@ def _display_diff(diff_result, diff_engine: DiffEngine, title: str):
 
 @app.command()
 def sync(
-    sieve_file: str = typer.Option(..., "--sieve", help="Path to Sieve script to upload"),
+    sieve_file: str = typer.Option("", "--sieve", help="Path to Sieve script to upload (default: from snapshot)"),
     backup_id: str = typer.Option("latest", "--backup", help="Backup to reference for disabling filters"),
     headless: bool = typer.Option(False, "--headless", help="Run browser in headless mode"),
     credentials_file: str = typer.Option("", "--credentials-file", help="Credentials file"),
@@ -501,14 +474,23 @@ def sync(
     """Upload Sieve script and disable old UI filters (reversible)."""
     from src.scraper.protonmail_sync import ProtonMailSync
 
-    sieve_path = Path(sieve_file)
+    manager = BackupManager()
+    snapshot_dir = manager.snapshot_dir_for(backup_id)
+
+    # Resolve sieve file: explicit path or auto-discover from snapshot
+    if sieve_file:
+        sieve_path = Path(sieve_file)
+    else:
+        sieve_path = snapshot_dir / "consolidated.sieve"
+
     if not sieve_path.exists():
         console.print(f"[red]Sieve file not found: {sieve_path}")
+        if not sieve_file:
+            console.print("[yellow]Run 'consolidate' first, or provide --sieve explicitly.")
         raise typer.Exit(1)
 
     sieve_script = sieve_path.read_text()
     creds = _get_credentials(credentials_file, False)
-    manager = BackupManager()
     bkup = manager.load_backup(backup_id)
 
     if dry_run:
@@ -564,7 +546,7 @@ def sync(
             disabled = await sync_client.disable_all_ui_filters()
             console.print(f"[green]Disabled {disabled} filters")
 
-            if _promote_pending_manifest():
+            if manager.promote_manifest(snapshot_dir):
                 console.print("[cyan]Sync manifest updated")
 
             console.print(Panel(

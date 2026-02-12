@@ -5,7 +5,7 @@ from pathlib import Path
 
 from src.utils.config import (
     load_credentials, Credentials,
-    BACKUPS_DIR, OUTPUT_DIR, TOOL_VERSION,
+    SNAPSHOTS_DIR, TOOL_VERSION,
     PROTONMAIL_LOGIN_URL, PROTONMAIL_SETTINGS_FILTERS_URL,
 )
 
@@ -126,13 +126,9 @@ class TestCredentialsDataclass:
 class TestConstants:
     """Test configuration constants."""
 
-    def test_backups_dir_exists(self):
-        """Test that BACKUPS_DIR is a Path."""
-        assert isinstance(BACKUPS_DIR, Path)
-
-    def test_output_dir_exists(self):
-        """Test that OUTPUT_DIR is a Path."""
-        assert isinstance(OUTPUT_DIR, Path)
+    def test_snapshots_dir_exists(self):
+        """Test that SNAPSHOTS_DIR is a Path."""
+        assert isinstance(SNAPSHOTS_DIR, Path)
 
     def test_tool_version(self):
         """Test that TOOL_VERSION is set."""
@@ -160,17 +156,10 @@ class TestConstants:
 class TestDirectoryCreation:
     """Test that directories are created on import."""
 
-    def test_backups_dir_created(self):
-        """Test that backups directory exists."""
-        # BACKUPS_DIR should exist after import
-        assert BACKUPS_DIR.exists()
-        assert BACKUPS_DIR.is_dir()
-
-    def test_output_dir_created(self):
-        """Test that output directory exists."""
-        # OUTPUT_DIR should exist after import
-        assert OUTPUT_DIR.exists()
-        assert OUTPUT_DIR.is_dir()
+    def test_snapshots_dir_created(self):
+        """Test that snapshots directory exists."""
+        assert SNAPSHOTS_DIR.exists()
+        assert SNAPSHOTS_DIR.is_dir()
 
 
 class TestPathResolution:
@@ -191,21 +180,15 @@ class TestPathResolution:
         assert isinstance(DEFAULT_CREDENTIALS_FILE, Path)
         assert DEFAULT_CREDENTIALS_FILE.name == ".credentials"
 
-    def test_paths_are_absolute(self):
-        """Test that configured paths are absolute."""
-        assert BACKUPS_DIR.is_absolute()
-        assert OUTPUT_DIR.is_absolute()
+    def test_snapshots_path_is_absolute(self):
+        """Test that snapshots path is absolute."""
+        assert SNAPSHOTS_DIR.is_absolute()
 
-    def test_backups_under_project_root(self):
-        """Test that backups dir is under project root."""
+    def test_snapshots_under_project_root(self):
+        """Test that snapshots dir is under project root (when env var not set)."""
         from src.utils.config import PROJECT_ROOT
+        import os
 
-        # BACKUPS_DIR should be a subdirectory of PROJECT_ROOT
-        assert BACKUPS_DIR.parent == PROJECT_ROOT or PROJECT_ROOT in BACKUPS_DIR.parents
-
-    def test_output_under_project_root(self):
-        """Test that output dir is under project root."""
-        from src.utils.config import PROJECT_ROOT
-
-        # OUTPUT_DIR should be a subdirectory of PROJECT_ROOT
-        assert OUTPUT_DIR.parent == PROJECT_ROOT or PROJECT_ROOT in OUTPUT_DIR.parents
+        # Only check if env var isn't overriding
+        if not os.environ.get("PROTONFUSION_DATA_DIR"):
+            assert SNAPSHOTS_DIR.parent == PROJECT_ROOT or PROJECT_ROOT in SNAPSHOTS_DIR.parents

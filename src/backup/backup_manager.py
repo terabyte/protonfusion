@@ -4,28 +4,28 @@ import hashlib
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
 from src.models.backup_models import Backup, BackupMetadata
 from src.models.filter_models import ProtonMailFilter
-from src.utils.config import BACKUPS_DIR, TOOL_VERSION
+from src.utils.config import SNAPSHOTS_DIR, TOOL_VERSION
 
 logger = logging.getLogger(__name__)
 
 
 class BackupManager:
-    """Manages filter backup files."""
+    """Manages filter backups inside timestamped snapshot directories."""
 
-    def __init__(self, backups_dir: Optional[Path] = None):
-        self.backups_dir = backups_dir or BACKUPS_DIR
-        self.backups_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, snapshots_dir: Optional[Path] = None):
+        self.snapshots_dir = snapshots_dir or SNAPSHOTS_DIR
+        self.snapshots_dir.mkdir(parents=True, exist_ok=True)
 
     def create_backup(
         self, filters: List[ProtonMailFilter], account_email: str = "", sieve_script: str = "",
     ) -> Backup:
-        """Create a new backup from a list of filters."""
+        """Create a new backup inside a timestamped snapshot directory."""
         now = datetime.now()
 
         enabled_count = sum(1 for f in filters if f.enabled)
@@ -54,36 +54,44 @@ class BackupManager:
         checksum_json = json.dumps(checksum_data, sort_keys=True, default=str)
         backup.checksum = "sha256:" + hashlib.sha256(checksum_json.encode()).hexdigest()
 
-        # Save to file
-        filename = now.strftime("%Y-%m-%d_%H-%M-%S") + ".json"
-        filepath = self.backups_dir / filename
+        # Create snapshot subdirectory
+        dirname = now.strftime("%Y-%m-%d_%H-%M-%S")
+        snapshot_dir = self.snapshots_dir / dirname
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
 
+        # Save backup.json inside the snapshot dir
+        filepath = snapshot_dir / "backup.json"
         with open(filepath, "w") as f:
             json.dump(backup.model_dump(), f, indent=2, default=str)
 
-        # Update latest symlink
-        latest_link = self.backups_dir / "latest.json"
+        # Update latest symlink at snapshots/latest -> dirname
+        latest_link = self.snapshots_dir / "latest"
         if latest_link.exists() or latest_link.is_symlink():
             latest_link.unlink()
-        latest_link.symlink_to(filename)
+        latest_link.symlink_to(dirname)
 
-        logger.info("Backup created: %s (%d filters)", filepath, len(filters))
+        logger.info("Backup created: %s (%d filters)", snapshot_dir, len(filters))
         return backup
+
+    def snapshot_dir_for(self, identifier: str = "latest") -> Path:
+        """Resolve a snapshot identifier to its directory path."""
+        if identifier == "latest":
+            latest_link = self.snapshots_dir / "latest"
+            if not latest_link.exists():
+                raise FileNotFoundError("No latest snapshot found. Run 'backup' first.")
+            return latest_link.resolve()
+        # Try as a timestamp dirname
+        candidate = self.snapshots_dir / identifier
+        if candidate.is_dir():
+            return candidate
+        raise FileNotFoundError(f"Snapshot not found: {identifier}")
 
     def load_backup(self, identifier: str = "latest") -> Backup:
         """Load a backup by timestamp or 'latest'."""
-        if identifier == "latest":
-            filepath = self.backups_dir / "latest.json"
-            if not filepath.exists():
-                raise FileNotFoundError("No latest backup found. Run 'backup' first.")
-        else:
-            # Try as filename
-            filepath = Path(identifier)
-            if not filepath.exists():
-                # Try as timestamp in backups dir
-                filepath = self.backups_dir / f"{identifier}.json"
-            if not filepath.exists():
-                raise FileNotFoundError(f"Backup not found: {identifier}")
+        snapshot_dir = self.snapshot_dir_for(identifier)
+        filepath = snapshot_dir / "backup.json"
+        if not filepath.exists():
+            raise FileNotFoundError(f"No backup.json in snapshot: {snapshot_dir}")
 
         with open(filepath, "r") as f:
             data = json.load(f)
@@ -93,26 +101,29 @@ class BackupManager:
         return backup
 
     def list_backups(self) -> List[dict]:
-        """List all available backups with metadata."""
+        """List all available snapshots with metadata."""
         backups = []
 
-        for filepath in sorted(self.backups_dir.glob("*.json")):
-            if filepath.name == "latest.json":
+        for entry in sorted(self.snapshots_dir.iterdir()):
+            if entry.name == "latest" or not entry.is_dir():
+                continue
+            backup_file = entry / "backup.json"
+            if not backup_file.exists():
                 continue
             try:
-                with open(filepath, "r") as f:
+                with open(backup_file, "r") as f:
                     data = json.load(f)
                 backups.append({
-                    "filename": filepath.name,
-                    "path": str(filepath),
+                    "snapshot": entry.name,
+                    "path": str(entry),
                     "timestamp": data.get("timestamp", ""),
                     "filter_count": data.get("metadata", {}).get("filter_count", 0),
                     "enabled_count": data.get("metadata", {}).get("enabled_count", 0),
                     "disabled_count": data.get("metadata", {}).get("disabled_count", 0),
-                    "size_bytes": filepath.stat().st_size,
+                    "size_bytes": backup_file.stat().st_size,
                 })
             except Exception as e:
-                logger.warning("Failed to read backup %s: %s", filepath, e)
+                logger.warning("Failed to read snapshot %s: %s", entry, e)
 
         return backups
 
@@ -135,15 +146,57 @@ class BackupManager:
         return is_valid
 
     def delete_backup(self, identifier: str) -> bool:
-        """Delete a backup file."""
-        filepath = self.backups_dir / f"{identifier}.json"
-        if not filepath.exists():
-            filepath = Path(identifier)
-
-        if filepath.exists():
-            filepath.unlink()
-            logger.info("Deleted backup: %s", filepath)
+        """Delete a snapshot directory."""
+        import shutil
+        candidate = self.snapshots_dir / identifier
+        if candidate.is_dir():
+            shutil.rmtree(candidate)
+            logger.info("Deleted snapshot: %s", candidate)
             return True
-
-        logger.warning("Backup not found: %s", identifier)
+        logger.warning("Snapshot not found: %s", identifier)
         return False
+
+    # --- Manifest methods ---
+
+    def write_manifest(self, snapshot_dir: Path, filters: list, sieve_file: str):
+        """Write manifest.json into a snapshot directory."""
+        manifest = {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "filter_hashes": sorted(set(f.content_hash for f in filters)),
+            "filter_names": sorted(set(f.name for f in filters)),
+            "filter_count": len(filters),
+            "sieve_file": sieve_file,
+            "synced_at": None,
+        }
+        manifest_path = snapshot_dir / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+        logger.info("Manifest written: %s (%d filters)", manifest_path, len(filters))
+
+    def load_manifest(self, snapshot_dir: Path) -> Optional[dict]:
+        """Load manifest.json from a snapshot directory."""
+        manifest_path = snapshot_dir / "manifest.json"
+        if not manifest_path.exists():
+            return None
+        return json.loads(manifest_path.read_text())
+
+    def promote_manifest(self, snapshot_dir: Path) -> bool:
+        """Mark a manifest as synced by setting synced_at."""
+        manifest = self.load_manifest(snapshot_dir)
+        if manifest is None:
+            return False
+        manifest["synced_at"] = datetime.now(timezone.utc).isoformat()
+        manifest_path = snapshot_dir / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+        logger.info("Manifest promoted (synced): %s", manifest_path)
+        return True
+
+    def load_synced_hashes(self) -> Optional[set]:
+        """Load filter content hashes from the latest synced manifest."""
+        # Walk snapshots in reverse chronological order, find latest synced one
+        for entry in sorted(self.snapshots_dir.iterdir(), reverse=True):
+            if entry.name == "latest" or not entry.is_dir():
+                continue
+            manifest = self.load_manifest(entry)
+            if manifest and manifest.get("synced_at"):
+                return set(manifest.get("filter_hashes", []))
+        return None

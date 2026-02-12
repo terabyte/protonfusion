@@ -1,8 +1,5 @@
-# Backups, outputs, and state (may contain PII)
-backups/
-output/
-state/
-*.sieve
+# Snapshots (backups, sieve output, sync state - may contain PII)
+snapshots/
 
 # Credentials (CRITICAL - never commit)
 .credentials
