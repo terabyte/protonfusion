@@ -27,25 +27,34 @@ class ProtonMailScraper(ProtonMailBrowser):
     """Scrapes filters from ProtonMail settings UI (read-only)."""
 
     async def scrape_all_filters(self) -> List[dict]:
-        """Scrape all filters from the settings page.
+        """Scrape all filters from the Custom filters section only.
 
         Returns list of dicts with filter data. Each dict has:
         - name: str
         - enabled: bool
         - conditions: list of dicts
         - actions: list of dicts
+
+        Raises RuntimeError if the expected page structure is not found.
         """
         page = self.page
         filters = []
 
-        filter_items = await page.query_selector_all(selectors.FILTER_TABLE_ROWS)
-        total = len(filter_items)
-        logger.info("Found %d filter items", total)
+        # --- Layout assertions: fail loudly if structure changed ---
+        await self._assert_filter_page_structure()
 
-        if total == 0:
-            filter_items = await page.query_selector_all(selectors.FILTER_TABLE_ROWS_FALLBACK)
-            total = len(filter_items)
-            logger.info("Retry found %d filter items", total)
+        # Scope to the Custom filters section only (not Spam/Allow lists)
+        section = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
+        if not section:
+            raise RuntimeError(
+                "Could not find Custom filters section. "
+                "Expected <section> containing h2 'Custom filters'. "
+                "ProtonMail may have changed their UI layout."
+            )
+
+        filter_items = await section.query_selector_all(selectors.FILTER_TABLE_ROWS)
+        total = len(filter_items)
+        logger.info("Found %d filter items in Custom filters section", total)
 
         for idx, item in enumerate(filter_items):
             try:
@@ -57,6 +66,46 @@ class ProtonMailScraper(ProtonMailBrowser):
                 logger.warning("Failed to scrape filter %d: %s", idx, e)
 
         return filters
+
+    async def _assert_filter_page_structure(self):
+        """Assert that the filter settings page has the expected structure.
+
+        Fails loudly if ProtonMail changed their UI, rather than silently
+        scraping the wrong data.
+        """
+        page = self.page
+
+        # Page heading
+        h1 = await page.query_selector(selectors.PAGE_HEADING)
+        if not h1:
+            raise RuntimeError("Filter page missing <h1> heading. URL: " + page.url)
+        h1_text = (await h1.inner_text()).strip()
+        if h1_text != "Filters":
+            raise RuntimeError(
+                f"Expected h1 'Filters', got {h1_text!r}. "
+                "ProtonMail may have changed their settings page."
+            )
+
+        # Custom filters section heading
+        custom_h2 = await page.query_selector(selectors.CUSTOM_FILTERS_HEADING)
+        if not custom_h2:
+            raise RuntimeError(
+                "Missing 'Custom filters' heading on filters page. "
+                "ProtonMail may have changed their UI layout."
+            )
+
+        # Spam/allow section heading (must exist so we know we're scoping correctly)
+        spam_h2 = await page.query_selector(selectors.SPAM_LISTS_HEADING)
+        if not spam_h2:
+            raise RuntimeError(
+                "Missing 'Spam, block, and allow lists' heading on filters page. "
+                "ProtonMail may have changed their UI layout."
+            )
+
+        # Add filter button
+        add_btn = await page.query_selector(selectors.ADD_FILTER_BUTTON)
+        if not add_btn:
+            logger.warning("'Add filter' button not found (may be hidden on free tier)")
 
     async def _scrape_single_filter(self, item, idx: int) -> Optional[dict]:
         """Scrape a single filter item from the list."""

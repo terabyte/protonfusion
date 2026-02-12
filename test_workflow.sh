@@ -10,7 +10,7 @@ echo ""
 cd "$(dirname "$0")"
 
 CREDS=".credentials"
-TOTAL_STEPS=12
+TOTAL_STEPS=13
 
 # Test isolation: use a temp directory for all snapshot data
 export PROTONFUSION_DATA_DIR=$(mktemp -d)
@@ -70,14 +70,128 @@ asyncio.run(create_test_filter())
 "
 echo ""
 
-# Step 2: Backup - scrape the filter we just created
-echo "[2/${TOTAL_STEPS}] Creating backup of test filters..."
+# Step 2: Validate page layout assumptions
+echo "[2/${TOTAL_STEPS}] Validating ProtonMail filter page layout..."
+python -c "
+import asyncio
+from src.utils.config import load_credentials
+from src.scraper.protonmail_scraper import ProtonMailScraper
+from src.scraper import selectors
+
+async def validate_layout():
+    creds = load_credentials('${CREDS}')
+    scraper = ProtonMailScraper(headless=True, credentials=creds)
+    await scraper.initialize()
+    await scraper.login()
+    await scraper.navigate_to_filters()
+    page = scraper.page
+
+    # 1. Page heading must be 'Filters'
+    h1 = await page.query_selector(selectors.PAGE_HEADING)
+    assert h1, 'LAYOUT CHANGE: Missing <h1> heading'
+    h1_text = (await h1.inner_text()).strip()
+    assert h1_text == 'Filters', f'LAYOUT CHANGE: h1 is {h1_text!r}, expected Filters'
+    print('  h1 heading: OK')
+
+    # 2. 'Custom filters' section heading must exist
+    custom_h2 = await page.query_selector(selectors.CUSTOM_FILTERS_HEADING)
+    assert custom_h2, 'LAYOUT CHANGE: Missing Custom filters h2'
+    print('  Custom filters heading: OK')
+
+    # 3. 'Spam, block, and allow lists' section heading must exist
+    spam_h2 = await page.query_selector(selectors.SPAM_LISTS_HEADING)
+    assert spam_h2, 'LAYOUT CHANGE: Missing Spam/block/allow lists h2'
+    print('  Spam/block/allow heading: OK')
+
+    # 4. Sections are wrapped in <section> elements
+    custom_section = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
+    assert custom_section, 'LAYOUT CHANGE: Custom filters not inside <section> element'
+    section_tag = await custom_section.evaluate('el => el.tagName')
+    assert section_tag == 'SECTION', f'LAYOUT CHANGE: expected SECTION, got {section_tag}'
+    print('  Custom filters in <section>: OK')
+
+    # 5. Filter table exists inside Custom filters section (we created one in step 1)
+    table = await custom_section.query_selector(selectors.FILTER_TABLE)
+    assert table, 'LAYOUT CHANGE: No table.simple-table inside Custom filters section'
+    table_cls = await table.get_attribute('class')
+    assert 'simple-table' in table_cls, f'LAYOUT CHANGE: table class is {table_cls!r}'
+    print('  Filter table (table.simple-table): OK')
+
+    # 6. Filter row exists with expected structure
+    rows = await custom_section.query_selector_all(selectors.FILTER_TABLE_ROWS)
+    assert len(rows) == 1, f'LAYOUT CHANGE: expected 1 filter row, got {len(rows)}'
+    row = rows[0]
+    print(f'  Filter rows in Custom section: {len(rows)} OK')
+
+    # 7. Row has Edit button with aria-label containing filter name
+    edit_btn = await row.query_selector(selectors.FILTER_EDIT_BUTTON)
+    assert edit_btn, 'LAYOUT CHANGE: No button[aria-label*=Edit filter] in filter row'
+    aria = await edit_btn.get_attribute('aria-label')
+    assert aria and 'E2E Delete spam-offers' in aria, f'LAYOUT CHANGE: Edit aria-label is {aria!r}'
+    print(f'  Edit button aria-label: OK ({aria!r})')
+
+    # 8. Row has toggle checkbox
+    toggle = await row.query_selector(selectors.FILTER_TOGGLE)
+    assert toggle, 'LAYOUT CHANGE: No toggle checkbox in filter row'
+    print('  Toggle checkbox: OK')
+
+    # 9. Edit button opens wizard with Name step
+    await edit_btn.click()
+    await page.wait_for_timeout(1500)
+    name_input = await page.query_selector(selectors.FILTER_MODAL_NAME)
+    assert name_input, 'LAYOUT CHANGE: Edit wizard missing name input'
+    next_btn = await page.query_selector(selectors.FILTER_MODAL_NEXT)
+    assert next_btn, 'LAYOUT CHANGE: Edit wizard missing Next button'
+    print('  Edit wizard Name step: OK')
+
+    # 10. Next goes to Conditions step
+    await next_btn.click()
+    await page.wait_for_timeout(1500)
+    cond_rows = await page.query_selector_all(selectors.FILTER_CONDITION_ROWS)
+    assert len(cond_rows) >= 1, f'LAYOUT CHANGE: Conditions step has {len(cond_rows)} rows'
+    # Check condition row has dropdown buttons
+    select_btns = await cond_rows[0].query_selector_all(selectors.CUSTOM_SELECT_BUTTON)
+    assert len(select_btns) >= 2, f'LAYOUT CHANGE: Condition row has {len(select_btns)} select buttons, expected >= 2'
+    print(f'  Conditions step: {len(cond_rows)} rows, {len(select_btns)} select buttons: OK')
+
+    # 11. Next goes to Actions step
+    next_btn = await page.query_selector(selectors.FILTER_MODAL_NEXT)
+    assert next_btn, 'LAYOUT CHANGE: No Next button on Conditions step'
+    await next_btn.click()
+    await page.wait_for_timeout(1500)
+    folder_row = await page.query_selector(selectors.FILTER_ACTION_FOLDER_ROW)
+    assert folder_row, 'LAYOUT CHANGE: Actions step missing folder row'
+    print('  Actions step: OK')
+
+    # Close modal
+    close_btn = await page.query_selector(selectors.FILTER_MODAL_CLOSE)
+    if close_btn:
+        await close_btn.click()
+        await page.wait_for_timeout(500)
+
+    # 12. Sieve filter button exists
+    sieve_btn = await page.query_selector(selectors.ADD_SIEVE_FILTER_BUTTON)
+    # On free tier with 1 filter, this may be hidden
+    if sieve_btn and await sieve_btn.is_visible():
+        print('  Add sieve filter button: visible')
+    else:
+        print('  Add sieve filter button: hidden (free tier with filter, expected)')
+
+    print('  All layout assertions passed!')
+    await scraper.close()
+
+asyncio.run(validate_layout())
+"
+echo ""
+
+# Step 3: Backup - scrape the filter we just created
+echo "[3/${TOTAL_STEPS}] Creating backup of test filters..."
 python -m src.main backup --headless --credentials-file "$CREDS"
 echo "  Backup saved to: $PROTONFUSION_DATA_DIR"
 echo ""
 
-# Step 3: Verify backup has the right number of filters
-echo "[3/${TOTAL_STEPS}] Verifying backup integrity..."
+# Step 4: Verify backup has the right number of filters
+echo "[4/${TOTAL_STEPS}] Verifying backup integrity..."
 python -c "
 from src.backup.backup_manager import BackupManager
 mgr = BackupManager()
@@ -124,23 +238,23 @@ print('  All scraped fields verified!')
 "
 echo ""
 
-# Step 4: List snapshots
-echo "[4/${TOTAL_STEPS}] Listing snapshots..."
+# Step 5: List snapshots
+echo "[5/${TOTAL_STEPS}] Listing snapshots..."
 python -m src.main list-snapshots
 echo ""
 
-# Step 5: Analyze filters
-echo "[5/${TOTAL_STEPS}] Analyzing filters..."
+# Step 6: Analyze filters
+echo "[6/${TOTAL_STEPS}] Analyzing filters..."
 python -m src.main analyze --backup latest
 echo ""
 
-# Step 6: Consolidate and generate Sieve
-echo "[6/${TOTAL_STEPS}] Consolidating filters and generating Sieve script..."
+# Step 7: Consolidate and generate Sieve
+echo "[7/${TOTAL_STEPS}] Consolidating filters and generating Sieve script..."
 python -m src.main consolidate --backup latest
 echo ""
 
-# Step 7: Verify consolidation round-trip
-echo "[7/${TOTAL_STEPS}] Verifying consolidation round-trip..."
+# Step 8: Verify consolidation round-trip
+echo "[8/${TOTAL_STEPS}] Verifying consolidation round-trip..."
 python -c "
 from src.backup.backup_manager import BackupManager
 from src.consolidator.consolidation_engine import ConsolidationEngine
@@ -165,8 +279,8 @@ print('  Round-trip assertions passed!')
 "
 echo ""
 
-# Step 8: Verify Sieve script content
-echo "[8/${TOTAL_STEPS}] Verifying generated Sieve script content..."
+# Step 9: Verify Sieve script content
+echo "[9/${TOTAL_STEPS}] Verifying generated Sieve script content..."
 python -c "
 from src.backup.backup_manager import BackupManager
 
@@ -203,8 +317,8 @@ print('  Sieve content verification passed!')
 "
 echo ""
 
-# Step 9: Delete test filter to free up slot, then test Sieve upload and read-back
-echo "[9/${TOTAL_STEPS}] Testing Sieve script upload and read-back..."
+# Step 10: Delete test filter to free up slot, then test Sieve upload and read-back
+echo "[10/${TOTAL_STEPS}] Testing Sieve script upload and read-back..."
 echo "  (Deleting UI filter first to free free-tier filter slot)"
 python -c "
 import asyncio
@@ -252,8 +366,8 @@ asyncio.run(test_sieve_round_trip())
 "
 echo ""
 
-# Step 10: Test merge_with_existing preserves user rules across re-syncs
-echo "[10/${TOTAL_STEPS}] Testing Sieve merge with section markers..."
+# Step 11: Test merge_with_existing preserves user rules across re-syncs
+echo "[11/${TOTAL_STEPS}] Testing Sieve merge with section markers..."
 python -c "
 import asyncio
 from src.utils.config import load_credentials
@@ -322,8 +436,8 @@ asyncio.run(test_merge_and_upload())
 "
 echo ""
 
-# Step 11: Verify backup captures sieve_script from named filter
-echo "[11/${TOTAL_STEPS}] Verifying backup captures Sieve script..."
+# Step 12: Verify backup captures sieve_script from named filter
+echo "[12/${TOTAL_STEPS}] Verifying backup captures Sieve script..."
 python -c "
 import asyncio
 from src.utils.config import load_credentials
@@ -351,8 +465,8 @@ asyncio.run(test_backup_sieve())
 "
 echo ""
 
-# Step 12: Run unit tests
-echo "[12/${TOTAL_STEPS}] Running unit tests..."
+# Step 13: Run unit tests
+echo "[13/${TOTAL_STEPS}] Running unit tests..."
 python -m pytest tests/ -v --tb=short 2>&1 | tail -30
 echo ""
 

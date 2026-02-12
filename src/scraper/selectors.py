@@ -19,14 +19,18 @@ FILTERS_NAV_LINK = 'a[href="/u/0/mail/filters"]'
 COMPOSE_BUTTON = '[data-testid="sidebar:compose"]'
 
 # Filter list page (account.proton.me/u/0/mail/filters)
+# Page structure: two <section> blocks, each with an <h2>.
+#   Section 1: h2 "Custom filters"   -> user-created filters (table.simple-table)
+#   Section 2: h2 "Spam, block, and allow lists" -> spam/allow entries
+# We must only scrape from section 1.
+PAGE_HEADING = '.container-section-sticky h1'  # should say "Filters"
+CUSTOM_FILTERS_HEADING = 'h2:has-text("Custom filters")'
+SPAM_LISTS_HEADING = 'h2:has-text("Spam, block, and allow lists")'
+CUSTOM_FILTERS_SECTION = 'section:has(h2:has-text("Custom filters"))'
 ADD_FILTER_BUTTON = 'button:has-text("Add filter")'
 FILTER_ACTIONS_DROPDOWN = '[data-testid="dropdownActions:dropdown"]'
+FILTER_TABLE = 'table.simple-table'
 FILTER_TABLE_ROWS = 'table.simple-table tbody tr'
-FILTER_TABLE_ROWS_FALLBACK = (
-    '[class*="filter"] [class*="item"], '
-    '[class*="filters-list"] > div, '
-    '.item-container'
-)
 FILTER_EDIT_BUTTON = 'button[aria-label*="Edit filter"]'
 FILTER_EDIT_BUTTON_ALT = 'button:has-text("Edit")'
 FILTER_TOGGLE = 'input[type="checkbox"], .toggle-label input'

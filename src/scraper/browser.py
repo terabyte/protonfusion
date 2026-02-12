@@ -226,9 +226,14 @@ class ProtonMailBrowser:
         """Find a filter by name in the list and click its Edit button.
 
         Returns True if the filter was found and the edit modal was opened.
+        Scoped to the Custom filters section only.
         """
         page = self.page
-        rows = await page.query_selector_all(selectors.FILTER_TABLE_ROWS)
+        section = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
+        if not section:
+            logger.warning("Custom filters section not found")
+            return False
+        rows = await section.query_selector_all(selectors.FILTER_TABLE_ROWS)
 
         for row in rows:
             # Check the Edit button aria-label for the name
