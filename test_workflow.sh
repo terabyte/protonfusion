@@ -130,10 +130,12 @@ async def validate_layout():
     assert aria and 'E2E Delete spam-offers' in aria, f'LAYOUT CHANGE: Edit aria-label is {aria!r}'
     print(f'  Edit button aria-label: OK ({aria!r})')
 
-    # 8. Row has toggle checkbox
+    # 8. Row has toggle checkbox and clickable label
     toggle = await row.query_selector(selectors.FILTER_TOGGLE)
     assert toggle, 'LAYOUT CHANGE: No toggle checkbox in filter row'
-    print('  Toggle checkbox: OK')
+    toggle_label = await row.query_selector(selectors.FILTER_TOGGLE_LABEL)
+    assert toggle_label, 'LAYOUT CHANGE: No toggle label[data-testid=toggle-switch] in filter row'
+    print('  Toggle checkbox + label: OK')
 
     # 9. Edit button opens wizard with Name step
     await edit_btn.click()

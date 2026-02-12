@@ -35,6 +35,7 @@ FILTER_TABLE_ROWS = 'table.simple-table tbody tr'
 FILTER_EDIT_BUTTON = 'button[aria-label*="Edit filter"]'
 FILTER_EDIT_BUTTON_ALT = 'button:has-text("Edit")'
 FILTER_TOGGLE = 'input[type="checkbox"], .toggle-label input'
+FILTER_TOGGLE_LABEL = 'label[data-testid="toggle-switch"]'
 FILTER_NAME_FALLBACK = '.text-ellipsis, [title], span'
 
 # Filter creation wizard - Name step

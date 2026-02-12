@@ -298,16 +298,21 @@ class ProtonMailSync(ProtonMailBrowser):
     async def _set_filter_toggle(self, name: str, enabled: bool) -> bool:
         """Set a filter's toggle state by finding the row with the given name."""
         page = self.page
-        rows = await page.query_selector_all(selectors.FILTER_TABLE_ROWS)
+        section = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
+        if not section:
+            logger.warning("Custom filters section not found")
+            return False
+        rows = await section.query_selector_all(selectors.FILTER_TABLE_ROWS)
 
         for row in rows:
             row_name = await self._get_filter_name(row)
             if row_name == name:
-                toggle = await row.query_selector(selectors.FILTER_TOGGLE)
-                if toggle:
-                    is_checked = await toggle.is_checked()
+                toggle_input = await row.query_selector(selectors.FILTER_TOGGLE)
+                toggle_label = await row.query_selector(selectors.FILTER_TOGGLE_LABEL)
+                if toggle_input and toggle_label:
+                    is_checked = await toggle_input.is_checked()
                     if is_checked != enabled:
-                        await toggle.click()
+                        await toggle_label.click()
                         await page.wait_for_timeout(1000)
                         logger.info("%s filter: %s", "Enabled" if enabled else "Disabled", name)
                     else:
@@ -321,12 +326,17 @@ class ProtonMailSync(ProtonMailBrowser):
         """Disable all enabled filters. Returns count disabled."""
         page = self.page
         disabled = 0
-        rows = await page.query_selector_all(selectors.FILTER_TABLE_ROWS)
+        section = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
+        if not section:
+            logger.warning("Custom filters section not found")
+            return 0
+        rows = await section.query_selector_all(selectors.FILTER_TABLE_ROWS)
 
         for row in rows:
-            toggle = await row.query_selector(selectors.FILTER_TOGGLE)
-            if toggle and await toggle.is_checked():
-                await toggle.click()
+            toggle_input = await row.query_selector(selectors.FILTER_TOGGLE)
+            toggle_label = await row.query_selector(selectors.FILTER_TOGGLE_LABEL)
+            if toggle_input and toggle_label and await toggle_input.is_checked():
+                await toggle_label.click()
                 await page.wait_for_timeout(1000)
                 disabled += 1
 
