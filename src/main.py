@@ -90,7 +90,11 @@ def backup(
 
             # Create backup
             manager = BackupManager()
-            bkup = manager.create_backup(filters, sieve_script=sieve_script)
+            bkup = manager.create_backup(
+                filters,
+                account_email=scraper.account_email,
+                sieve_script=sieve_script,
+            )
 
             backup_lines = [
                 f"[bold green]Backup created successfully![/]\n",

@@ -204,6 +204,12 @@ print(f'  Checksum valid: {is_valid}')
 assert is_valid, 'Checksum verification failed!'
 assert count >= 1, f'Expected at least 1 filter, got {count}'
 
+# Account email must be populated from the UI
+email = bkup.metadata.account_email
+assert email, f'account_email is empty - scraper failed to capture it'
+assert '@' in email, f'account_email has no @: {email!r}'
+print(f'  account_email: {email!r} OK')
+
 # Find the test filter we created and verify every scraped field
 f = next((f for f in bkup.filters if 'E2E' in f.name), None)
 assert f is not None, f'Test filter not found in backup. Filter names: {[x.name for x in bkup.filters]}'

@@ -47,6 +47,7 @@ class ProtonMailBrowser:
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
         self._playwright = None
+        self.account_email: str = ""
 
     async def initialize(self):
         """Launch Playwright browser."""
@@ -136,6 +137,12 @@ class ProtonMailBrowser:
             timeout=PAGE_LOAD_TIMEOUT_MS,
         )
         await page.wait_for_selector(selectors.COMPOSE_BUTTON, timeout=COMPOSE_WAIT_MS)
+
+        # Capture account email from the user dropdown in the sidebar
+        email_el = await page.query_selector(selectors.USER_DROPDOWN_EMAIL)
+        if email_el:
+            self.account_email = (await email_el.inner_text()).strip()
+            logger.info("Account email: %s", self.account_email)
 
         await page.click(selectors.SETTINGS_GEAR)
         await page.wait_for_timeout(SETTINGS_DRAWER_MS)

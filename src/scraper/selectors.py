@@ -17,6 +17,7 @@ SETTINGS_GEAR = '[data-testid="settings-drawer-app-button:settings-icon"]'
 ALL_SETTINGS_LINK = 'a:has-text("All settings")'
 FILTERS_NAV_LINK = 'a[href="/u/0/mail/filters"]'
 COMPOSE_BUTTON = '[data-testid="sidebar:compose"]'
+USER_DROPDOWN_EMAIL = '[data-testid="heading:userdropdown"] span.user-dropdown-displayName + span'
 
 # Filter list page (account.proton.me/u/0/mail/filters)
 # Page structure: two <section> blocks, each with an <h2>.
