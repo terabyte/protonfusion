@@ -23,8 +23,19 @@ UI_OPERATOR_TO_MODEL = {
 }
 
 
+# Folder names that are special actions, not real folder targets
+SPECIAL_FOLDERS = {"Do not move", "Inbox - Default", "Trash", "Archive", "Spam"}
+
+# Bullet characters used by ProtonMail to indicate subfolder nesting
+BULLET_CHARS = " \t•·"
+
+
 class ProtonMailScraper(ProtonMailBrowser):
     """Scrapes filters from ProtonMail settings UI (read-only)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._folder_path_map: Optional[dict] = None
 
     async def scrape_all_filters(self) -> List[dict]:
         """Scrape all filters from the Custom filters section only.
@@ -242,22 +253,24 @@ class ProtonMailScraper(ProtonMailBrowser):
         if folder_row:
             folder_btn = await folder_row.query_selector(selectors.CUSTOM_SELECT_BUTTON)
             if folder_btn:
-                label = await folder_btn.get_attribute("aria-label")
-                # Strip hierarchy bullet prefix (e.g. " • myjunk" -> "myjunk")
-                if label:
-                    label = label.lstrip(" \t•·").strip()
-                if label and label != "Do not move":
+                raw_label = await folder_btn.get_attribute("aria-label")
+                if raw_label and raw_label.strip() != "Do not move":
+                    # Build folder path map on first encounter
+                    if self._folder_path_map is None:
+                        await self._build_folder_path_map(folder_btn)
+
+                    folder = self._resolve_folder_path(raw_label)
                     folder_map = {
                         "Trash": "delete",
                         "Archive": "archive",
                         "Spam": "move_to",
                         "Inbox - Default": "move_to",
                     }
-                    action_type = folder_map.get(label, "move_to")
+                    action_type = folder_map.get(folder, "move_to")
                     if action_type in ("delete", "archive"):
                         actions.append({"type": action_type, "parameters": {}})
                     else:
-                        actions.append({"type": "move_to", "parameters": {"folder": label}})
+                        actions.append({"type": "move_to", "parameters": {"folder": folder}})
 
         # Check "Mark as" checkboxes
         mark_row = await page.query_selector(selectors.FILTER_ACTION_MARK_AS_ROW)
@@ -270,6 +283,70 @@ class ProtonMailScraper(ProtonMailBrowser):
                 actions.append({"type": "star", "parameters": {}})
 
         return actions
+
+    async def _build_folder_path_map(self, folder_btn):
+        """Build a map from dropdown display text to full folder path.
+
+        Opens the folder dropdown, reads all items in order, and reconstructs
+        the hierarchy from bullet prefixes. ProtonMail uses " • " to indicate
+        subfolders in dropdown items.
+        """
+        page = self.page
+        self._folder_path_map = {}
+
+        try:
+            await folder_btn.click()
+            await page.wait_for_timeout(DROPDOWN_MS)
+
+            items = await page.query_selector_all(selectors.DROPDOWN_ITEM)
+            current_parent = None
+
+            for item in items:
+                text = (await item.inner_text()).strip()
+                if not text:
+                    continue
+
+                clean = text.lstrip(BULLET_CHARS).strip()
+                is_child = text != clean  # had bullet prefix
+
+                if clean in SPECIAL_FOLDERS:
+                    continue
+
+                if is_child and current_parent:
+                    full_path = f"{current_parent}/{clean}"
+                    self._folder_path_map[text] = full_path
+                    self._folder_path_map[clean] = full_path
+                else:
+                    current_parent = clean
+                    self._folder_path_map[text] = clean
+                    self._folder_path_map[clean] = clean
+
+            # Close the dropdown by pressing Escape
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(DROPDOWN_MS)
+
+            logger.info(
+                "Built folder path map: %d entries (%d nested)",
+                len(self._folder_path_map),
+                sum(1 for v in self._folder_path_map.values() if "/" in v),
+            )
+        except Exception as e:
+            logger.warning("Failed to build folder path map: %s", e)
+            self._folder_path_map = {}
+
+    def _resolve_folder_path(self, raw_label: str) -> str:
+        """Resolve a raw aria-label to the full folder path."""
+        if self._folder_path_map:
+            # Try exact match first (includes bullet prefix)
+            if raw_label in self._folder_path_map:
+                return self._folder_path_map[raw_label]
+            # Try stripped version
+            clean = raw_label.lstrip(BULLET_CHARS).strip()
+            if clean in self._folder_path_map:
+                return self._folder_path_map[clean]
+            return clean
+        # No map available, fall back to stripping bullets
+        return raw_label.lstrip(BULLET_CHARS).strip()
 
     async def _scrape_logic(self) -> str:
         """Scrape the logic type (AND/OR) from the Conditions step."""
