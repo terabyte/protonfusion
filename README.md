@@ -47,9 +47,11 @@ python -m src.main show
 ### 3. Back up your filters
 
 ```bash
-# Same as show, but saves to a timestamped JSON file
+# Same as show, but saves to a timestamped snapshot directory
 python -m src.main backup
 ```
+
+Each backup creates a snapshot at `snapshots/<timestamp>/backup.json`.
 
 ### 4. Analyze consolidation opportunities
 
@@ -60,15 +62,17 @@ python -m src.main analyze --backup latest
 ### 5. Generate consolidated Sieve script
 
 ```bash
-python -m src.main consolidate --backup latest --output my-filters.sieve
+# Writes consolidated.sieve + manifest.json into the snapshot directory
+python -m src.main consolidate --backup latest
 ```
 
 ### 6. Review and upload
 
-Review the generated `.sieve` file, then:
+Review the generated Sieve script in the snapshot dir, then:
 
 ```bash
-python -m src.main sync --sieve my-filters.sieve --backup latest
+# Auto-discovers the .sieve file from the snapshot
+python -m src.main sync --backup latest
 ```
 
 ## Setting Up a Test Account for Development
@@ -115,7 +119,7 @@ The E2E test creates a filter on ProtonMail, backs it up, consolidates it, verif
 | `show` | Read and display your current filters (read-only, no changes) |
 | `show-backup` | Display filters from a backup file (offline, no login) |
 | `backup` | Scrape current filters and save to a timestamped backup |
-| `list-backups` | Show all available backups with statistics |
+| `list-snapshots` | Show all available snapshots with statistics |
 | `analyze` | View filter statistics and consolidation opportunities |
 | `consolidate` | Generate optimized Sieve script from a backup |
 | `diff` | Compare two backups or a backup vs current state |
@@ -135,23 +139,29 @@ All commands that interact with ProtonMail accept these flags:
 # Automated backup
 python -m src.main backup --headless --credentials-file .credentials
 
-# List all backups
-python -m src.main list-backups
+# List all snapshots
+python -m src.main list-snapshots
 
 # Analyze a specific backup
 python -m src.main analyze --backup latest
 
-# Generate Sieve script
+# Generate Sieve script (saved into the snapshot directory)
+python -m src.main consolidate --backup latest
+
+# Generate Sieve script to a custom path
 python -m src.main consolidate --backup latest --output filters.sieve
 
-# Preview what sync would change
-python -m src.main sync --sieve filters.sieve --backup latest --dry-run
+# Preview what sync would change (auto-discovers .sieve from snapshot)
+python -m src.main sync --backup latest --dry-run
+
+# Sync with a specific Sieve file
+python -m src.main sync --sieve filters.sieve --backup latest
 
 # Compare two backups
-python -m src.main diff --backup1 backups/20260208_193045.json --backup2 backups/20260209_100000.json
+python -m src.main diff --backup1 2026-02-08_19-30-45 --backup2 2026-02-09_10-00-00
 
 # Restore to a previous state
-python -m src.main restore --backup 20260208_193045 --headless --credentials-file .credentials
+python -m src.main restore --backup 2026-02-08_19-30-45 --headless --credentials-file .credentials
 ```
 
 ## Safety Design
@@ -167,6 +177,13 @@ ProtonFusion is designed to be non-destructive:
 ## Architecture
 
 ```
+snapshots/                     # All data lives here (gitignored)
+  2026-02-11_08-16-55/         # One directory per run
+    backup.json                # Filter backup with checksums
+    consolidated.sieve         # Generated Sieve script
+    manifest.json              # Sync state (synced_at: null → ISO timestamp)
+  latest -> 2026-02-11_08-16-55  # Symlink to newest snapshot
+
 src/
   main.py              # CLI entry point (Typer)
   models/              # Pydantic data models for filters and backups
@@ -181,6 +198,8 @@ src/
   generator/           # Sieve script generation
   utils/               # Config, credentials, constants
 ```
+
+Set the `PROTONFUSION_DATA_DIR` environment variable to override the snapshot directory (used by E2E tests for isolation).
 
 ### When ProtonMail Changes Their UI
 
