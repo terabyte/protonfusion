@@ -111,6 +111,9 @@ class ProtonMailSync(ProtonMailBrowser):
                 await save_btn.click()
                 await page.wait_for_timeout(3000)
                 logger.info("Sieve script uploaded successfully")
+
+                # Ensure the filter is enabled after save
+                await self._ensure_filter_enabled(filter_name)
                 return True
 
             logger.warning("Could not find save button for Sieve editor")
@@ -119,6 +122,26 @@ class ProtonMailSync(ProtonMailBrowser):
         except Exception as e:
             logger.error("Failed to upload Sieve script: %s", e)
             raise
+
+    async def _ensure_filter_enabled(self, name: str):
+        """Enable a filter by name if it isn't already enabled."""
+        page = self.page
+        section = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
+        if not section:
+            return
+        rows = await section.query_selector_all(selectors.FILTER_TABLE_ROWS)
+        for row in rows:
+            row_name = await self._get_filter_name(row)
+            if row_name == name:
+                toggle_input = await row.query_selector(selectors.FILTER_TOGGLE)
+                if toggle_input and not await toggle_input.is_checked():
+                    toggle_label = await row.query_selector(selectors.FILTER_TOGGLE_LABEL)
+                    if toggle_label:
+                        await toggle_label.click()
+                        await page.wait_for_timeout(1000)
+                        logger.info("Enabled filter: %s", name)
+                return
+        logger.warning("Could not find filter '%s' to enable", name)
 
     async def create_filter(
         self,
