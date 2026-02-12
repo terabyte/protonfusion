@@ -536,6 +536,13 @@ def sync(
             else:
                 merged_script = SieveGenerator.merge_with_existing(sieve_script, "")
 
+            # Disable UI filters first to free up filter slots (ProtonMail
+            # enforces a per-plan limit on active filters, so uploading a new
+            # Sieve filter will fail if we're already at the limit).
+            console.print("[bold green]Disabling old UI filters...")
+            disabled = await sync_client.disable_all_ui_filters()
+            console.print(f"[green]Disabled {disabled} filters")
+
             console.print("[bold green]Uploading merged Sieve script...")
             success = await sync_client.upload_sieve(
                 merged_script, filter_name=SIEVE_FILTER_NAME,
@@ -543,12 +550,12 @@ def sync(
             if success:
                 console.print("[green]Sieve script uploaded successfully!")
             else:
-                console.print("[red]Failed to upload Sieve script")
+                console.print(
+                    "[red]Failed to upload Sieve script. "
+                    f"{disabled} UI filters were disabled.\n"
+                    f"[yellow]To re-enable them, run: restore --backup {backup_id}"
+                )
                 return
-
-            console.print("[bold green]Disabling old UI filters...")
-            disabled = await sync_client.disable_all_ui_filters()
-            console.print(f"[green]Disabled {disabled} filters")
 
             if manager.promote_manifest(snapshot_dir):
                 console.print("[cyan]Sync manifest updated")
