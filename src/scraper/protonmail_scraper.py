@@ -1,10 +1,16 @@
 """Playwright automation for scraping ProtonMail filters."""
 
+import asyncio
 import logging
-from typing import List, Optional
+from typing import Dict, List, Optional
+
+from playwright.async_api import Page
 
 from src.scraper import selectors
-from src.scraper.browser import ProtonMailBrowser, MODAL_TRANSITION_MS, DROPDOWN_MS
+from src.scraper.browser import (
+    ProtonMailBrowser, MODAL_TRANSITION_MS, DROPDOWN_MS, FILTERS_PAGE_LOAD_MS,
+)
+from src.utils.config import FILTERS_DIRECT_URL, PAGE_LOAD_TIMEOUT_MS
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +36,25 @@ SPECIAL_FOLDERS = {"Do not move", "Inbox - Default", "Trash", "Archive", "Spam"}
 BULLET_CHARS = " \t•·"
 
 
+def _distribute_indices(total: int, workers: int) -> List[List[int]]:
+    """Split filter indices into contiguous chunks across workers.
+
+    Given total=10 and workers=3, returns [[0,1,2,3], [4,5,6], [7,8,9]].
+    """
+    if total <= 0 or workers <= 0:
+        return []
+    workers = min(workers, total)
+    base_size = total // workers
+    remainder = total % workers
+    chunks = []
+    start = 0
+    for i in range(workers):
+        size = base_size + (1 if i < remainder else 0)
+        chunks.append(list(range(start, start + size)))
+        start += size
+    return chunks
+
+
 class ProtonMailScraper(ProtonMailBrowser):
     """Scrapes filters from ProtonMail settings UI (read-only)."""
 
@@ -37,8 +62,11 @@ class ProtonMailScraper(ProtonMailBrowser):
         super().__init__(*args, **kwargs)
         self._folder_path_map: Optional[dict] = None
 
-    async def scrape_all_filters(self) -> List[dict]:
+    async def scrape_all_filters(self, workers: int = 1) -> List[dict]:
         """Scrape all filters from the Custom filters section only.
+
+        Args:
+            workers: Number of parallel browser tabs to use (1=sequential).
 
         Returns list of dicts with filter data. Each dict has:
         - name: str
@@ -49,7 +77,6 @@ class ProtonMailScraper(ProtonMailBrowser):
         Raises RuntimeError if the expected page structure is not found.
         """
         page = self.page
-        filters = []
 
         # --- Layout assertions: fail loudly if structure changed ---
         await self._assert_filter_page_structure()
@@ -67,6 +94,35 @@ class ProtonMailScraper(ProtonMailBrowser):
         total = len(filter_items)
         logger.info("Found %d filter items in Custom filters section", total)
 
+        if workers <= 1 or total <= 1:
+            return await self._scrape_all_sequential(filter_items, total)
+
+        # Parallel path - workers navigate to the same filters page
+        self._filters_page_url = page.url or FILTERS_DIRECT_URL
+        workers = min(workers, total)
+        chunks = _distribute_indices(total, workers)
+        logger.info("Scraping with %d parallel workers", workers)
+
+        worker_results = await asyncio.gather(
+            *[self._scrape_worker(wid, chunk) for wid, chunk in enumerate(chunks)],
+            return_exceptions=True,
+        )
+
+        # Merge results in priority order
+        merged: Dict[int, dict] = {}
+        for result in worker_results:
+            if isinstance(result, Exception):
+                logger.warning("Worker failed: %s", result)
+            elif isinstance(result, dict):
+                merged.update(result)
+
+        filters = [merged[idx] for idx in sorted(merged.keys())]
+        logger.info("Parallel scraping complete: %d filters collected", len(filters))
+        return filters
+
+    async def _scrape_all_sequential(self, filter_items, total: int) -> List[dict]:
+        """Scrape all filters sequentially using the main page."""
+        filters = []
         for idx, item in enumerate(filter_items):
             try:
                 filter_data = await self._scrape_single_filter(item, idx)
@@ -75,8 +131,44 @@ class ProtonMailScraper(ProtonMailBrowser):
                     logger.info("Scraped filter %d/%d: %s", idx + 1, total, filter_data.get("name", "Unknown"))
             except Exception as e:
                 logger.warning("Failed to scrape filter %d: %s", idx, e)
-
         return filters
+
+    async def _scrape_worker(self, worker_id: int, indices: List[int]) -> Dict[int, dict]:
+        """Scrape assigned filter indices using a dedicated browser tab."""
+        page = await self.create_worker_page()
+        try:
+            url = getattr(self, '_filters_page_url', FILTERS_DIRECT_URL)
+            await page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=PAGE_LOAD_TIMEOUT_MS,
+            )
+            await page.wait_for_timeout(FILTERS_PAGE_LOAD_MS)
+
+            section = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
+            if not section:
+                logger.warning("Worker %d: Custom filters section not found", worker_id)
+                return {}
+
+            items = await section.query_selector_all(selectors.FILTER_TABLE_ROWS)
+            results: Dict[int, dict] = {}
+
+            for idx in indices:
+                if idx < len(items):
+                    try:
+                        data = await self._scrape_single_filter(items[idx], idx, page=page)
+                        if data:
+                            results[idx] = data
+                            logger.info(
+                                "Worker %d: scraped filter %d: %s",
+                                worker_id, idx, data.get("name", "Unknown"),
+                            )
+                    except Exception as e:
+                        logger.warning("Worker %d: failed to scrape filter %d: %s", worker_id, idx, e)
+
+            return results
+        finally:
+            await page.close()
 
     async def _assert_filter_page_structure(self):
         """Assert that the filter settings page has the expected structure.
@@ -118,9 +210,10 @@ class ProtonMailScraper(ProtonMailBrowser):
         if not add_btn:
             logger.warning("'Add filter' button not found (may be hidden on free tier)")
 
-    async def _scrape_single_filter(self, item, idx: int) -> Optional[dict]:
+    async def _scrape_single_filter(self, item, idx: int, page: Page = None) -> Optional[dict]:
         """Scrape a single filter item from the list."""
-        page = self.page
+        if page is None:
+            page = self.page
 
         # Get filter name from Edit button's aria-label
         name = ""
@@ -165,15 +258,15 @@ class ProtonMailScraper(ProtonMailBrowser):
                     await next_btn.click()
                     await page.wait_for_timeout(MODAL_TRANSITION_MS)
 
-                    conditions = await self._scrape_conditions()
-                    logic = await self._scrape_logic()
+                    conditions = await self._scrape_conditions(page=page)
+                    logic = await self._scrape_logic(page=page)
 
                     # Click Next to go to Actions step
                     next_btn = await page.query_selector(selectors.FILTER_MODAL_NEXT)
                     if next_btn:
                         await next_btn.click()
                         await page.wait_for_timeout(MODAL_TRANSITION_MS)
-                        actions = await self._scrape_actions()
+                        actions = await self._scrape_actions(page=page)
 
                 # Close modal
                 close_btn = await page.query_selector(
@@ -194,9 +287,10 @@ class ProtonMailScraper(ProtonMailBrowser):
             "actions": actions,
         }
 
-    async def _scrape_conditions(self) -> List[dict]:
+    async def _scrape_conditions(self, page: Page = None) -> List[dict]:
         """Scrape conditions from the Conditions step of the filter wizard."""
-        page = self.page
+        if page is None:
+            page = self.page
         conditions = []
 
         condition_rows = await page.query_selector_all(selectors.FILTER_CONDITION_ROWS)
@@ -243,9 +337,10 @@ class ProtonMailScraper(ProtonMailBrowser):
 
         return conditions
 
-    async def _scrape_actions(self) -> List[dict]:
+    async def _scrape_actions(self, page: Page = None) -> List[dict]:
         """Scrape actions from the Actions step of the filter wizard."""
-        page = self.page
+        if page is None:
+            page = self.page
         actions = []
 
         # Check "Move to" folder selection
@@ -257,7 +352,7 @@ class ProtonMailScraper(ProtonMailBrowser):
                 if raw_label and raw_label.strip() != "Do not move":
                     # Build folder path map on first encounter
                     if self._folder_path_map is None:
-                        await self._build_folder_path_map(folder_btn)
+                        await self._build_folder_path_map(folder_btn, page=page)
 
                     folder = self._resolve_folder_path(raw_label)
                     folder_map = {
@@ -284,14 +379,15 @@ class ProtonMailScraper(ProtonMailBrowser):
 
         return actions
 
-    async def _build_folder_path_map(self, folder_btn):
+    async def _build_folder_path_map(self, folder_btn, page: Page = None):
         """Build a map from dropdown display text to full folder path.
 
         Opens the folder dropdown, reads all items in order, and reconstructs
         the hierarchy from bullet prefixes. ProtonMail uses " • " to indicate
         subfolders in dropdown items.
         """
-        page = self.page
+        if page is None:
+            page = self.page
         self._folder_path_map = {}
 
         try:
@@ -348,9 +444,10 @@ class ProtonMailScraper(ProtonMailBrowser):
         # No map available, fall back to stripping bullets
         return raw_label.lstrip(BULLET_CHARS).strip()
 
-    async def _scrape_logic(self) -> str:
+    async def _scrape_logic(self, page: Page = None) -> str:
         """Scrape the logic type (AND/OR) from the Conditions step."""
-        page = self.page
+        if page is None:
+            page = self.page
         try:
             any_radio = await page.query_selector('input[type="radio"]:checked')
             if any_radio:

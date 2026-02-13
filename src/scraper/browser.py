@@ -267,6 +267,10 @@ class ProtonMailBrowser:
 
         return False
 
+    async def create_worker_page(self) -> Page:
+        """Create an additional page in the existing browser context."""
+        return await self.context.new_page()
+
     async def close(self):
         """Close the browser."""
         if self.browser:

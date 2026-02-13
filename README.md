@@ -132,12 +132,19 @@ All commands that interact with ProtonMail accept these flags:
 - `--headless` - Run browser without a visible window
 - `--credentials-file .credentials` - Use stored credentials instead of manual login
 - `--manual-login` - Force manual login even if credentials file exists
+- `--workers N` / `-w N` - Number of parallel browser tabs for scraping (default: 5, max: 10). Use `-w 1` for sequential scraping.
 
 ### Examples
 
 ```bash
-# Automated backup
+# Automated backup (5 parallel tabs by default)
 python -m src.main backup --headless --credentials-file .credentials
+
+# Faster scraping with 10 parallel tabs
+python -m src.main backup --headless --credentials-file .credentials -w 10
+
+# Sequential scraping (one filter at a time)
+python -m src.main backup --headless --credentials-file .credentials -w 1
 
 # List all snapshots
 python -m src.main list-snapshots
@@ -200,6 +207,20 @@ src/
 ```
 
 Set the `PROTONFUSION_DATA_DIR` environment variable to override the snapshot directory (used by E2E tests for isolation).
+
+### Parallel Scraping
+
+Scraping filters is slow because each one requires opening an edit modal and clicking through wizard steps (~5 seconds per filter). With 250 filters, sequential scraping takes ~21 minutes.
+
+To speed this up, ProtonFusion opens multiple browser tabs within the same session (shared cookies) and scrapes filters in parallel. Each worker tab navigates to the filters page independently, scrapes its assigned range of filters, and results are merged by index to preserve priority ordering.
+
+| Filters | Workers | Est. Time | Speedup |
+|---------|---------|-----------|---------|
+| 250 | 1 | ~21 min | 1x |
+| 250 | 3 | ~7 min | ~3x |
+| 250 | 5 | ~4 min | ~5x |
+
+Only scraping (read-only) is parallelized. Sync operations (disabling filters, uploading Sieve) remain sequential because they mutate shared server-side state.
 
 ### When ProtonMail Changes Their UI
 

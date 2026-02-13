@@ -22,6 +22,7 @@ TOOL_VERSION = "0.1.0"
 PROTONMAIL_LOGIN_URL = "https://account.proton.me/login"
 PROTONMAIL_SETTINGS_FILTERS_URL = "https://mail.proton.me/u/0/settings/filters"
 PROTONMAIL_SIEVE_URL = "https://mail.proton.me/u/0/settings/filters#sieve"
+FILTERS_DIRECT_URL = "https://account.proton.me/u/0/mail/filters"
 
 # Timeouts
 LOGIN_TIMEOUT_MS = 120000  # 2 minutes for manual login

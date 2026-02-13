@@ -58,11 +58,13 @@ def backup(
     credentials_file: str = typer.Option("", "--credentials-file", help="Path to credentials file"),
     manual_login: bool = typer.Option(False, "--manual-login", help="Force manual login"),
     output: str = typer.Option("", "--output", help="Custom output path for backup file"),
+    workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
 ):
     """Scrape current filters and save to a timestamped snapshot."""
     from src.scraper.protonmail_scraper import ProtonMailScraper
 
     creds = _get_credentials(credentials_file, manual_login)
+    workers = max(1, min(workers, 10))
 
     async def _run():
         scraper = ProtonMailScraper(headless=headless, credentials=creds)
@@ -76,8 +78,11 @@ def backup(
             with console.status("[bold green]Navigating to filters..."):
                 await scraper.navigate_to_filters()
 
-            console.print("[bold green]Scraping filters...")
-            raw_filters = await scraper.scrape_all_filters()
+            if workers > 1:
+                console.print(f"[bold green]Scraping filters with {workers} parallel tabs...")
+            else:
+                console.print("[bold green]Scraping filters...")
+            raw_filters = await scraper.scrape_all_filters(workers=workers)
             console.print(f"[green]Scraped {len(raw_filters)} filters")
 
             with console.status("[bold green]Reading existing Sieve script..."):
@@ -125,6 +130,7 @@ def show(
     headless: bool = typer.Option(False, "--headless", help="Run browser in headless mode"),
     credentials_file: str = typer.Option("", "--credentials-file", help="Path to credentials file"),
     manual_login: bool = typer.Option(False, "--manual-login", help="Force manual login"),
+    workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
 ):
     """Read and display your current filters (read-only, no changes made).
 
@@ -134,6 +140,7 @@ def show(
     from src.scraper.protonmail_scraper import ProtonMailScraper
 
     creds = _get_credentials(credentials_file, manual_login)
+    workers = max(1, min(workers, 10))
 
     async def _run():
         scraper = ProtonMailScraper(headless=headless, credentials=creds)
@@ -147,8 +154,9 @@ def show(
             with console.status("[bold green]Navigating to filters..."):
                 await scraper.navigate_to_filters()
 
-            with console.status("[bold green]Reading filters..."):
-                raw_filters = await scraper.scrape_all_filters()
+            if workers > 1:
+                console.print(f"[bold green]Scraping filters with {workers} parallel tabs...")
+            raw_filters = await scraper.scrape_all_filters(workers=workers)
 
             filters = parse_scraped_filters(raw_filters)
             _display_filters(filters)
@@ -387,6 +395,7 @@ def diff(
     backup2: str = typer.Option("", "--backup2", help="Second backup for comparison"),
     headless: bool = typer.Option(False, "--headless", help="Run browser in headless mode"),
     credentials_file: str = typer.Option("", "--credentials-file", help="Credentials file"),
+    workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
 ):
     """Compare backups or current state vs backup."""
     manager = BackupManager()
@@ -402,6 +411,7 @@ def diff(
         from src.scraper.protonmail_scraper import ProtonMailScraper
 
         creds = _get_credentials(credentials_file, False)
+        _workers = max(1, min(workers, 10))
         bkup = manager.load_backup(backup_id)
 
         async def _run():
@@ -410,7 +420,7 @@ def diff(
                 await scraper.initialize()
                 await scraper.login()
                 await scraper.navigate_to_filters()
-                raw_filters = await scraper.scrape_all_filters()
+                raw_filters = await scraper.scrape_all_filters(workers=_workers)
                 current_filters = parse_scraped_filters(raw_filters)
                 result = diff_engine.compare_filter_lists(bkup.filters, current_filters)
                 _display_diff(result, diff_engine, f"Diff: {backup_id} vs Current")
@@ -578,6 +588,7 @@ def restore(
     backup_id: str = typer.Option(..., "--backup", help="Backup to restore from"),
     headless: bool = typer.Option(False, "--headless", help="Run browser in headless mode"),
     credentials_file: str = typer.Option("", "--credentials-file", help="Credentials file"),
+    workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
 ):
     """Restore filters to previous backup state."""
     from src.scraper.protonmail_scraper import ProtonMailScraper
@@ -585,6 +596,7 @@ def restore(
     from src.backup.restore_engine import RestoreEngine
 
     creds = _get_credentials(credentials_file, False)
+    _workers = max(1, min(workers, 10))
     manager = BackupManager()
     bkup = manager.load_backup(backup_id)
 
@@ -594,7 +606,7 @@ def restore(
             await scraper.initialize()
             await scraper.login()
             await scraper.navigate_to_filters()
-            raw_filters = await scraper.scrape_all_filters()
+            raw_filters = await scraper.scrape_all_filters(workers=_workers)
             current_filters = parse_scraped_filters(raw_filters)
         finally:
             await scraper.close()
@@ -634,12 +646,14 @@ def cleanup(
     headless: bool = typer.Option(False, "--headless", help="Run browser in headless mode"),
     credentials_file: str = typer.Option("", "--credentials-file", help="Credentials file"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview what will be deleted"),
+    workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
 ):
     """Delete all disabled filters (with confirmation)."""
     from src.scraper.protonmail_scraper import ProtonMailScraper
     from src.scraper.protonmail_sync import ProtonMailSync
 
     creds = _get_credentials(credentials_file, False)
+    _workers = max(1, min(workers, 10))
 
     async def _run():
         scraper = ProtonMailScraper(headless=headless, credentials=creds)
@@ -647,7 +661,7 @@ def cleanup(
             await scraper.initialize()
             await scraper.login()
             await scraper.navigate_to_filters()
-            raw_filters = await scraper.scrape_all_filters()
+            raw_filters = await scraper.scrape_all_filters(workers=_workers)
             filters = parse_scraped_filters(raw_filters)
         finally:
             await scraper.close()
