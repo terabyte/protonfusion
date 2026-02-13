@@ -2,6 +2,10 @@
 
 A safe, reversible tool for consolidating your ProtonMail filters into optimized Sieve scripts. If you have dozens (or hundreds) of filters cluttering your ProtonMail settings, ProtonFusion merges them into clean, efficient Sieve rules.
 
+## Disclaimer
+
+ProtonFusion is an independent, community-developed project. It is not affiliated with, endorsed by, sponsored by, or supported by Proton AG or any of its subsidiaries. "Proton" and "ProtonMail" are trademarks of Proton AG. Use of these names is for descriptive purposes only and does not imply any official connection or authorization.
+
 ## What It Does
 
 ProtonMail lets you create filters one at a time through the UI. Over time, you might end up with hundreds of filters that do similar things. ProtonFusion:
