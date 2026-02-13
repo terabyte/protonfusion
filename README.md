@@ -245,4 +245,4 @@ All UI selectors are centralized in `selectors.py` to make this straightforward.
 
 ## License
 
-MIT
+This project is released into the public domain under the [Unlicense](UNLICENSE). See the [UNLICENSE](UNLICENSE) file for details.
