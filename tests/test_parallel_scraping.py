@@ -8,6 +8,8 @@ import asyncio
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.integration
 from playwright.async_api import async_playwright
 
 from src.scraper.protonmail_scraper import ProtonMailScraper, _distribute_indices

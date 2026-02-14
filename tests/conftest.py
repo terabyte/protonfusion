@@ -4,6 +4,15 @@ import pytest
 from datetime import datetime
 from pathlib import Path
 
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--credentials-file",
+        action="store",
+        default=None,
+        help="Path to ProtonMail credentials file for e2e tests",
+    )
+
 from src.models.filter_models import (
     ProtonMailFilter, FilterCondition, FilterAction, ConsolidatedFilter,
     ConditionGroup, ConditionType, Operator, ActionType, LogicType,

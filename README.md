@@ -104,17 +104,35 @@ This file is in `.gitignore` and will never be committed. The automated test wor
 
 ### Run the tests
 
-```bash
-# Unit tests (no ProtonMail account needed, runs offline)
-python -m pytest tests/ -v
+Tests are organized into three tiers:
 
-# End-to-end test (requires test account credentials in .credentials)
-bash test_workflow.sh
+| Tier | Marker | Needs |
+|------|--------|-------|
+| Unit | _(none)_ | Nothing |
+| Integration | `@pytest.mark.integration` | Playwright + Chromium |
+| E2E | `@pytest.mark.e2e` | Internet + credentials |
+
+```bash
+# Unit + integration (default — e2e excluded automatically)
+pytest -v
+
+# Unit only (fast, no browser needed)
+pytest -m "not integration" -v
+
+# E2E only (against live ProtonMail)
+pytest -m e2e --credentials-file .credentials -v
+
+# Everything (unit + integration + e2e)
+pytest -m "" --credentials-file .credentials -v
 ```
 
-The E2E test creates a filter on ProtonMail, backs it up, consolidates it, verifies the Sieve output, runs the unit tests, and cleans up after itself.
+The E2E smoke tests verify that ProtonMail's UI selectors and text strings haven't changed. They log in once per session and check page structure and filter wizard elements.
 
 **Note:** Free ProtonMail accounts are limited to 1 custom filter at a time.
+
+### Continuous Integration
+
+A GitHub Actions workflow runs unit + integration tests on every push and pull request to `main`. E2E tests are excluded automatically (no secrets needed). See `.github/workflows/ci.yml`.
 
 ## Commands
 
@@ -128,6 +146,7 @@ The E2E test creates a filter on ProtonMail, backs it up, consolidates it, verif
 | `consolidate` | Generate optimized Sieve script from a backup |
 | `diff` | Compare two backups or a backup vs current state |
 | `sync` | Upload Sieve script and disable old UI filters |
+| `sync --show-diff-only` | Preview Sieve changes against the live script (no upload) |
 | `restore` | Restore filters to a previous backup state |
 | `cleanup` | Delete disabled filters (with confirmation) |
 
@@ -233,7 +252,7 @@ ProtonMail occasionally updates their web UI, which can break the Playwright sel
 1. Open ProtonMail settings manually: Settings gear -> All settings -> Filters
 2. Use browser dev tools to inspect the new element structure
 3. Update the selectors in `src/scraper/selectors.py`
-4. Run the E2E test: `bash test_workflow.sh`
+4. Run the E2E smoke tests: `pytest -m e2e --credentials-file .credentials -v`
 
 All UI selectors are centralized in `selectors.py` to make this straightforward.
 
