@@ -151,6 +151,9 @@ A GitHub Actions workflow runs unit + integration tests on every push and pull r
 | `sync --show-diff-only` | Preview Sieve changes against the live script (no upload) |
 | `restore` | Restore filters to a previous backup state |
 | `cleanup` | Delete disabled filters (with confirmation) |
+| `snapshot view` | View merged backup + archive filters grouped by status |
+| `snapshot set-status` | Change a filter's lifecycle status (enabled/disabled/archived/deprecated) |
+| `snapshot remove` | Remove a filter from the archive |
 
 All commands that interact with ProtonMail accept these flags:
 
@@ -194,6 +197,21 @@ python -m src.main diff --backup1 2026-02-08_19-30-45 --backup2 2026-02-09_10-00
 
 # Restore to a previous state
 python -m src.main restore --backup 2026-02-08_19-30-45 --headless --credentials-file .credentials
+
+# View filters in latest snapshot (backup + archive merged, grouped by status)
+python -m src.main snapshot view
+
+# Mark a filter as deprecated (excluded from future consolidations)
+python -m src.main snapshot set-status "Old Newsletter Filter" deprecated
+
+# Re-include a deprecated filter
+python -m src.main snapshot set-status "Old Newsletter Filter" archived
+
+# Exclude specific filters during consolidation
+python -m src.main consolidate --backup latest --exclude "Temp Filter"
+
+# Reuse exclude args from a previous consolidation
+python -m src.main consolidate --backup latest --include-args-from 2026-02-11_08-16-55
 ```
 
 ## Safety Design
@@ -211,9 +229,11 @@ ProtonFusion is designed to be non-destructive:
 ```
 snapshots/                     # All data lives here (gitignored)
   2026-02-11_08-16-55/         # One directory per run
-    backup.json                # Filter backup with checksums
+    backup.json                # Filter backup with checksums (immutable)
+    archive.json               # Filters carried forward from prior consolidations
     consolidated.sieve         # Generated Sieve script
     manifest.json              # Sync state (synced_at: null → ISO timestamp)
+    consolidation_args.json    # Saved --exclude args for reuse
   latest -> 2026-02-11_08-16-55  # Symlink to newest snapshot
 
 src/
@@ -232,6 +252,32 @@ src/
 ```
 
 Set the `PROTONFUSION_DATA_DIR` environment variable to override the snapshot directory (used by E2E tests for isolation).
+
+### Filter Lifecycle
+
+Filters have four possible statuses that control how they're handled:
+
+| Status | In Sieve? | On ProtonMail? | Purpose |
+|--------|-----------|----------------|---------|
+| `enabled` | Yes | Yes (active) | Live UI filter |
+| `disabled` | Yes | Yes (inactive) | Live UI filter (turned off) |
+| `archived` | Yes | No | Preserved in Sieve after cleanup |
+| `deprecated` | No | No | Excluded from everything |
+
+The typical workflow:
+
+```
+backup → consolidate → sync → cleanup → backup → consolidate → ...
+```
+
+1. `backup` scrapes live filters into `backup.json` and copies `archive.json` from the previous snapshot
+2. `consolidate` reads both files, generates Sieve, and auto-archives included backup filters
+3. `sync` uploads the Sieve script and disables UI filters
+4. `cleanup` deletes disabled UI filters from ProtonMail
+5. Next `backup` scrapes the now-reduced filter list; archived filters carry forward via `archive.json`
+6. Next `consolidate` still has all rules from the archive
+
+Use `snapshot set-status <name> deprecated` to permanently exclude a rule, or `snapshot set-status <name> archived` to re-include it.
 
 ### Parallel Scraping
 

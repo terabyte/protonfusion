@@ -54,8 +54,8 @@ class DiffEngine:
             old_f = old_by_name[name]
             new_f = new_by_name[name]
 
-            # Check if only enabled state changed
-            if old_f.enabled != new_f.enabled:
+            # Check if only enabled/status state changed
+            if old_f.enabled != new_f.enabled or old_f.status != new_f.status:
                 if self._filters_equal_except_enabled(old_f, new_f):
                     diff.state_changed.append((old_f, new_f))
                 else:
@@ -68,15 +68,20 @@ class DiffEngine:
         return diff
 
     def _filters_equal(self, f1: ProtonMailFilter, f2: ProtonMailFilter) -> bool:
-        """Check if two filters are identical."""
-        return f1.model_dump() == f2.model_dump()
-
-    def _filters_equal_except_enabled(self, f1: ProtonMailFilter, f2: ProtonMailFilter) -> bool:
-        """Check if filters are identical except for enabled state."""
+        """Check if two filters are identical (status excluded, like enabled)."""
         d1 = f1.model_dump()
         d2 = f2.model_dump()
-        d1.pop("enabled", None)
-        d2.pop("enabled", None)
+        d1.pop("status", None)
+        d2.pop("status", None)
+        return d1 == d2
+
+    def _filters_equal_except_enabled(self, f1: ProtonMailFilter, f2: ProtonMailFilter) -> bool:
+        """Check if filters are identical except for enabled/status state."""
+        d1 = f1.model_dump()
+        d2 = f2.model_dump()
+        for key in ("enabled", "status"):
+            d1.pop(key, None)
+            d2.pop(key, None)
         return d1 == d2
 
     def generate_summary(self, diff: FilterDiff) -> dict:

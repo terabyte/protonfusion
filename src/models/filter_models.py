@@ -1,7 +1,7 @@
 import hashlib
 from enum import Enum
 from typing import List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ConditionType(str, Enum):
@@ -46,19 +46,43 @@ class LogicType(str, Enum):
     OR = "or"
 
 
+class FilterStatus(str, Enum):
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+    ARCHIVED = "archived"
+    DEPRECATED = "deprecated"
+
+
 class ProtonMailFilter(BaseModel):
     name: str
     enabled: bool = True
+    status: FilterStatus = FilterStatus.ENABLED
     priority: int = 0
     logic: LogicType = LogicType.AND
     conditions: List[FilterCondition] = Field(default_factory=list)
     actions: List[FilterAction] = Field(default_factory=list)
 
+    @model_validator(mode='before')
+    @classmethod
+    def derive_status_from_enabled(cls, data):
+        """Backward compat: if status absent, derive from enabled bool."""
+        if isinstance(data, dict):
+            if 'status' not in data:
+                enabled = data.get('enabled', True)
+                data['status'] = FilterStatus.ENABLED if enabled else FilterStatus.DISABLED
+            else:
+                # Keep enabled in sync with status
+                status = data['status']
+                if isinstance(status, str):
+                    status = FilterStatus(status)
+                data['enabled'] = status == FilterStatus.ENABLED
+        return data
+
     @property
     def content_hash(self) -> str:
         """Content-addressable hash of filter identity (name + logic + conditions + actions).
 
-        Excludes enabled/priority since those don't define the filter's purpose.
+        Excludes enabled/status/priority since those don't define the filter's purpose.
         """
         parts = [
             f"name={self.name}",

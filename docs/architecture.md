@@ -21,8 +21,8 @@ All operations are organized around **snapshots** -- timestamped directories tha
 src/
 ├── main.py                    # CLI entry point (Typer)
 ├── models/                    # Pydantic v2 data models
-│   ├── filter_models.py       # ProtonMailFilter, ConsolidatedFilter, enums
-│   └── backup_models.py       # Backup, BackupMetadata
+│   ├── filter_models.py       # ProtonMailFilter, ConsolidatedFilter, FilterStatus, enums
+│   └── backup_models.py       # Backup, BackupMetadata, Archive, ArchiveEntry
 ├── scraper/                   # Playwright browser automation
 │   ├── browser.py             # ProtonMailBrowser base class (login, navigation)
 │   ├── selectors.py           # Centralized CSS selectors for ProtonMail UI
@@ -58,6 +58,7 @@ The core domain model is `ProtonMailFilter`, representing a single filter as it 
 ProtonMailFilter
 ├── name: str
 ├── enabled: bool
+├── status: FilterStatus (enabled | disabled | archived | deprecated)
 ├── priority: int
 ├── logic: LogicType (AND | OR)
 ├── conditions: List[FilterCondition]
@@ -88,10 +89,30 @@ The key insight is the **ConditionGroup** abstraction. When multiple filters are
 | `Operator` | contains, is, matches, starts_with, ends_with, has |
 | `ActionType` | move_to, label, mark_read, star, archive, delete |
 | `LogicType` | and, or |
+| `FilterStatus` | enabled, disabled, archived, deprecated |
+
+### Filter Lifecycle (FilterStatus)
+
+Every `ProtonMailFilter` has a `status` field that controls how it participates in the consolidation and sync pipeline:
+
+| Status | In Sieve? | Synced to ProtonMail? | Purpose |
+|--------|-----------|----------------------|---------|
+| `enabled` | Yes | Yes (active) | Live UI filter, included in consolidation |
+| `disabled` | Yes | Yes (inactive) | Live UI filter, included in consolidation |
+| `archived` | Yes | No | Baked into Sieve only; carried forward across snapshots |
+| `deprecated` | No | No | Reference only; ignored by everything |
+
+The `enabled: bool` field is kept in sync with `status` via a Pydantic model validator for backward compatibility. Old data without a `status` field derives it from the `enabled` boolean.
+
+### Archive System
+
+`ArchiveEntry` wraps a `ProtonMailFilter` with metadata (`archived_at`, `source_snapshot`). The `Archive` model contains a list of entries and is stored as `archive.json` in each snapshot directory.
+
+Archive entries are carried forward automatically: when a new backup is created, the `archive.json` from the previous snapshot (via the `latest` symlink) is copied into the new snapshot directory.
 
 ### Content Hashing
 
-`ProtonMailFilter.content_hash` produces a SHA-256 hash of the filter's identity (name, logic, conditions, actions) but **excludes** enabled state and priority. This allows the manifest system to track which filters have been processed regardless of whether they've been disabled since.
+`ProtonMailFilter.content_hash` produces a SHA-256 hash of the filter's identity (name, logic, conditions, actions) but **excludes** enabled state, status, and priority. This allows the manifest system to track which filters have been processed regardless of status transitions.
 
 ## Scraper Layer
 
@@ -184,9 +205,11 @@ All data is stored under `snapshots/` (overridable via `PROTONFUSION_DATA_DIR` e
 ```
 snapshots/
 ├── 2026-02-11_08-16-55/
-│   ├── backup.json           # Filter data + Sieve script + SHA-256 checksum
-│   ├── consolidated.sieve    # Generated Sieve rules
-│   └── manifest.json         # Sync tracking metadata
+│   ├── backup.json              # Filter data + Sieve script + SHA-256 checksum (immutable)
+│   ├── archive.json             # Filters carried forward from prior consolidations (mutable)
+│   ├── consolidated.sieve       # Generated Sieve rules
+│   ├── manifest.json            # Sync tracking metadata
+│   └── consolidation_args.json  # Saved --exclude args for reuse
 ├── 2026-02-12_14-30-00/
 │   └── ...
 └── latest -> 2026-02-12_14-30-00/   # Symlink to newest snapshot
@@ -213,13 +236,29 @@ Tracks the consolidation and sync lifecycle:
 
 `synced_at` starts as `null` and is set to an ISO timestamp when the Sieve script is successfully uploaded. The `filter_hashes` allow the consolidation engine to recognize previously processed filters -- if you re-run consolidation after a sync, disabled filters whose hashes appear in a prior synced manifest can optionally be re-included.
 
+### archive.json
+
+Contains the serialized `Archive` object: a version string and a list of `ArchiveEntry` objects. Each entry wraps a `ProtonMailFilter` with metadata about when and where it was archived. Archive entries override backup entries with the same `content_hash` when building the merged filter view.
+
+### consolidation_args.json
+
+Saves the `--exclude` arguments used during consolidation so they can be reloaded with `--include-args-from`:
+
+```json
+{
+  "exclude": ["Filter 1", "Filter 2"],
+  "include_disabled": false,
+  "created_at": "2026-02-12T14:30:00+00:00"
+}
+```
+
 ### Diff Engine
 
-The diff engine compares two filter states (backup vs. backup, or backup vs. current) and categorizes differences as: added, removed, modified, state_changed (only enabled/disabled toggled), or unchanged.
+The diff engine compares two filter states (backup vs. backup, or backup vs. current) and categorizes differences as: added, removed, modified, state_changed (enabled/disabled/status toggled), or unchanged. The `status` field is excluded from content equality checks alongside `enabled`.
 
 ### Restore Engine
 
-The restore engine takes a backup and the current filter state, then enables or disables filters to match the backup. It reports on filters that were not found (deleted since backup), already correct, successfully toggled, or errored.
+The restore engine takes a backup and the current filter state, then enables or disables filters to match the backup. It reports on filters that were not found (deleted since backup), already correct, successfully toggled, or errored. Archived and deprecated filters are skipped during restore since they don't exist on ProtonMail.
 
 ## CLI Layer
 
@@ -229,3 +268,12 @@ Commands are organized by their relationship to the data flow:
 - **Read**: `show`, `show-backup`, `list-snapshots`, `analyze`, `diff`
 - **Write local**: `backup`, `consolidate`
 - **Write remote**: `sync`, `restore`, `cleanup`
+- **Snapshot management**: `snapshot view`, `snapshot set-status`, `snapshot remove`
+
+### Snapshot Commands
+
+The `snapshot` command group manages filter lifecycle within a snapshot:
+
+- **`snapshot view`** — Loads `backup.json` and `archive.json`, merges them (archive overrides backup for same content_hash), and displays a Rich table grouped by status with color coding (enabled=green, disabled=yellow, archived=cyan, deprecated=dim).
+- **`snapshot set-status <name> <status>`** — Changes a filter's status. If the filter is in `backup.json`, creates an `ArchiveEntry` in `archive.json` (backup stays immutable). If already in the archive, updates in place.
+- **`snapshot remove <name>`** — Removes a filter from `archive.json`. Cannot remove filters that only exist in `backup.json` (use `set-status deprecated` instead).

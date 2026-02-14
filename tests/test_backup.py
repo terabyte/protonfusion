@@ -3,12 +3,16 @@
 import pytest
 import json
 import hashlib
+import time
 from datetime import datetime
 from pathlib import Path
 
 from src.backup.backup_manager import BackupManager
-from src.models.backup_models import Backup, BackupMetadata
-from src.models.filter_models import ProtonMailFilter
+from src.models.backup_models import Backup, BackupMetadata, ArchiveEntry, Archive
+from src.models.filter_models import (
+    ProtonMailFilter, FilterCondition, FilterAction, FilterStatus,
+    ConditionType, Operator, ActionType,
+)
 
 
 class TestBackupManager:
@@ -407,3 +411,130 @@ class TestManifest:
         hashes = manager.load_synced_hashes()
 
         assert hashes is None
+
+
+class TestArchiveIO:
+    """Test archive read/write methods."""
+
+    def _make_entry(self, name, status=FilterStatus.ARCHIVED):
+        """Helper to create an archive entry."""
+        f = ProtonMailFilter(
+            name=name,
+            status=status,
+            conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value=f"{name}@test.com")],
+            actions=[FilterAction(type=ActionType.DELETE)],
+        )
+        return ArchiveEntry(filter=f, archived_at="2025-01-01T00:00:00Z", source_snapshot="snap1")
+
+    def test_write_archive(self, temp_snapshots_dir, sample_filters_list):
+        """Test writing an archive file."""
+        manager = BackupManager(temp_snapshots_dir)
+        manager.create_backup(sample_filters_list)
+        snapshot_dir = manager.snapshot_dir_for("latest")
+
+        entries = [self._make_entry("Filter1"), self._make_entry("Filter2")]
+        manager.write_archive(snapshot_dir, entries)
+
+        archive_path = snapshot_dir / "archive.json"
+        assert archive_path.exists()
+        data = json.loads(archive_path.read_text())
+        assert data["version"] == "1.0"
+        assert len(data["entries"]) == 2
+
+    def test_load_archive_exists(self, temp_snapshots_dir, sample_filters_list):
+        """Test loading an existing archive."""
+        manager = BackupManager(temp_snapshots_dir)
+        manager.create_backup(sample_filters_list)
+        snapshot_dir = manager.snapshot_dir_for("latest")
+
+        entries = [self._make_entry("Filter1")]
+        manager.write_archive(snapshot_dir, entries)
+
+        loaded = manager.load_archive(snapshot_dir)
+        assert len(loaded) == 1
+        assert loaded[0].filter.name == "Filter1"
+        assert loaded[0].filter.status == FilterStatus.ARCHIVED
+
+    def test_load_archive_missing(self, temp_snapshots_dir, sample_filters_list):
+        """Test loading archive when none exists returns empty list."""
+        manager = BackupManager(temp_snapshots_dir)
+        manager.create_backup(sample_filters_list)
+        snapshot_dir = manager.snapshot_dir_for("latest")
+
+        loaded = manager.load_archive(snapshot_dir)
+        assert loaded == []
+
+    def test_carry_forward_archive_with_previous(self, temp_snapshots_dir, sample_filters_list):
+        """Test carrying forward archive from previous snapshot."""
+        manager = BackupManager(temp_snapshots_dir)
+
+        # Create first backup with archive
+        manager.create_backup(sample_filters_list)
+        first_dir = manager.snapshot_dir_for("latest")
+        entries = [self._make_entry("Carried")]
+        manager.write_archive(first_dir, entries)
+
+        # Create second backup — archive should carry forward
+        time.sleep(1)
+        manager.create_backup(sample_filters_list)
+        second_dir = manager.snapshot_dir_for("latest")
+
+        # Archive should have been carried forward
+        loaded = manager.load_archive(second_dir)
+        assert len(loaded) == 1
+        assert loaded[0].filter.name == "Carried"
+
+    def test_carry_forward_archive_without_previous(self, temp_snapshots_dir, sample_filters_list):
+        """Test carry forward when no previous archive exists."""
+        manager = BackupManager(temp_snapshots_dir)
+        manager.create_backup(sample_filters_list)
+
+        # No archive in first snapshot — carry_forward should return empty
+        target = temp_snapshots_dir / "test-target"
+        target.mkdir()
+        carried = manager.carry_forward_archive(target)
+        assert carried == []
+
+    def test_carry_forward_does_not_self_copy(self, temp_snapshots_dir, sample_filters_list):
+        """Test that carry forward doesn't copy from self."""
+        manager = BackupManager(temp_snapshots_dir)
+        manager.create_backup(sample_filters_list)
+        snapshot_dir = manager.snapshot_dir_for("latest")
+
+        entries = [self._make_entry("Test")]
+        manager.write_archive(snapshot_dir, entries)
+
+        # carry_forward from latest to itself should return empty
+        carried = manager.carry_forward_archive(snapshot_dir)
+        assert carried == []
+
+    def test_create_backup_carries_forward_archive(self, temp_snapshots_dir, sample_filters_list):
+        """Test that create_backup automatically carries forward archive."""
+        manager = BackupManager(temp_snapshots_dir)
+
+        # First backup with archive
+        manager.create_backup(sample_filters_list)
+        first_dir = manager.snapshot_dir_for("latest")
+        manager.write_archive(first_dir, [self._make_entry("AutoCarry")])
+
+        # Second backup
+        time.sleep(1)
+        manager.create_backup(sample_filters_list)
+        second_dir = manager.snapshot_dir_for("latest")
+
+        loaded = manager.load_archive(second_dir)
+        assert len(loaded) == 1
+        assert loaded[0].filter.name == "AutoCarry"
+
+    def test_write_archive_overwrites(self, temp_snapshots_dir, sample_filters_list):
+        """Test that writing archive overwrites existing."""
+        manager = BackupManager(temp_snapshots_dir)
+        manager.create_backup(sample_filters_list)
+        snapshot_dir = manager.snapshot_dir_for("latest")
+
+        manager.write_archive(snapshot_dir, [self._make_entry("First")])
+        manager.write_archive(snapshot_dir, [self._make_entry("Second")])
+
+        loaded = manager.load_archive(snapshot_dir)
+        assert len(loaded) == 1
+        assert loaded[0].filter.name == "Second"

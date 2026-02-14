@@ -5,7 +5,7 @@ import logging
 from typing import List, Optional
 
 from src.models.backup_models import Backup
-from src.models.filter_models import ProtonMailFilter
+from src.models.filter_models import ProtonMailFilter, FilterStatus
 from src.scraper.protonmail_sync import ProtonMailSync
 from src.utils.config import Credentials
 
@@ -22,6 +22,7 @@ class RestoreEngine:
         """Restore filters to match backup state.
 
         For each filter in the backup:
+        - If archived/deprecated: skip (not on ProtonMail)
         - If enabled in backup: enable in ProtonMail
         - If disabled in backup: disable in ProtonMail
 
@@ -30,6 +31,7 @@ class RestoreEngine:
         report = {
             "enabled": [],
             "disabled": [],
+            "skipped": [],
             "not_found": [],
             "already_correct": [],
             "errors": [],
@@ -39,6 +41,11 @@ class RestoreEngine:
         current_by_name = {f.name: f for f in current_filters}
 
         for name, backup_filter in backup_by_name.items():
+            # Skip archived/deprecated — they're not on ProtonMail
+            if backup_filter.status in (FilterStatus.ARCHIVED, FilterStatus.DEPRECATED):
+                report["skipped"].append(name)
+                continue
+
             if name not in current_by_name:
                 report["not_found"].append(name)
                 logger.warning("Filter '%s' not found in current state (may have been deleted)", name)

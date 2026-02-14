@@ -5,7 +5,7 @@ import pytest
 from src.backup.diff_engine import DiffEngine, FilterDiff
 from src.models.filter_models import (
     ProtonMailFilter, FilterCondition, FilterAction,
-    ConditionType, Operator, ActionType, LogicType,
+    ConditionType, Operator, ActionType, LogicType, FilterStatus,
 )
 from src.models.backup_models import Backup
 
@@ -351,4 +351,46 @@ class TestDiffEngine:
             actions=[]
         )
 
+        assert engine._filters_equal_except_enabled(f1, f2)
+
+
+class TestStatusAwareDiff:
+    """Test diff engine with FilterStatus changes."""
+
+    def test_status_change_detected(self):
+        """Test that status change from enabled to archived is detected as state_changed."""
+        engine = DiffEngine()
+        old = ProtonMailFilter(name="Test", status=FilterStatus.ENABLED, conditions=[], actions=[])
+        new = ProtonMailFilter(name="Test", status=FilterStatus.ARCHIVED, conditions=[], actions=[])
+
+        diff = engine.compare_filter_lists([old], [new])
+        assert len(diff.state_changed) == 1
+
+    def test_same_status_no_change(self):
+        """Test that same status is detected as unchanged."""
+        engine = DiffEngine()
+        f = ProtonMailFilter(name="Test", status=FilterStatus.ARCHIVED, conditions=[], actions=[])
+
+        diff = engine.compare_filter_lists([f], [f])
+        assert len(diff.unchanged) == 1
+
+    def test_status_excluded_from_equality(self):
+        """Test that status field is excluded from content equality."""
+        engine = DiffEngine()
+        f1 = ProtonMailFilter(name="Test", status=FilterStatus.ENABLED, conditions=[], actions=[])
+        f2 = ProtonMailFilter(name="Test", status=FilterStatus.ENABLED, conditions=[], actions=[])
+
+        assert engine._filters_equal(f1, f2)
+
+    def test_filters_equal_ignores_status_difference(self):
+        """_filters_equal should ignore differing status (it checks content only)."""
+        engine = DiffEngine()
+        f1 = ProtonMailFilter(name="Test", status=FilterStatus.ENABLED, priority=1, conditions=[], actions=[])
+        f2 = ProtonMailFilter(name="Test", status=FilterStatus.ARCHIVED, priority=1, conditions=[], actions=[])
+
+        # _filters_equal excludes status, but enabled differs
+        # enabled is True for ENABLED, False for ARCHIVED
+        # So they're not model_dump-equal due to enabled field
+        assert not engine._filters_equal(f1, f2)
+        # But they are equal except enabled/status
         assert engine._filters_equal_except_enabled(f1, f2)

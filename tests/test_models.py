@@ -5,9 +5,9 @@ from datetime import datetime
 
 from src.models.filter_models import (
     ProtonMailFilter, FilterCondition, FilterAction, ConsolidatedFilter,
-    ConditionGroup, ConditionType, Operator, ActionType, LogicType,
+    ConditionGroup, ConditionType, Operator, ActionType, LogicType, FilterStatus,
 )
-from src.models.backup_models import Backup, BackupMetadata
+from src.models.backup_models import Backup, BackupMetadata, ArchiveEntry, Archive
 
 
 class TestFilterCondition:
@@ -400,3 +400,154 @@ class TestEnums:
         """Test LogicType enum values."""
         assert LogicType.AND.value == "and"
         assert LogicType.OR.value == "or"
+
+    def test_filter_status_enum(self):
+        """Test FilterStatus enum values."""
+        assert FilterStatus.ENABLED.value == "enabled"
+        assert FilterStatus.DISABLED.value == "disabled"
+        assert FilterStatus.ARCHIVED.value == "archived"
+        assert FilterStatus.DEPRECATED.value == "deprecated"
+
+
+class TestFilterStatus:
+    """Test FilterStatus integration with ProtonMailFilter."""
+
+    def test_default_status_is_enabled(self):
+        """Test that default status is ENABLED."""
+        f = ProtonMailFilter(name="Test")
+        assert f.status == FilterStatus.ENABLED
+        assert f.enabled is True
+
+    def test_backward_compat_no_status_enabled(self):
+        """Test backward compat: no status field, enabled=True -> ENABLED."""
+        data = {"name": "Test", "enabled": True}
+        f = ProtonMailFilter.model_validate(data)
+        assert f.status == FilterStatus.ENABLED
+        assert f.enabled is True
+
+    def test_backward_compat_no_status_disabled(self):
+        """Test backward compat: no status field, enabled=False -> DISABLED."""
+        data = {"name": "Test", "enabled": False}
+        f = ProtonMailFilter.model_validate(data)
+        assert f.status == FilterStatus.DISABLED
+        assert f.enabled is False
+
+    def test_status_archived_sets_enabled_false(self):
+        """Test that ARCHIVED status sets enabled=False."""
+        f = ProtonMailFilter(name="Test", status=FilterStatus.ARCHIVED)
+        assert f.enabled is False
+
+    def test_status_deprecated_sets_enabled_false(self):
+        """Test that DEPRECATED status sets enabled=False."""
+        f = ProtonMailFilter(name="Test", status=FilterStatus.DEPRECATED)
+        assert f.enabled is False
+
+    def test_status_enabled_sets_enabled_true(self):
+        """Test that ENABLED status sets enabled=True."""
+        f = ProtonMailFilter(name="Test", status=FilterStatus.ENABLED)
+        assert f.enabled is True
+
+    def test_status_disabled_sets_enabled_false(self):
+        """Test that DISABLED status sets enabled=False."""
+        f = ProtonMailFilter(name="Test", status=FilterStatus.DISABLED)
+        assert f.enabled is False
+
+    def test_content_hash_excludes_status(self):
+        """Test that content_hash is the same regardless of status."""
+        f_enabled = ProtonMailFilter(
+            name="Test",
+            status=FilterStatus.ENABLED,
+            conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="x")],
+            actions=[FilterAction(type=ActionType.DELETE)],
+        )
+        f_archived = ProtonMailFilter(
+            name="Test",
+            status=FilterStatus.ARCHIVED,
+            conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="x")],
+            actions=[FilterAction(type=ActionType.DELETE)],
+        )
+        assert f_enabled.content_hash == f_archived.content_hash
+
+    def test_status_from_string(self):
+        """Test creating filter with status as string."""
+        data = {"name": "Test", "status": "archived"}
+        f = ProtonMailFilter.model_validate(data)
+        assert f.status == FilterStatus.ARCHIVED
+        assert f.enabled is False
+
+    def test_status_serialization_roundtrip(self):
+        """Test that status survives serialization/deserialization."""
+        f = ProtonMailFilter(name="Test", status=FilterStatus.ARCHIVED)
+        data = f.model_dump()
+        f2 = ProtonMailFilter.model_validate(data)
+        assert f2.status == FilterStatus.ARCHIVED
+        assert f2.enabled is False
+
+
+class TestArchiveEntry:
+    """Test ArchiveEntry model."""
+
+    def test_create_archive_entry(self):
+        """Test creating an archive entry."""
+        f = ProtonMailFilter(name="Test", status=FilterStatus.ARCHIVED)
+        entry = ArchiveEntry(
+            filter=f,
+            archived_at="2025-06-15T10:00:00+00:00",
+            source_snapshot="2025-06-15_10-00-00",
+        )
+        assert entry.filter.name == "Test"
+        assert entry.archived_at == "2025-06-15T10:00:00+00:00"
+        assert entry.source_snapshot == "2025-06-15_10-00-00"
+
+    def test_archive_entry_defaults(self):
+        """Test archive entry default values."""
+        f = ProtonMailFilter(name="Test")
+        entry = ArchiveEntry(filter=f)
+        assert entry.archived_at == ""
+        assert entry.source_snapshot == ""
+
+    def test_archive_entry_serialization_roundtrip(self):
+        """Test archive entry serialization/deserialization."""
+        f = ProtonMailFilter(
+            name="Test",
+            status=FilterStatus.ARCHIVED,
+            conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="x")],
+            actions=[FilterAction(type=ActionType.DELETE)],
+        )
+        entry = ArchiveEntry(filter=f, archived_at="2025-01-01T00:00:00Z", source_snapshot="snap1")
+        data = entry.model_dump()
+        entry2 = ArchiveEntry.model_validate(data)
+        assert entry2.filter.name == "Test"
+        assert entry2.filter.status == FilterStatus.ARCHIVED
+        assert entry2.archived_at == "2025-01-01T00:00:00Z"
+
+
+class TestArchive:
+    """Test Archive model."""
+
+    def test_create_empty_archive(self):
+        """Test creating an empty archive."""
+        archive = Archive()
+        assert archive.version == "1.0"
+        assert archive.entries == []
+
+    def test_archive_with_entries(self):
+        """Test archive with entries."""
+        f = ProtonMailFilter(name="Test", status=FilterStatus.ARCHIVED)
+        entries = [ArchiveEntry(filter=f)]
+        archive = Archive(entries=entries)
+        assert len(archive.entries) == 1
+
+    def test_archive_serialization_roundtrip(self):
+        """Test archive serialization/deserialization."""
+        f1 = ProtonMailFilter(name="F1", status=FilterStatus.ARCHIVED)
+        f2 = ProtonMailFilter(name="F2", status=FilterStatus.DEPRECATED)
+        archive = Archive(entries=[
+            ArchiveEntry(filter=f1, archived_at="2025-01-01T00:00:00Z"),
+            ArchiveEntry(filter=f2, archived_at="2025-01-02T00:00:00Z"),
+        ])
+        data = archive.model_dump()
+        archive2 = Archive.model_validate(data)
+        assert len(archive2.entries) == 2
+        assert archive2.entries[0].filter.status == FilterStatus.ARCHIVED
+        assert archive2.entries[1].filter.status == FilterStatus.DEPRECATED

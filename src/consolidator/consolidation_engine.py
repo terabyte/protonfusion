@@ -4,7 +4,7 @@ import logging
 from typing import List, Dict, Optional, Set
 from dataclasses import dataclass, field
 
-from src.models.filter_models import ProtonMailFilter, ConsolidatedFilter
+from src.models.filter_models import ProtonMailFilter, ConsolidatedFilter, FilterStatus
 from src.consolidator.strategies.group_by_action import group_by_action
 from src.consolidator.strategies.merge_conditions import merge_conditions
 from src.consolidator.strategies.optimize_ordering import optimize_ordering
@@ -20,6 +20,8 @@ class ConsolidationReport:
     enabled_count: int = 0
     disabled_skipped: int = 0
     disabled_included: int = 0
+    archived_count: int = 0
+    excluded_count: int = 0
     groups: Dict[str, int] = field(default_factory=dict)  # action -> count of merged filters
     reduction_percent: float = 0.0
 
@@ -28,20 +30,44 @@ def _select_filters(
     filters: List[ProtonMailFilter],
     include_disabled: bool = False,
     synced_filter_hashes: Optional[Set[str]] = None,
-) -> tuple[List[ProtonMailFilter], int, int]:
-    """Select which filters to process based on enabled status and sync manifest.
+    archived_filters: Optional[List[ProtonMailFilter]] = None,
+    exclude_names: Optional[Set[str]] = None,
+) -> tuple[List[ProtonMailFilter], int, int, int, int]:
+    """Select which filters to process based on status and sync manifest.
 
-    Returns (selected_filters, disabled_skipped_count, disabled_included_count).
+    Returns (selected_filters, disabled_skipped, disabled_included, archived_count, excluded_count).
     """
-    if include_disabled:
-        return list(filters), 0, sum(1 for f in filters if not f.enabled)
-
+    _exclude_names = exclude_names or set()
     selected = []
     disabled_skipped = 0
     disabled_included = 0
+    excluded_count = 0
+
+    # Always include archived filters from archive param
+    _archived = archived_filters or []
+    for f in _archived:
+        if f.name in _exclude_names:
+            excluded_count += 1
+            continue
+        if f.status == FilterStatus.DEPRECATED:
+            continue
+        selected.append(f)
 
     for f in filters:
-        if f.enabled:
+        # DEPRECATED → always skip
+        if f.status == FilterStatus.DEPRECATED:
+            continue
+
+        # Skip if excluded by name
+        if f.name in _exclude_names:
+            excluded_count += 1
+            continue
+
+        if include_disabled:
+            selected.append(f)
+            if not f.enabled:
+                disabled_included += 1
+        elif f.enabled:
             selected.append(f)
         elif synced_filter_hashes and f.content_hash in synced_filter_hashes:
             selected.append(f)
@@ -49,7 +75,7 @@ def _select_filters(
         else:
             disabled_skipped += 1
 
-    return selected, disabled_skipped, disabled_included
+    return selected, disabled_skipped, disabled_included, len(_archived), excluded_count
 
 
 class ConsolidationEngine:
@@ -60,20 +86,24 @@ class ConsolidationEngine:
         filters: List[ProtonMailFilter],
         include_disabled: bool = False,
         synced_filter_hashes: Optional[Set[str]] = None,
+        archived_filters: Optional[List[ProtonMailFilter]] = None,
+        exclude_names: Optional[Set[str]] = None,
     ) -> tuple[List[ConsolidatedFilter], ConsolidationReport]:
         """Apply all consolidation strategies and return optimized filters + report."""
         report = ConsolidationReport()
         report.original_count = len(filters)
 
-        selected, disabled_skipped, disabled_included = _select_filters(
-            filters, include_disabled, synced_filter_hashes
+        selected, disabled_skipped, disabled_included, archived_count, excluded_count = _select_filters(
+            filters, include_disabled, synced_filter_hashes, archived_filters, exclude_names,
         )
         report.enabled_count = len(selected)
         report.disabled_skipped = disabled_skipped
         report.disabled_included = disabled_included
+        report.archived_count = archived_count
+        report.excluded_count = excluded_count
 
-        logger.info("Starting consolidation: %d total, %d selected, %d disabled-skipped, %d disabled-included",
-                     len(filters), len(selected), disabled_skipped, disabled_included)
+        logger.info("Starting consolidation: %d total, %d selected, %d disabled-skipped, %d disabled-included, %d archived, %d excluded",
+                     len(filters), len(selected), disabled_skipped, disabled_included, archived_count, excluded_count)
 
         # Strategy 1: Group by action
         consolidated = group_by_action(selected)
@@ -106,10 +136,12 @@ class ConsolidationEngine:
         filters: List[ProtonMailFilter],
         include_disabled: bool = False,
         synced_filter_hashes: Optional[Set[str]] = None,
+        archived_filters: Optional[List[ProtonMailFilter]] = None,
+        exclude_names: Optional[Set[str]] = None,
     ) -> dict:
         """Analyze filters without consolidating. Returns statistics."""
-        selected, disabled_skipped, disabled_included = _select_filters(
-            filters, include_disabled, synced_filter_hashes
+        selected, disabled_skipped, disabled_included, archived_count, excluded_count = _select_filters(
+            filters, include_disabled, synced_filter_hashes, archived_filters, exclude_names,
         )
         disabled = len(filters) - len(selected)
 

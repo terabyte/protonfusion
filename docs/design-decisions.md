@@ -39,6 +39,33 @@ The three-strategy pipeline was designed to be:
 
 When filter A has "sender=alice AND subject=urgent" and filter B has "sender=bob", merging them must not create "sender=alice|bob AND subject=urgent" (which would incorrectly require both conditions for bob). Instead, each filter becomes a ConditionGroup that preserves its internal logic, and groups are OR'd together.
 
+## Four-State Filter Lifecycle
+
+### Why Not Just Enabled/Disabled?
+
+After consolidating and syncing, the typical workflow involves running `cleanup` to delete disabled UI filters from ProtonMail (freeing the limited filter slots). But the next `backup` no longer sees those deleted filters, so `consolidate` loses their rules. A two-state model (enabled/disabled) doesn't capture the distinction between "live on ProtonMail" and "preserved locally".
+
+The four-state model solves this:
+- **enabled/disabled** — live UI filters, scraped during backup
+- **archived** — baked into Sieve only; no longer on ProtonMail but carried forward locally
+- **deprecated** — excluded from everything; kept for reference only
+
+### Immutable backup.json
+
+`backup.json` is a faithful scrape record and is never modified after creation. When a user changes a filter's status (e.g., `snapshot set-status "Filter X" deprecated`), the change is stored as an `ArchiveEntry` in `archive.json`. This means you can always inspect the raw backup to see exactly what was on ProtonMail at that point in time.
+
+### Archive Carry-Forward
+
+On every `backup`, `archive.json` is copied from the previous snapshot (via the `latest` symlink) into the new snapshot directory. This ensures archived filters persist indefinitely across backup cycles without user intervention. The carry-forward happens before the `latest` symlink is updated to avoid self-copy.
+
+### Post-Consolidation Auto-Archiving
+
+When `consolidate` runs, backup filters that were included in Sieve generation are automatically moved to `archive.json` as `archived`. This prepares the archive for the next cycle — after `sync` and `cleanup` remove UI filters, the next backup won't find them, but the archive still has them.
+
+### Backward Compatibility
+
+The `enabled: bool` field is preserved on `ProtonMailFilter` for backward compatibility with existing serialized data. A `@model_validator(mode='before')` derives `status` from `enabled` when loading old data that lacks a `status` field, and keeps `enabled` in sync when `status` is set explicitly. The `content_hash` excludes both `enabled` and `status` so manifest tracking is unaffected by status transitions.
+
 ## Dependency Choices
 
 ### Playwright (browser automation)

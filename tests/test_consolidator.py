@@ -8,7 +8,7 @@ from src.consolidator.strategies.merge_conditions import merge_conditions
 from src.consolidator.strategies.optimize_ordering import optimize_ordering
 from src.models.filter_models import (
     ProtonMailFilter, FilterCondition, FilterAction, ConsolidatedFilter,
-    ConditionGroup, ConditionType, Operator, ActionType, LogicType,
+    ConditionGroup, ConditionType, Operator, ActionType, LogicType, FilterStatus,
 )
 
 
@@ -1008,3 +1008,117 @@ class TestDisabledFilterHandling:
         # Edited filter has different hash, should NOT be auto-included
         assert report.disabled_skipped == 1
         assert report.disabled_included == 0
+
+
+class TestStatusBasedSelection:
+    """Test four-status filter selection in consolidation engine."""
+
+    def _make_filter(self, name, status=FilterStatus.ENABLED, action_type=ActionType.DELETE):
+        return ProtonMailFilter(
+            name=name,
+            status=status,
+            conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value=f"{name}@test.com")],
+            actions=[FilterAction(type=action_type)],
+        )
+
+    def test_deprecated_always_excluded(self):
+        """DEPRECATED filters are always excluded."""
+        filters = [
+            self._make_filter("Active"),
+            self._make_filter("Dead", status=FilterStatus.DEPRECATED),
+        ]
+        engine = ConsolidationEngine()
+
+        consolidated, report = engine.consolidate(filters)
+
+        all_sources = []
+        for cf in consolidated:
+            all_sources.extend(cf.source_filters)
+        assert "Active" in all_sources
+        assert "Dead" not in all_sources
+
+    def test_archived_always_included_via_param(self):
+        """ARCHIVED filters passed via archived_filters param are always included."""
+        backup_filters = [self._make_filter("FromBackup")]
+        archived_filters = [self._make_filter("FromArchive", status=FilterStatus.ARCHIVED)]
+        engine = ConsolidationEngine()
+
+        consolidated, report = engine.consolidate(
+            backup_filters, archived_filters=archived_filters,
+        )
+
+        all_sources = []
+        for cf in consolidated:
+            all_sources.extend(cf.source_filters)
+        assert "FromBackup" in all_sources
+        assert "FromArchive" in all_sources
+        assert report.archived_count == 1
+
+    def test_exclude_names_works(self):
+        """Filters in exclude_names are excluded."""
+        filters = [
+            self._make_filter("Keep"),
+            self._make_filter("Skip"),
+        ]
+        engine = ConsolidationEngine()
+
+        consolidated, report = engine.consolidate(
+            filters, exclude_names={"Skip"},
+        )
+
+        all_sources = []
+        for cf in consolidated:
+            all_sources.extend(cf.source_filters)
+        assert "Keep" in all_sources
+        assert "Skip" not in all_sources
+        assert report.excluded_count == 1
+
+    def test_exclude_names_applies_to_archived(self):
+        """Exclude names also apply to archived filters."""
+        archived_filters = [
+            self._make_filter("ArchiveKeep", status=FilterStatus.ARCHIVED),
+            self._make_filter("ArchiveSkip", status=FilterStatus.ARCHIVED),
+        ]
+        engine = ConsolidationEngine()
+
+        consolidated, report = engine.consolidate(
+            [], archived_filters=archived_filters, exclude_names={"ArchiveSkip"},
+        )
+
+        all_sources = []
+        for cf in consolidated:
+            all_sources.extend(cf.source_filters)
+        assert "ArchiveKeep" in all_sources
+        assert "ArchiveSkip" not in all_sources
+
+    def test_mixed_four_statuses(self):
+        """All four statuses in one consolidation."""
+        enabled = self._make_filter("Enabled")
+        disabled = self._make_filter("Disabled", status=FilterStatus.DISABLED)
+        archived = self._make_filter("Archived", status=FilterStatus.ARCHIVED)
+        deprecated = self._make_filter("Deprecated", status=FilterStatus.DEPRECATED)
+
+        engine = ConsolidationEngine()
+        consolidated, report = engine.consolidate(
+            [enabled, disabled, deprecated],
+            archived_filters=[archived],
+        )
+
+        all_sources = []
+        for cf in consolidated:
+            all_sources.extend(cf.source_filters)
+        assert "Enabled" in all_sources
+        assert "Archived" in all_sources
+        assert "Deprecated" not in all_sources
+        assert "Disabled" not in all_sources  # disabled skipped by default
+
+    def test_report_has_archived_and_excluded_counts(self):
+        """ConsolidationReport includes archived_count and excluded_count."""
+        engine = ConsolidationEngine()
+        consolidated, report = engine.consolidate(
+            [self._make_filter("A"), self._make_filter("B")],
+            archived_filters=[self._make_filter("C", status=FilterStatus.ARCHIVED)],
+            exclude_names={"B"},
+        )
+        assert report.archived_count == 1
+        assert report.excluded_count == 1

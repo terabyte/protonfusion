@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from src.models.backup_models import Backup, BackupMetadata
+from src.models.backup_models import Backup, BackupMetadata, Archive, ArchiveEntry
 from src.models.filter_models import ProtonMailFilter
 from src.utils.config import SNAPSHOTS_DIR, TOOL_VERSION
 
@@ -63,6 +63,9 @@ class BackupManager:
         filepath = snapshot_dir / "backup.json"
         with open(filepath, "w") as f:
             json.dump(backup.model_dump(), f, indent=2, default=str)
+
+        # Carry forward archive from previous snapshot before updating symlink
+        self.carry_forward_archive(snapshot_dir)
 
         # Update latest symlink at snapshots/latest -> dirname
         latest_link = self.snapshots_dir / "latest"
@@ -155,6 +158,45 @@ class BackupManager:
             return True
         logger.warning("Snapshot not found: %s", identifier)
         return False
+
+    # --- Archive methods ---
+
+    def write_archive(self, snapshot_dir: Path, entries: List[ArchiveEntry]):
+        """Serialize archive entries to archive.json in the snapshot directory."""
+        archive = Archive(entries=entries)
+        archive_path = snapshot_dir / "archive.json"
+        archive_path.write_text(json.dumps(archive.model_dump(), indent=2, default=str))
+        logger.info("Archive written: %s (%d entries)", archive_path, len(entries))
+
+    def load_archive(self, snapshot_dir: Path) -> List[ArchiveEntry]:
+        """Load archive.json from a snapshot directory. Returns empty list if absent."""
+        archive_path = snapshot_dir / "archive.json"
+        if not archive_path.exists():
+            return []
+        data = json.loads(archive_path.read_text())
+        archive = Archive.model_validate(data)
+        return archive.entries
+
+    def carry_forward_archive(self, target_dir: Path) -> List[ArchiveEntry]:
+        """Copy archive.json from the latest symlink to target_dir.
+
+        Returns the carried-forward entries (empty list if no previous archive).
+        """
+        latest_link = self.snapshots_dir / "latest"
+        if not latest_link.exists() and not latest_link.is_symlink():
+            return []
+        try:
+            prev_dir = latest_link.resolve()
+        except OSError:
+            return []
+        if prev_dir == target_dir:
+            # Don't carry forward from ourselves
+            return []
+        entries = self.load_archive(prev_dir)
+        if entries:
+            self.write_archive(target_dir, entries)
+            logger.info("Archive carried forward: %d entries from %s", len(entries), prev_dir.name)
+        return entries
 
     # --- Manifest methods ---
 

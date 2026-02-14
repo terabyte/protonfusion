@@ -5,8 +5,9 @@ import difflib
 import json
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import typer
 from rich.console import Console
@@ -17,8 +18,8 @@ from rich import print as rprint
 from src.utils.config import (
     load_credentials, SNAPSHOTS_DIR, TOOL_VERSION,
 )
-from src.models.filter_models import ProtonMailFilter
-from src.models.backup_models import Backup
+from src.models.filter_models import ProtonMailFilter, FilterStatus
+from src.models.backup_models import Backup, ArchiveEntry
 from src.backup.backup_manager import BackupManager
 from src.backup.diff_engine import DiffEngine
 from src.parser.filter_parser import parse_scraped_filters
@@ -33,6 +34,8 @@ app = typer.Typer(
     help="ProtonFusion - safely consolidate your ProtonMail filters into Sieve scripts.",
     add_completion=False,
 )
+snapshot_app = typer.Typer(help="Manage snapshot contents.")
+app.add_typer(snapshot_app, name="snapshot")
 console = Console()
 
 # Configure logging
@@ -182,18 +185,32 @@ def show_backup(
         console.print(f"[cyan]ProtonFusion markers: {'yes' if has_markers else 'no'}")
 
 
+_STATUS_DISPLAY = {
+    FilterStatus.ENABLED: "[green]enabled[/]",
+    FilterStatus.DISABLED: "[yellow]disabled[/]",
+    FilterStatus.ARCHIVED: "[cyan]archived[/]",
+    FilterStatus.DEPRECATED: "[dim]deprecated[/]",
+}
+
+
 def _display_filters(filters: list, source: str = "ProtonMail account"):
     """Display a list of filters in a readable table."""
     if not filters:
         console.print(f"[yellow]No filters found in {source}.")
         return
 
-    enabled_count = sum(1 for f in filters if f.enabled)
-    disabled_count = len(filters) - enabled_count
+    counts = {}
+    for f in filters:
+        counts[f.status.value] = counts.get(f.status.value, 0) + 1
+
+    summary_parts = [f"[bold]Found {len(filters)} filters[/] in {source}"]
+    for status_val, color in [("enabled", "green"), ("disabled", "yellow"), ("archived", "cyan"), ("deprecated", "dim")]:
+        count = counts.get(status_val, 0)
+        if count > 0:
+            summary_parts.append(f"{status_val.title()}: [{color}]{count}[/]")
 
     console.print(Panel(
-        f"[bold]Found {len(filters)} filters[/] in {source}\n"
-        f"Enabled: [green]{enabled_count}[/]  Disabled: [yellow]{disabled_count}[/]",
+        "\n".join(summary_parts[:1]) + "\n" + "  ".join(summary_parts[1:]),
         title="Filter Summary",
     ))
 
@@ -205,7 +222,7 @@ def _display_filters(filters: list, source: str = "ProtonMail account"):
     table.add_column("Actions", max_width=30)
 
     for i, f in enumerate(filters, 1):
-        status = "[green]ON[/]" if f.enabled else "[yellow]OFF[/]"
+        status = _STATUS_DISPLAY.get(f.status, str(f.status.value))
 
         # Format conditions
         cond_parts = []
@@ -244,16 +261,22 @@ def list_snapshots():
     table.add_column("Filters", justify="right")
     table.add_column("Enabled", justify="right", style="green")
     table.add_column("Disabled", justify="right", style="yellow")
+    table.add_column("Archived", justify="right", style="cyan")
     table.add_column("Size", justify="right")
 
     for b in backups:
         size_kb = b["size_bytes"] / 1024
+        # Load archive count for this snapshot
+        snapshot_path = Path(b["path"])
+        archive_entries = manager.load_archive(snapshot_path)
+        archived_count = len(archive_entries)
         table.add_row(
             b["snapshot"],
             b["timestamp"][:19] if b["timestamp"] else "?",
             str(b["filter_count"]),
             str(b["enabled_count"]),
             str(b["disabled_count"]),
+            str(archived_count) if archived_count else "-",
             f"{size_kb:.1f} KB",
         )
 
@@ -330,11 +353,52 @@ def consolidate(
     backup_id: str = typer.Option("latest", "--backup", help="Backup identifier"),
     output_file: str = typer.Option("", "--output", help="Output file for Sieve script (default: inside snapshot dir)"),
     include_disabled: bool = typer.Option(False, "--include-disabled", help="Include disabled filters in consolidation"),
+    exclude: Optional[List[str]] = typer.Option(None, "--exclude", help="Exclude filter by name (repeatable)"),
+    include_args_from: str = typer.Option("", "--include-args-from", help="Load previous consolidation_args.json from snapshot"),
 ):
     """Generate optimized Sieve script from backup (local only, no ProtonMail changes)."""
     manager = BackupManager()
     bkup = manager.load_backup(backup_id)
     snapshot_dir = manager.snapshot_dir_for(backup_id)
+
+    # Build exclude set from CLI args + loaded args
+    exclude_names: set[str] = set(exclude) if exclude else set()
+    if include_args_from:
+        args_dir = manager.snapshot_dir_for(include_args_from)
+        args_path = args_dir / "consolidation_args.json"
+        if args_path.exists():
+            saved_args = json.loads(args_path.read_text())
+            exclude_names.update(saved_args.get("exclude", []))
+            console.print(f"[cyan]Loaded args from {include_args_from}: +{len(saved_args.get('exclude', []))} excludes")
+        else:
+            console.print(f"[yellow]No consolidation_args.json found in {include_args_from}")
+
+    # Load archive entries and separate by status
+    archive_entries = manager.load_archive(snapshot_dir)
+    archived_filters = [
+        e.filter for e in archive_entries
+        if e.filter.status == FilterStatus.ARCHIVED
+    ]
+
+    # Apply archive status overrides to backup filters
+    archive_by_hash = {e.filter.content_hash: e for e in archive_entries}
+    backup_filters = []
+    for f in bkup.filters:
+        if f.content_hash in archive_by_hash:
+            # Archive entry overrides this backup filter's status
+            override = archive_by_hash[f.content_hash]
+            if override.filter.status == FilterStatus.ARCHIVED:
+                continue  # Already in archived_filters
+            if override.filter.status == FilterStatus.DEPRECATED:
+                continue  # Will be skipped
+            backup_filters.append(override.filter)
+        else:
+            backup_filters.append(f)
+
+    if archived_filters:
+        console.print(f"[cyan]Including {len(archived_filters)} archived filters from archive")
+    if exclude_names:
+        console.print(f"[cyan]Excluding by name: {', '.join(sorted(exclude_names))}")
 
     synced_filter_hashes = None
     if not include_disabled:
@@ -344,9 +408,11 @@ def consolidate(
 
     engine = ConsolidationEngine()
     consolidated, report = engine.consolidate(
-        bkup.filters,
+        backup_filters,
         include_disabled=include_disabled,
         synced_filter_hashes=synced_filter_hashes,
+        archived_filters=archived_filters,
+        exclude_names=exclude_names,
     )
 
     generator = SieveGenerator()
@@ -364,9 +430,32 @@ def consolidate(
     all_source_names = set()
     for cf in consolidated:
         all_source_names.update(cf.source_filters)
-    processed_filters = [f for f in bkup.filters if f.name in all_source_names]
+    all_processed = backup_filters + archived_filters
+    processed_filters = [f for f in all_processed if f.name in all_source_names]
     manager.write_manifest(snapshot_dir, processed_filters, str(out_path))
     console.print(f"[cyan]Manifest written to snapshot ({len(processed_filters)} filters)")
+
+    # Post-consolidation archiving: move included backup filters to archive
+    now_ts = datetime.now(timezone.utc).isoformat()
+    for f in bkup.filters:
+        if f.name in all_source_names and f.content_hash not in archive_by_hash:
+            archived_f = f.model_copy(deep=True)
+            archived_f.status = FilterStatus.ARCHIVED
+            archived_f.enabled = False
+            archive_entries.append(ArchiveEntry(
+                filter=archived_f,
+                archived_at=now_ts,
+                source_snapshot=snapshot_dir.name,
+            ))
+    manager.write_archive(snapshot_dir, archive_entries)
+
+    # Save consolidation_args.json
+    args_data = {
+        "exclude": sorted(exclude_names) if exclude_names else [],
+        "include_disabled": include_disabled,
+        "created_at": now_ts,
+    }
+    (snapshot_dir / "consolidation_args.json").write_text(json.dumps(args_data, indent=2))
 
     # Build report display
     report_lines = [
@@ -377,6 +466,10 @@ def consolidate(
     ]
     if report.disabled_included > 0:
         report_lines.append(f"Disabled (included via manifest): {report.disabled_included}")
+    if report.archived_count > 0:
+        report_lines.append(f"Archived (included): {report.archived_count}")
+    if report.excluded_count > 0:
+        report_lines.append(f"Excluded by name: {report.excluded_count}")
     report_lines.append(f"Consolidated rules: {report.consolidated_count}")
     report_lines.append(f"[bold green]Reduction: {report.reduction_percent:.1f}%[/]")
 
@@ -708,12 +801,16 @@ def cleanup(
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview what will be deleted"),
     workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
 ):
-    """Delete all disabled filters (with confirmation)."""
+    """Delete all disabled filters (with confirmation).
+
+    Auto-archives disabled filters before deletion to preserve them for future consolidation.
+    """
     from src.scraper.protonmail_scraper import ProtonMailScraper
     from src.scraper.protonmail_sync import ProtonMailSync
 
     creds = _get_credentials(credentials_file, False)
     _workers = max(1, min(workers, 10))
+    manager = BackupManager()
 
     async def _run():
         scraper = ProtonMailScraper(headless=headless, credentials=creds)
@@ -731,6 +828,30 @@ def cleanup(
         if not disabled:
             console.print("[green]No disabled filters to clean up.")
             return
+
+        # Auto-archive any disabled filters missing from the archive
+        try:
+            latest_dir = manager.snapshot_dir_for("latest")
+            archive_entries = manager.load_archive(latest_dir)
+            archive_hashes = {e.filter.content_hash for e in archive_entries}
+            now_ts = datetime.now(timezone.utc).isoformat()
+            auto_archived = 0
+            for f in disabled:
+                if f.content_hash not in archive_hashes:
+                    archived_f = f.model_copy(deep=True)
+                    archived_f.status = FilterStatus.ARCHIVED
+                    archived_f.enabled = False
+                    archive_entries.append(ArchiveEntry(
+                        filter=archived_f,
+                        archived_at=now_ts,
+                        source_snapshot=latest_dir.name,
+                    ))
+                    auto_archived += 1
+            if auto_archived:
+                manager.write_archive(latest_dir, archive_entries)
+                console.print(f"[cyan]Auto-archived {auto_archived} filters missing from archive")
+        except FileNotFoundError:
+            pass  # No latest snapshot, skip archive step
 
         console.print(f"\n[bold yellow]Found {len(disabled)} disabled filters:")
         for f in disabled:
@@ -751,17 +872,220 @@ def cleanup(
             await sync_client.login()
             await sync_client.navigate_to_filters()
 
-            deleted = 0
+            deleted_count = 0
             for f in disabled:
                 if await sync_client.delete_filter(f.name):
-                    deleted += 1
+                    deleted_count += 1
                     console.print(f"  [red]Deleted: {f.name}")
 
-            console.print(f"\n[green]Deleted {deleted}/{len(disabled)} filters")
+            console.print(f"\n[green]Deleted {deleted_count}/{len(disabled)} filters")
         finally:
             await sync_client.close()
 
     asyncio.run(_run())
+
+
+# --- Snapshot sub-commands ---
+
+def _load_merged_filters(manager: BackupManager, backup_id: str) -> tuple[List[ProtonMailFilter], List[ArchiveEntry], Path]:
+    """Load backup + archive and return merged view.
+
+    Returns (merged_filters, archive_entries, snapshot_dir).
+    Archive entries override backup entries with the same content_hash.
+    """
+    snapshot_dir = manager.snapshot_dir_for(backup_id)
+    bkup = manager.load_backup(backup_id)
+    archive_entries = manager.load_archive(snapshot_dir)
+
+    # Index archive entries by content_hash
+    archive_by_hash = {e.filter.content_hash: e for e in archive_entries}
+
+    merged = []
+    seen_hashes = set()
+
+    # Archive entries take precedence
+    for entry in archive_entries:
+        merged.append(entry.filter)
+        seen_hashes.add(entry.filter.content_hash)
+
+    # Add backup filters not already in archive
+    for f in bkup.filters:
+        if f.content_hash not in seen_hashes:
+            merged.append(f)
+            seen_hashes.add(f.content_hash)
+
+    return merged, archive_entries, snapshot_dir
+
+
+@snapshot_app.command("view")
+def snapshot_view(
+    backup_id: str = typer.Option("latest", "--backup", help="Backup identifier (timestamp or 'latest')"),
+):
+    """View all filters in a snapshot (backup + archive merged)."""
+    manager = BackupManager()
+    merged, archive_entries, snapshot_dir = _load_merged_filters(manager, backup_id)
+
+    if not merged:
+        console.print("[yellow]No filters found in snapshot.")
+        return
+
+    # Count by status
+    counts = {}
+    for f in merged:
+        counts[f.status.value] = counts.get(f.status.value, 0) + 1
+
+    summary_parts = []
+    for status_val in ["enabled", "disabled", "archived", "deprecated"]:
+        count = counts.get(status_val, 0)
+        if status_val == "enabled":
+            summary_parts.append(f"Enabled: [green]{count}[/]")
+        elif status_val == "disabled":
+            summary_parts.append(f"Disabled: [yellow]{count}[/]")
+        elif status_val == "archived":
+            summary_parts.append(f"Archived: [cyan]{count}[/]")
+        elif status_val == "deprecated":
+            summary_parts.append(f"Deprecated: [dim]{count}[/]")
+
+    console.print(Panel(
+        f"[bold]Snapshot: {snapshot_dir.name}[/]\n"
+        f"Total filters: {len(merged)}\n"
+        + "  ".join(summary_parts),
+        title="Snapshot View",
+    ))
+
+    STATUS_STYLE = {
+        FilterStatus.ENABLED: "[green]enabled[/]",
+        FilterStatus.DISABLED: "[yellow]disabled[/]",
+        FilterStatus.ARCHIVED: "[cyan]archived[/]",
+        FilterStatus.DEPRECATED: "[dim]deprecated[/]",
+    }
+
+    table = Table(title="Filters")
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("Name", max_width=40)
+    table.add_column("Status", justify="center")
+    table.add_column("Conditions", max_width=50)
+    table.add_column("Actions", max_width=30)
+
+    for i, f in enumerate(merged, 1):
+        status_str = STATUS_STYLE.get(f.status, str(f.status.value))
+
+        # Color the name based on status
+        name_style = {
+            FilterStatus.ENABLED: "green",
+            FilterStatus.DISABLED: "yellow",
+            FilterStatus.ARCHIVED: "cyan",
+            FilterStatus.DEPRECATED: "dim",
+        }.get(f.status, "")
+        name_str = f"[{name_style}]{f.name}[/]" if name_style else f.name
+
+        cond_parts = []
+        for c in f.conditions:
+            cond_parts.append(f"{c.type.value} {c.operator.value} \"{c.value}\"")
+        conds_str = f" {f.logic.value.upper()} ".join(cond_parts) if cond_parts else "[dim]none[/]"
+
+        action_parts = []
+        for a in f.actions:
+            if a.parameters:
+                params = ", ".join(f"{v}" for v in a.parameters.values())
+                action_parts.append(f"{a.type.value}({params})")
+            else:
+                action_parts.append(a.type.value)
+        actions_str = ", ".join(action_parts) if action_parts else "[dim]none[/]"
+
+        table.add_row(str(i), name_str, status_str, conds_str, actions_str)
+
+    console.print(table)
+
+
+@snapshot_app.command("set-status")
+def snapshot_set_status(
+    name: str = typer.Argument(..., help="Filter name to update"),
+    status: FilterStatus = typer.Argument(..., help="New status (enabled, disabled, archived, deprecated)"),
+    backup_id: str = typer.Option("latest", "--backup", help="Backup identifier"),
+):
+    """Set the status of a filter in the archive.
+
+    The backup.json file is immutable. Status overrides are stored in archive.json.
+    """
+    manager = BackupManager()
+    snapshot_dir = manager.snapshot_dir_for(backup_id)
+    bkup = manager.load_backup(backup_id)
+    archive_entries = manager.load_archive(snapshot_dir)
+
+    # Find the filter in archive or backup
+    archive_idx = None
+    for i, entry in enumerate(archive_entries):
+        if entry.filter.name == name:
+            archive_idx = i
+            break
+
+    backup_filter = None
+    for f in bkup.filters:
+        if f.name == name:
+            backup_filter = f
+            break
+
+    if archive_idx is None and backup_filter is None:
+        console.print(f"[red]Filter not found: '{name}'")
+        raise typer.Exit(1)
+
+    if archive_idx is not None:
+        # Update existing archive entry
+        archive_entries[archive_idx].filter.status = status
+        archive_entries[archive_idx].filter.enabled = status == FilterStatus.ENABLED
+        console.print(f"[green]Updated archive entry '{name}' -> {status.value}")
+    else:
+        # Create new archive entry from backup filter (backup stays immutable)
+        archived_filter = backup_filter.model_copy(deep=True)
+        archived_filter.status = status
+        archived_filter.enabled = status == FilterStatus.ENABLED
+        entry = ArchiveEntry(
+            filter=archived_filter,
+            archived_at=datetime.now(timezone.utc).isoformat(),
+            source_snapshot=snapshot_dir.name,
+        )
+        archive_entries.append(entry)
+        console.print(f"[green]Created archive entry '{name}' -> {status.value}")
+
+    manager.write_archive(snapshot_dir, archive_entries)
+
+
+@snapshot_app.command("remove")
+def snapshot_remove(
+    name: str = typer.Argument(..., help="Filter name to remove from archive"),
+    backup_id: str = typer.Option("latest", "--backup", help="Backup identifier"),
+):
+    """Permanently remove a rule from the archive.
+
+    To exclude a scraped filter from consolidation, use 'set-status <name> deprecated' instead.
+    """
+    manager = BackupManager()
+    snapshot_dir = manager.snapshot_dir_for(backup_id)
+    archive_entries = manager.load_archive(snapshot_dir)
+
+    # Check if filter exists in archive
+    found = False
+    new_entries = []
+    for entry in archive_entries:
+        if entry.filter.name == name:
+            found = True
+        else:
+            new_entries.append(entry)
+
+    if not found:
+        # Check if it's in backup only
+        bkup = manager.load_backup(backup_id)
+        in_backup = any(f.name == name for f in bkup.filters)
+        if in_backup:
+            console.print(f"[red]Filter '{name}' exists only in backup.json (immutable).")
+            console.print("[yellow]Use 'snapshot set-status \"{name}\" deprecated' to exclude it from consolidation.")
+        else:
+            console.print(f"[red]Filter not found: '{name}'")
+        raise typer.Exit(1)
+
+    manager.write_archive(snapshot_dir, new_entries)
+    console.print(f"[green]Removed '{name}' from archive ({len(archive_entries) - len(new_entries)} entries removed)")
 
 
 if __name__ == "__main__":

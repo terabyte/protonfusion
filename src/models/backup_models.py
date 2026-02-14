@@ -20,3 +20,14 @@ class Backup(BaseModel):
     filters: List[ProtonMailFilter] = Field(default_factory=list)
     sieve_script: str = ""
     checksum: str = ""
+
+
+class ArchiveEntry(BaseModel):
+    filter: ProtonMailFilter
+    archived_at: str = ""
+    source_snapshot: str = ""
+
+
+class Archive(BaseModel):
+    version: str = "1.0"
+    entries: List[ArchiveEntry] = Field(default_factory=list)

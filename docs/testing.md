@@ -4,7 +4,7 @@ ProtonFusion has two testing layers: a comprehensive unit test suite that runs o
 
 ## Unit Tests
 
-258 tests across 7 test files, plus a shared `conftest.py` with 18 fixtures.
+307 tests across 8 test files, plus a shared `conftest.py` with 23 fixtures.
 
 ### Running
 
@@ -23,12 +23,13 @@ python -m pytest tests/test_sieve_generator.py::test_generate_basic_rule -v
 
 | File | What It Tests |
 |------|--------------|
-| `test_models.py` | Pydantic model validation, content hashing, serialization round-trips |
+| `test_models.py` | Pydantic model validation, content hashing, serialization round-trips, FilterStatus, ArchiveEntry, Archive |
 | `test_parser.py` | Condition/operator/action type mapping from scraped data |
-| `test_backup.py` | Backup creation, loading, listing, checksum verification, manifests |
-| `test_consolidator.py` | All three consolidation strategies and the engine pipeline |
+| `test_backup.py` | Backup creation, loading, listing, checksum verification, manifests, archive I/O, carry-forward |
+| `test_consolidator.py` | All three consolidation strategies, the engine pipeline, and status-based filter selection |
 | `test_sieve_generator.py` | Sieve script generation, extension collection, merging with existing scripts |
-| `test_diff.py` | Filter comparison (added, removed, modified, state_changed, unchanged) |
+| `test_diff.py` | Filter comparison (added, removed, modified, state_changed, unchanged), status-aware diffing |
+| `test_snapshot.py` | Snapshot CLI commands: view, set-status, remove (using Typer CliRunner) |
 | `test_config.py` | Configuration loading, credential parsing |
 | `test_scraper.py` | Selector validation (offline, no browser needed) |
 | `test_parallel_scraping.py` | Worker distribution logic, chunk assignment |
@@ -37,16 +38,19 @@ python -m pytest tests/test_sieve_generator.py::test_generate_basic_rule -v
 
 The shared fixture file provides sample data for consistent test setup:
 
-- **Sample filters**: spam filter, move-to-folder filter, disabled filter, complex multi-condition filter
+- **Sample filters**: spam filter, move-to-folder filter, disabled filter, complex multi-condition filter, archived filter, deprecated filter
 - **Sample conditions and actions**: pre-built `FilterCondition` and `FilterAction` instances
 - **Sample consolidated filters**: pre-built `ConsolidatedFilter` instances with condition groups
 - **Sample backups**: complete `Backup` objects with metadata and checksums
-- **Temporary directories**: `temp_snapshots_dir` for tests that create/load snapshots, cleaned up automatically
+- **Sample archive data**: `ArchiveEntry` and `ArchiveEntry` list fixtures for archive I/O testing
+- **Temporary directories**: `temp_snapshots_dir` for tests that create/load snapshots, `temp_snapshot_with_archive` for pre-populated snapshot dirs with archive.json, cleaned up automatically
 
 ### Testing Notes
 
 - Backup tests that create time-based directory names need `sleep(1)` between creates to avoid timestamp collisions.
 - The `temp_snapshots_dir` fixture patches `PROTONFUSION_DATA_DIR` to isolate tests from real snapshot data.
+- Snapshot CLI tests require patching `SNAPSHOTS_DIR` in both `src.utils.config` and `src.backup.backup_manager` due to Python's import-time binding.
+- Rich console width must be monkeypatched (`Console(width=200)`) for Typer CliRunner tests, since the runner captures output without a real terminal.
 
 ## End-to-End Test
 
