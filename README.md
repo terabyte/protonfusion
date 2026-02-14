@@ -1,5 +1,7 @@
 # ProtonFusion
 
+![CI](https://github.com/terabyte/protonfusion/actions/workflows/ci.yml/badge.svg)
+
 A safe, reversible tool for consolidating your ProtonMail filters into optimized Sieve scripts. If you have dozens (or hundreds) of filters cluttering your ProtonMail settings, ProtonFusion merges them into clean, efficient Sieve rules.
 
 ## Disclaimer
