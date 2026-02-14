@@ -161,7 +161,7 @@ class TestSieveGenerator:
         assert "test@example.com" in script
 
     def test_generate_recipient_condition(self):
-        """Test generating recipient condition."""
+        """Test generating recipient condition checks To, Cc, and Bcc."""
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
@@ -174,7 +174,7 @@ class TestSieveGenerator:
         script = gen.generate([cf])
 
         assert "address" in script
-        assert "To" in script
+        assert '["To", "Cc", "Bcc"]' in script
         assert "me@example.com" in script
 
     def test_generate_subject_condition(self):
@@ -225,7 +225,7 @@ class TestSieveGenerator:
         assert ":is" in script
 
     def test_generate_matches_operator(self):
-        """Test generating matches operator."""
+        """Test generating matches operator (built-in, no extension needed)."""
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
@@ -238,8 +238,8 @@ class TestSieveGenerator:
         script = gen.generate([cf])
 
         assert ":matches" in script
-        assert "require" in script
-        assert "regex" in script
+        # :matches is a built-in Sieve comparator; it must NOT pull in "regex"
+        assert "regex" not in script
 
     def test_generate_or_logic_within_group(self):
         """Test generating OR logic (anyof) within a single condition group."""
@@ -424,20 +424,20 @@ class TestSieveGenerator:
 
         assert "imap4flags" in extensions
 
-    def test_collect_extensions_regex(self):
-        """Test that regex extension is collected."""
+    def test_matches_does_not_collect_regex_extension(self):
+        """Test that :matches (built-in) does not add 'regex' extension."""
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
             condition_groups=[ConditionGroup(conditions=[
-                FilterCondition(type=ConditionType.SENDER, operator=Operator.MATCHES, value=".*")
+                FilterCondition(type=ConditionType.SENDER, operator=Operator.MATCHES, value="*@spam.com")
             ])],
             actions=[FilterAction(type=ActionType.DELETE)]
         )
 
         extensions = gen._collect_extensions([cf])
 
-        assert "regex" in extensions
+        assert "regex" not in extensions
 
     def test_generate_real_world_example(self):
         """Test generating a realistic consolidated filter."""
@@ -504,6 +504,67 @@ class TestSieveGenerator:
         assert "allof" in script
         assert "alice" in script
         assert "urgent" in script
+
+    def test_generate_comma_separated_values_expanded_to_array(self):
+        """Test that ProtonMail comma-separated values are expanded into Sieve arrays.
+
+        ProtonMail stores multiple values in a single condition field as
+        "val1, val2, val3". These must become Sieve array elements, not a
+        single string literal.
+        """
+        gen = SieveGenerator()
+        cf = ConsolidatedFilter(
+            name="dumb services",
+            condition_groups=[ConditionGroup(
+                logic=LogicType.OR,
+                conditions=[
+                    FilterCondition(
+                        type=ConditionType.SENDER,
+                        operator=Operator.CONTAINS,
+                        value="redfin.com, zillow.com, ebay.com",
+                    ),
+                    FilterCondition(
+                        type=ConditionType.SUBJECT,
+                        operator=Operator.CONTAINS,
+                        value="[IEEE-Announcements]",
+                    ),
+                ],
+            )],
+            actions=[
+                FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "Company Comms/myjunk"}),
+                FilterAction(type=ActionType.MARK_READ),
+            ],
+        )
+
+        script = gen.generate([cf])
+
+        # Each comma-separated value must be a separate array element
+        assert '["redfin.com", "zillow.com", "ebay.com"]' in script
+        # Single values should NOT become arrays
+        assert '"[IEEE-Announcements]"' in script
+
+    def test_generate_comma_separated_with_pipe_merged(self):
+        """Test comma-separated values combined with pipe-merged values."""
+        gen = SieveGenerator()
+        cf = ConsolidatedFilter(
+            name="Test",
+            condition_groups=[ConditionGroup(conditions=[
+                FilterCondition(
+                    type=ConditionType.SENDER,
+                    operator=Operator.CONTAINS,
+                    # Pipe from merge_conditions, commas from ProtonMail
+                    value="a.com, b.com|c.com, d.com",
+                ),
+            ])],
+            actions=[FilterAction(type=ActionType.DELETE)],
+        )
+
+        script = gen.generate([cf])
+
+        assert '"a.com"' in script
+        assert '"b.com"' in script
+        assert '"c.com"' in script
+        assert '"d.com"' in script
 
     def test_generate_mixed_and_or_groups(self):
         """Test rendering consolidated filter with AND and single-condition groups."""

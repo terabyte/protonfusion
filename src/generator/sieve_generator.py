@@ -97,11 +97,6 @@ class SieveGenerator:
                 if ext:
                     extensions.add(ext)
 
-            for group in f.condition_groups:
-                for cond in group.conditions:
-                    if cond.operator == Operator.MATCHES:
-                        extensions.add("regex")
-
         return extensions
 
     def _generate_conditions(self, f: ConsolidatedFilter) -> str:
@@ -156,8 +151,18 @@ class SieveGenerator:
         """Convert a single condition to Sieve syntax."""
         comparator = self._operator_to_sieve(cond.operator)
 
-        # Handle pipe-delimited values (merged conditions)
-        values = cond.value.split("|") if "|" in cond.value else [cond.value]
+        # Handle pipe-delimited values (from merge_conditions strategy)
+        raw_values = cond.value.split("|") if "|" in cond.value else [cond.value]
+
+        # Also split comma-separated values within each entry.
+        # ProtonMail stores multiple values in a single condition field
+        # as "val1, val2, val3" — these need to become Sieve array elements.
+        values = []
+        for v in raw_values:
+            if ", " in v:
+                values.extend(part.strip() for part in v.split(", "))
+            else:
+                values.append(v)
 
         if len(values) == 1:
             value_str = f'"{self._escape_sieve(values[0])}"'
@@ -168,7 +173,7 @@ class SieveGenerator:
         if cond.type == ConditionType.SENDER:
             return f'address {comparator} "From" {value_str}'
         elif cond.type == ConditionType.RECIPIENT:
-            return f'address {comparator} "To" {value_str}'
+            return f'address {comparator} ["To", "Cc", "Bcc"] {value_str}'
         elif cond.type == ConditionType.SUBJECT:
             return f'header {comparator} "Subject" {value_str}'
         elif cond.type == ConditionType.ATTACHMENTS:

@@ -383,8 +383,9 @@ class ProtonMailScraper(ProtonMailBrowser):
         """Build a map from dropdown display text to full folder path.
 
         Opens the folder dropdown, reads all items in order, and reconstructs
-        the hierarchy from bullet prefixes. ProtonMail uses " • " to indicate
-        subfolders in dropdown items.
+        the hierarchy from bullet prefixes.  ProtonMail prefixes each nesting
+        level with one bullet character (``•`` or ``·``), so counting bullets
+        gives the depth and a simple path stack reconstructs the full path.
         """
         if page is None:
             page = self.page
@@ -395,7 +396,9 @@ class ProtonMailScraper(ProtonMailBrowser):
             await page.wait_for_timeout(DROPDOWN_MS)
 
             items = await page.query_selector_all(selectors.DROPDOWN_ITEM)
-            current_parent = None
+            # Stack of ancestor folder names; path_stack[0] is top-level,
+            # path_stack[1] is depth-1 child, etc.
+            path_stack: List[str] = []
 
             for item in items:
                 text = (await item.inner_text()).strip()
@@ -403,19 +406,21 @@ class ProtonMailScraper(ProtonMailBrowser):
                     continue
 
                 clean = text.lstrip(BULLET_CHARS).strip()
-                is_child = text != clean  # had bullet prefix
 
                 if clean in SPECIAL_FOLDERS:
                     continue
 
-                if is_child and current_parent:
-                    full_path = f"{current_parent}/{clean}"
-                    self._folder_path_map[text] = full_path
-                    self._folder_path_map[clean] = full_path
-                else:
-                    current_parent = clean
-                    self._folder_path_map[text] = clean
-                    self._folder_path_map[clean] = clean
+                # Determine nesting depth by counting bullet characters
+                prefix = text[: len(text) - len(text.lstrip(BULLET_CHARS))]
+                depth = sum(1 for ch in prefix if ch in "•·")
+
+                # Trim the stack to the current depth and push this folder
+                path_stack = path_stack[:depth]
+                path_stack.append(clean)
+
+                full_path = "/".join(path_stack)
+                self._folder_path_map[text] = full_path
+                self._folder_path_map[clean] = full_path
 
             # Close the dropdown by pressing Escape
             await page.keyboard.press("Escape")
