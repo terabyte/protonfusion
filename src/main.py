@@ -1,6 +1,7 @@
 """CLI entry point for ProtonFusion."""
 
 import asyncio
+import difflib
 import json
 import logging
 import sys
@@ -484,6 +485,7 @@ def sync(
     headless: bool = typer.Option(False, "--headless", help="Run browser in headless mode"),
     credentials_file: str = typer.Option("", "--credentials-file", help="Credentials file"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview changes without applying"),
+    show_diff_only: bool = typer.Option(False, "--show-diff-only", help="Log in, fetch live Sieve, show diff, change nothing"),
 ):
     """Upload Sieve script and disable old UI filters (reversible)."""
     from src.scraper.protonmail_sync import ProtonMailSync
@@ -523,6 +525,64 @@ def sync(
             else:
                 preview = "\n".join(merged.split("\n")[:40])
                 console.print(Panel(preview + "\n...", title="Merged Script Preview (first 40 lines)", border_style="cyan"))
+        return
+
+    if show_diff_only:
+        async def _show_diff():
+            sync_client = ProtonMailSync(headless=headless, credentials=creds)
+            try:
+                await sync_client.initialize()
+                await sync_client.login()
+                await sync_client.navigate_to_filters()
+
+                with console.status("[bold green]Reading existing Sieve script..."):
+                    existing_script = await sync_client.read_sieve_script(
+                        filter_name=SIEVE_FILTER_NAME,
+                    )
+
+                if not existing_script:
+                    existing_script = ""
+
+                merged_script = SieveGenerator.merge_with_existing(sieve_script, existing_script)
+
+                if existing_script == merged_script:
+                    console.print(Panel("[bold green]No changes — live script already matches."))
+                    return
+
+                diff_lines = list(difflib.unified_diff(
+                    existing_script.splitlines(keepends=True),
+                    merged_script.splitlines(keepends=True),
+                    fromfile="live (ProtonMail)",
+                    tofile="merged (would upload)",
+                ))
+
+                if not diff_lines:
+                    console.print(Panel("[bold green]No changes — live script already matches."))
+                    return
+
+                colored = []
+                for line in diff_lines:
+                    text = line.rstrip("\n")
+                    if line.startswith("+++") or line.startswith("---"):
+                        colored.append(f"[bold]{text}[/bold]")
+                    elif line.startswith("@@"):
+                        colored.append(f"[cyan]{text}[/cyan]")
+                    elif line.startswith("+"):
+                        colored.append(f"[green]{text}[/green]")
+                    elif line.startswith("-"):
+                        colored.append(f"[red]{text}[/red]")
+                    else:
+                        colored.append(text)
+
+                console.print(Panel(
+                    "\n".join(colored),
+                    title="Sieve Diff (live vs would-upload)",
+                    border_style="cyan",
+                ))
+            finally:
+                await sync_client.close()
+
+        asyncio.run(_show_diff())
         return
 
     async def _run():
