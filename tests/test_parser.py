@@ -365,3 +365,22 @@ class TestParseScrapedFilters:
         assert len(f.actions) == 2
         assert f.actions[0].type == ActionType.MOVE_TO
         assert f.actions[1].type == ActionType.MARK_READ
+
+
+class TestParseEvidence:
+    """Raw evidence and scrape issues pass through the parser unchanged."""
+
+    def test_evidence_passthrough(self):
+        f = parse_filter({
+            "name": "X",
+            "raw": {"conditions_text": "c", "actions_text": "a", "sieve_text": ""},
+            "scrape_issues": ["unknown action row 'filter-modal:foo-row'"],
+        })
+        assert f.raw.actions_text == "a"
+        assert f.scrape_issues == ["unknown action row 'filter-modal:foo-row'"]
+        assert not f.is_complete
+
+    def test_missing_evidence_defaults(self):
+        f = parse_filter({"name": "X"})
+        assert f.raw is None
+        assert f.is_complete

@@ -53,6 +53,19 @@ class FilterStatus(str, Enum):
     DEPRECATED = "deprecated"
 
 
+class ScrapeEvidence(BaseModel):
+    """Visible text captured from the filter wizard while scraping.
+
+    The parsed conditions/actions are only as good as the scraper's
+    understanding of the UI. This keeps what the UI actually showed, so a
+    field the parser misses (or misreads) can still be recovered from the
+    backup later instead of being lost when the UI filter is deleted.
+    """
+    conditions_text: str = ""  # Conditions step: visible text + form field states
+    actions_text: str = ""     # Actions step: visible text + form field states
+    sieve_text: str = ""       # Set instead of the above when Edit opened the Sieve editor
+
+
 class ProtonMailFilter(BaseModel):
     name: str
     enabled: bool = True
@@ -61,6 +74,17 @@ class ProtonMailFilter(BaseModel):
     logic: LogicType = LogicType.AND
     conditions: List[FilterCondition] = Field(default_factory=list)
     actions: List[FilterAction] = Field(default_factory=list)
+    # Raw wizard text captured at scrape time. None for filters from backups
+    # written before format 1.1, which had no evidence to recover from.
+    raw: Optional[ScrapeEvidence] = None
+    # Anything the scraper saw but could not parse. Non-empty means the
+    # conditions/actions above may not be the whole filter.
+    scrape_issues: List[str] = Field(default_factory=list)
+
+    @property
+    def is_complete(self) -> bool:
+        """True if the scraper reported no unparsed or unreadable fields."""
+        return not self.scrape_issues
 
     @model_validator(mode='before')
     @classmethod

@@ -7,11 +7,11 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from src.backup.backup_manager import BackupManager
+from src.backup.backup_manager import BackupManager, compute_checksum
 from src.models.backup_models import Backup, BackupMetadata, ArchiveEntry, Archive
 from src.models.filter_models import (
     ProtonMailFilter, FilterCondition, FilterAction, FilterStatus,
-    ConditionType, Operator, ActionType,
+    ConditionType, Operator, ActionType, ScrapeEvidence,
 )
 
 
@@ -288,7 +288,7 @@ class TestBackupManager:
             data = json.load(f)
 
         assert "version" in data
-        assert data["version"] == "1.0"
+        assert data["version"] == "1.1"
 
     def test_backup_contains_timestamp(self, temp_snapshots_dir, sample_filters_list):
         """Test that saved backup contains timestamp."""
@@ -538,3 +538,62 @@ class TestArchiveIO:
         loaded = manager.load_archive(snapshot_dir)
         assert len(loaded) == 1
         assert loaded[0].filter.name == "Second"
+
+
+class TestBackupFormatVersions:
+    """Backup format 1.1 adds scrape evidence; 1.0 backups must still verify."""
+
+    def _write_v10_backup(self, snapshots_dir, filters):
+        """Write a backup.json exactly as format 1.0 did (no evidence fields)."""
+        dumps = [f.model_dump(exclude={"raw", "scrape_issues"}) for f in filters]
+        checksum_json = json.dumps({"filters": dumps, "sieve_script": ""}, sort_keys=True, default=str)
+        data = {
+            "version": "1.0",
+            "timestamp": "2026-01-01T00:00:00",
+            "metadata": {"filter_count": len(filters)},
+            "filters": dumps,
+            "sieve_script": "",
+            "checksum": "sha256:" + hashlib.sha256(checksum_json.encode()).hexdigest(),
+        }
+        snap = snapshots_dir / "2026-01-01_00-00-00"
+        snap.mkdir()
+        (snap / "backup.json").write_text(json.dumps(data))
+        (snapshots_dir / "latest").symlink_to(snap.name)
+
+    def test_v10_backup_loads_and_verifies(self, temp_snapshots_dir, sample_filters_list):
+        self._write_v10_backup(temp_snapshots_dir, sample_filters_list)
+        manager = BackupManager(temp_snapshots_dir)
+        backup = manager.load_backup("latest")
+        assert backup.version == "1.0"
+        assert all(f.raw is None for f in backup.filters)
+        assert manager.verify_backup(backup) is True
+
+    def test_new_backup_stores_evidence(self, temp_snapshots_dir):
+        manager = BackupManager(temp_snapshots_dir)
+        f = ProtonMailFilter(
+            name="Labelled",
+            raw=ScrapeEvidence(actions_text="Label as\nWork"),
+            scrape_issues=["label row unreadable"],
+        )
+        manager.create_backup([f])
+        data = json.loads((manager.snapshot_dir_for("latest") / "backup.json").read_text())
+        assert data["version"] == "1.1"
+        assert data["filters"][0]["raw"]["actions_text"] == "Label as\nWork"
+        assert data["filters"][0]["scrape_issues"] == ["label row unreadable"]
+
+        loaded = manager.load_backup("latest")
+        assert manager.verify_backup(loaded) is True
+
+    def test_checksum_covers_evidence(self, temp_snapshots_dir):
+        """Tampering with the raw evidence of a 1.1 backup is detected."""
+        manager = BackupManager(temp_snapshots_dir)
+        f = ProtonMailFilter(name="X", raw=ScrapeEvidence(actions_text="original"))
+        backup = manager.create_backup([f])
+        backup.filters[0].raw.actions_text = "edited"
+        assert manager.verify_backup(backup) is False
+
+    def test_compute_checksum_v10_ignores_evidence(self):
+        plain = ProtonMailFilter(name="X")
+        with_evidence = ProtonMailFilter(name="X", raw=ScrapeEvidence(actions_text="a"))
+        assert compute_checksum([plain], "", "1.0") == compute_checksum([with_evidence], "", "1.0")
+        assert compute_checksum([plain], "", "1.1") != compute_checksum([with_evidence], "", "1.1")
