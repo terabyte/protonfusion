@@ -253,45 +253,46 @@ class SieveGenerator:
     def merge_with_existing(generated_script: str, existing_script: str) -> str:
         """Merge a generated ProtonFusion script with an existing Sieve script.
 
-        Preserves user rules outside the ProtonFusion section markers.
-        Deduplicates require extensions into a single sorted require statement at the top.
+        Preserves user rules outside the ProtonFusion section markers, in their
+        original position relative to the section: content above the section
+        stays above it and content below stays below. Sieve evaluates top to
+        bottom, so moving a user rule across the section changes behaviour (a
+        user ``keep; stop;`` exception above the section stops protecting mail
+        once it runs after the section's ``discard``).
+
+        If the existing script has no markers, all of it is treated as user
+        content and placed after the new section (there is no prior position to
+        preserve).
+
+        Deduplicates require extensions from every part into a single sorted
+        require statement at the top.
         """
         if not existing_script or not existing_script.strip():
-            # No existing script — just wrap generated with markers
-            require_exts = SieveGenerator.parse_require_extensions(generated_script)
-            rules = SieveGenerator.strip_require_lines(generated_script).strip("\n")
-            parts = []
-            if require_exts:
-                ext_list = ", ".join(f'"{e}"' for e in sorted(require_exts))
-                parts.append(f"require [{ext_list}];")
-                parts.append("")
-            parts.append(SECTION_BEGIN)
-            parts.append(rules)
-            parts.append(SECTION_END)
-            parts.append("")
-            return "\n".join(parts)
+            existing_script = ""
 
-        # Extract user section from existing script (everything outside markers)
         begin_idx = existing_script.find(SECTION_BEGIN)
-        end_idx = existing_script.find(SECTION_END)
+        end_idx = existing_script.find(SECTION_END, begin_idx + 1) if begin_idx != -1 else -1
 
         if begin_idx != -1 and end_idx != -1:
-            # Previous ProtonFusion section exists — replace it
-            before_section = existing_script[:begin_idx]
-            after_section = existing_script[end_idx + len(SECTION_END):]
-            user_section = before_section + after_section
+            # Previous ProtonFusion section exists: replace it in place.
+            user_before = existing_script[:begin_idx]
+            user_after = existing_script[end_idx + len(SECTION_END):]
         else:
-            # No previous markers — entire existing script is user content
-            user_section = existing_script
+            # No previous markers: entire existing script is user content.
+            user_before = ""
+            user_after = existing_script
 
-        # Collect require extensions from both scripts
-        gen_exts = SieveGenerator.parse_require_extensions(generated_script)
-        user_exts = SieveGenerator.parse_require_extensions(user_section)
-        all_exts = gen_exts | user_exts
+        # Collect require extensions from all parts
+        all_exts = (
+            SieveGenerator.parse_require_extensions(generated_script)
+            | SieveGenerator.parse_require_extensions(user_before)
+            | SieveGenerator.parse_require_extensions(user_after)
+        )
 
-        # Strip require from both
+        # Strip require from all parts
         gen_rules = SieveGenerator.strip_require_lines(generated_script).strip("\n")
-        user_rules = SieveGenerator.strip_require_lines(user_section).strip()
+        before_rules = SieveGenerator.strip_require_lines(user_before).strip()
+        after_rules = SieveGenerator.strip_require_lines(user_after).strip()
 
         # Build final script
         parts = []
@@ -299,11 +300,14 @@ class SieveGenerator:
             ext_list = ", ".join(f'"{e}"' for e in sorted(all_exts))
             parts.append(f"require [{ext_list}];")
             parts.append("")
+        if before_rules:
+            parts.append(before_rules)
+            parts.append("")
         parts.append(SECTION_BEGIN)
         parts.append(gen_rules)
         parts.append(SECTION_END)
-        if user_rules:
+        if after_rules:
             parts.append("")
-            parts.append(user_rules)
+            parts.append(after_rules)
         parts.append("")
         return "\n".join(parts)

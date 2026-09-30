@@ -131,8 +131,9 @@ ProtonFusion wraps its generated rules in section markers:
 This allows ProtonFusion to coexist with hand-written Sieve rules. When you re-run consolidation and sync:
 
 1. Everything between the markers is replaced with the new rules
-2. Everything outside the markers is preserved
-3. `require` statements from both sections are merged and deduplicated
+2. Everything outside the markers is preserved **in its original position**: rules above the section stay above it, rules below stay below it. Sieve runs top to bottom, so this matters: a hand-written `keep; stop;` exception above the section only works while it stays above the section's `discard` rules.
+3. `require` statements from every part are merged, deduplicated, and emitted as a single line at the top
+4. If the existing script has no markers at all, it is treated as user content and placed after the new section
 
 ### Example: Coexistence with User Rules
 
