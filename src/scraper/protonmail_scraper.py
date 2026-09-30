@@ -2,7 +2,8 @@
 
 import asyncio
 import logging
-from typing import Dict, List, Optional
+import re
+from typing import Dict, List, Optional, Tuple
 
 from playwright.async_api import Page
 
@@ -34,6 +35,79 @@ SPECIAL_FOLDERS = {"Do not move", "Inbox - Default", "Trash", "Archive", "Spam"}
 
 # Bullet characters used by ProtonMail to indicate subfolder nesting
 BULLET_CHARS = " \t•·"
+
+# Label-row text that means "no label selected" rather than naming a label.
+LABEL_PLACEHOLDERS = {
+    "", "do not label", "no label", "no labels", "none",
+    "choose label", "choose labels", "choose label(s)",
+    "select label", "select labels", "select label(s)", "add label",
+}
+
+# Label-row text that is UI chrome (headings), not a label name.
+LABEL_ROW_CHROME = LABEL_PLACEHOLDERS | {"label as", "label", "labels", "apply label", "apply labels"}
+
+# Glyphs a chip may render for its remove button, stripped from chip text.
+CHIP_REMOVE_GLYPHS = "×✕✖"
+
+# A dropdown button summarising the selection as a count ("2 labels")
+# instead of naming the labels; the names cannot be recovered from it.
+LABEL_COUNT_PATTERN = re.compile(r"^\d+\s+labels?\b", re.IGNORECASE)
+
+
+def _parse_label_row(
+    chip_texts: List[str], button_label: str, button_text: str, row_text: str,
+) -> Tuple[List[str], Optional[str]]:
+    """Turn what the "Label as" row shows into label names.
+
+    Pure function so the rules can be unit-tested without a browser; the
+    DOM reading lives in ProtonMailScraper._read_label_row.
+
+    Chips win when present (one chip per selected label, so a label name
+    containing a comma survives). Otherwise the dropdown button's
+    aria-label (then its text) is split on commas. Placeholders such as
+    "Do not label" mean no label.
+
+    Returns (labels, issue). issue is None when the row was fully
+    accounted for. It is set when the row cannot be read reliably: the
+    button shows a count instead of names, or the row contains text that
+    is neither a parsed label nor known chrome. That last check is the
+    guard against a UI shape this reader does not know about silently
+    reading as "no labels".
+    """
+    labels: List[str] = []
+
+    def _add(name: str):
+        name = name.strip().strip(CHIP_REMOVE_GLYPHS).strip()
+        if name.lower() in LABEL_PLACEHOLDERS or name in labels:
+            return
+        labels.append(name)
+
+    if chip_texts:
+        for text in chip_texts:
+            _add(text)
+    else:
+        summary = (button_label or button_text or "").strip()
+        if LABEL_COUNT_PATTERN.match(summary):
+            return [], f"label row shows a count ({summary!r}), not label names"
+        for part in summary.split(","):
+            _add(part)
+
+    # Every piece of visible text must be a label we parsed or known chrome.
+    unexplained = []
+    for line in row_text.splitlines():
+        line = line.strip().strip(CHIP_REMOVE_GLYPHS).strip()
+        if not line:
+            continue
+        if line in labels:
+            continue
+        pieces = [piece.strip() for piece in line.split(",")]
+        if all(piece in labels or piece.lower() in LABEL_ROW_CHROME for piece in pieces):
+            continue
+        unexplained.append(line)
+    if unexplained:
+        return labels, f"label row has text the reader did not account for: {unexplained!r}"
+
+    return labels, None
 
 
 def _distribute_indices(total: int, workers: int) -> List[List[int]]:
@@ -367,6 +441,15 @@ class ProtonMailScraper(ProtonMailBrowser):
                     else:
                         actions.append({"type": "move_to", "parameters": {"folder": folder}})
 
+        # Check "Label as" selection (a filter can apply several labels)
+        label_row = await page.query_selector(selectors.FILTER_ACTION_LABEL_ROW)
+        if label_row:
+            labels, issue = await self._read_label_row(label_row)
+            if issue:
+                logger.warning("Label row: %s", issue)
+            for label in labels:
+                actions.append({"type": "label", "parameters": {"label": label}})
+
         # Check "Mark as" checkboxes
         mark_row = await page.query_selector(selectors.FILTER_ACTION_MARK_AS_ROW)
         if mark_row:
@@ -378,6 +461,49 @@ class ProtonMailScraper(ProtonMailBrowser):
                 actions.append({"type": "star", "parameters": {}})
 
         return actions
+
+    async def _read_label_row(self, label_row) -> Tuple[List[str], Optional[str]]:
+        """Read the selected labels from the Actions step's "Label as" row.
+
+        The only DOM-reading code for labels; adjust here after a live check.
+        UNVERIFIED against the live ProtonMail UI. Assumed shape:
+
+            <div data-testid="filter-modal:label-row">
+              ...optional heading text such as "Label as"...
+              <!-- selected labels as chips, one per label: -->
+              <li class="label-stack-item"><span class="label-stack-item-text">Work</span></li>
+              <!-- and/or a dropdown button naming the selection: -->
+              <button class="select" aria-label="Work, Personal">Work, Personal</button>
+            </div>
+
+        Chips are read from FILTER_LABEL_CHIPS (their title attribute, else
+        their text). With no chips, the first button matched by
+        FILTER_LABEL_BUTTONS is read (aria-label, else text) and split on
+        commas. "Do not label" and similar placeholders mean no label.
+        The row's full visible text is passed along so _parse_label_row can
+        flag anything it could not account for.
+        """
+        chip_texts = []
+        for chip in await label_row.query_selector_all(selectors.FILTER_LABEL_CHIPS):
+            text = await chip.get_attribute("title") or await chip.inner_text()
+            chip_texts.append(text)
+
+        button = None
+        button_label = ""
+        button_text = ""
+        for button_selector in selectors.FILTER_LABEL_BUTTONS:
+            button = await label_row.query_selector(button_selector)
+            if button:
+                button_label = await button.get_attribute("aria-label") or ""
+                button_text = await button.inner_text()
+                break
+
+        row_text = await label_row.inner_text()
+        if not chip_texts and button is None:
+            # The row must offer some way to pick labels; with neither chips
+            # nor a button this is a layout the reader does not know.
+            return [], "label row has no label chips and no dropdown button"
+        return _parse_label_row(chip_texts, button_label, button_text, row_text)
 
     async def _build_folder_path_map(self, folder_btn, page: Page = None):
         """Build a map from dropdown display text to full folder path.

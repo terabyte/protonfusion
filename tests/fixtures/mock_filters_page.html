@@ -115,6 +115,8 @@ const FILTERS = [
       { type: "the sender", operator: "ends with", values: ["@company.com"] }
     ],
     folder: "Work",
+    labels: ["Work"],
+    labelShape: "chips",
     markRead: false,
     markStarred: false
   },
@@ -161,6 +163,8 @@ const FILTERS = [
       { type: "the subject", operator: "begins with", values: ["Q"] }
     ],
     folder: "• Finance",
+    labels: ["Finance", "Taxes"],
+    labelShape: "button",
     markRead: false,
     markStarred: true
   },
@@ -206,6 +210,8 @@ const FILTERS = [
       { type: "the sender", operator: "contains", values: ["alert1@test.com", "alert2@test.com"] }
     ],
     folder: "Work",
+    labels: ["Alerts", "On Call"],
+    labelShape: "chips",
     markRead: true,
     markStarred: true
   }
@@ -342,6 +348,43 @@ function buildActions() {
   };
   folderRow.appendChild(folderBtn);
   container.appendChild(folderRow);
+
+  // Label row. Two plausible shapes (the live UI is unverified):
+  //   "chips":  one li.label-stack-item per label + a "Choose labels" button
+  //   "button": a single button.select whose aria-label names the labels
+  // Filters without a labelShape render the "button" shape with no labels.
+  const labels = currentFilter.labels || [];
+  const labelRow = document.createElement('div');
+  labelRow.setAttribute('data-testid', 'filter-modal:label-row');
+  const labelHeading = document.createElement('span');
+  labelHeading.textContent = 'Label as';
+  labelRow.appendChild(labelHeading);
+  if (currentFilter.labelShape === 'chips') {
+    const stack = document.createElement('ul');
+    stack.className = 'label-stack';
+    labels.forEach(l => {
+      const li = document.createElement('li');
+      li.className = 'label-stack-item';
+      const span = document.createElement('span');
+      span.className = 'label-stack-item-text';
+      span.textContent = l;
+      li.appendChild(span);
+      stack.appendChild(li);
+    });
+    labelRow.appendChild(stack);
+    const chooseBtn = document.createElement('button');
+    chooseBtn.className = 'select';
+    chooseBtn.textContent = 'Choose labels';
+    labelRow.appendChild(chooseBtn);
+  } else {
+    const labelBtn = document.createElement('button');
+    labelBtn.className = 'select';
+    const summary = labels.length ? labels.join(', ') : 'Do not label';
+    labelBtn.setAttribute('aria-label', summary);
+    labelBtn.textContent = summary;
+    labelRow.appendChild(labelBtn);
+  }
+  container.appendChild(labelRow);
 
   // Mark-as row
   const markRow = document.createElement('div');

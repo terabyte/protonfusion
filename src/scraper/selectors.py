@@ -53,6 +53,13 @@ FILTER_ACTION_FOLDER_ROW = '[data-testid="filter-modal:folder-row"]'
 FILTER_ACTION_LABEL_ROW = '[data-testid="filter-modal:label-row"]'
 FILTER_ACTION_MARK_AS_ROW = '[data-testid="filter-modal:mark-as-row"]'
 
+# "Label as" row internals. UNVERIFIED against the live UI: these are the
+# shapes ProtonFusion's label reader assumes (see
+# ProtonMailScraper._read_label_row). Selected labels are read from chips
+# first, then from the dropdown button's aria-label/text.
+FILTER_LABEL_CHIPS = '.label-stack-item-text, .label-stack-item [title]'
+FILTER_LABEL_BUTTONS = ['button.select', 'button[aria-haspopup]', 'button']
+
 # Sieve editor modal - opened by "Add sieve filter" button or editing an existing sieve filter
 ADD_SIEVE_FILTER_BUTTON = 'button:has-text("Add sieve filter")'
 SIEVE_EDITOR_CM = '.CodeMirror'  # CodeMirror 5 wrapper (use CM5 JS API to read/write)
