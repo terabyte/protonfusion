@@ -1,6 +1,7 @@
 """Shared browser automation base class for ProtonMail."""
 
 import logging
+import os
 from typing import Optional
 
 from playwright.async_api import async_playwright, Browser, Page, BrowserContext
@@ -31,6 +32,13 @@ DROPDOWN_MS = 500
 
 INBOX_URL = "https://mail.proton.me/u/0/inbox"
 
+# Saved Playwright session (cookies + localStorage) from a prior human login.
+# Proton puts a CAPTCHA in front of automated logins, so the practical way to run
+# headless is: a human logs in once in a visible browser, the session is saved,
+# and later runs reuse it until Proton expires it. See docs/plan-session-management.md.
+STORAGE_STATE_ENV = "PROTONFUSION_STORAGE_STATE"
+SESSION_CHECK_MS = 30000
+
 
 class ProtonMailBrowser:
     """Base class for ProtonMail browser automation.
@@ -53,10 +61,12 @@ class ProtonMailBrowser:
         """Launch Playwright browser."""
         self._playwright = await async_playwright().start()
         self.browser = await self._playwright.chromium.launch(headless=self.headless)
-        self.context = await self.browser.new_context(
-            viewport=VIEWPORT,
-            user_agent=USER_AGENT,
-        )
+        self.storage_state_path = os.environ.get(STORAGE_STATE_ENV, "")
+        context_options = {"viewport": VIEWPORT, "user_agent": USER_AGENT}
+        if self.storage_state_path and os.path.exists(self.storage_state_path):
+            context_options["storage_state"] = self.storage_state_path
+            logger.info("Loading saved session from %s", self.storage_state_path)
+        self.context = await self.browser.new_context(**context_options)
         self.page = await self.context.new_page()
         logger.info("Browser initialized (headless=%s)", self.headless)
 
@@ -66,6 +76,8 @@ class ProtonMailBrowser:
         Uses stored credentials if available, otherwise waits for manual login.
         """
         page = self.page
+        if await self._reuse_saved_session():
+            return True
         await page.goto(
             PROTONMAIL_LOGIN_URL,
             wait_until="domcontentloaded",
@@ -77,6 +89,20 @@ class ProtonMailBrowser:
             return await self._automated_login()
         else:
             return await self._manual_login()
+
+    async def _reuse_saved_session(self) -> bool:
+        """True if a saved session was loaded and the mail app opens without a login."""
+        if not self.storage_state_path or not os.path.exists(self.storage_state_path):
+            return False
+        page = self.page
+        await page.goto(INBOX_URL, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
+        try:
+            await page.wait_for_selector(selectors.COMPOSE_BUTTON, timeout=SESSION_CHECK_MS)
+        except Exception:
+            logger.warning("Saved session did not reach the mail app (%s); logging in normally", page.url)
+            return False
+        logger.info("Reused saved session")
+        return True
 
     async def _automated_login(self) -> bool:
         """Login automatically using stored credentials."""
