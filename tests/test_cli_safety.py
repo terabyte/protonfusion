@@ -51,7 +51,18 @@ class FakeScraper:
         return FakeScraper.raw_filters
 
     async def read_sieve_script(self, filter_name=""):
-        return ""
+        """A live script whose ProtonFusion section covers every scraped filter.
+
+        cleanup also refuses filters whose rules are not in the live section
+        (the sync-safety guard); these tests exercise the backup-completeness
+        guard, so the coverage guard is satisfied here.
+        """
+        from src.parser.filter_parser import parse_scraped_filters
+        from src.consolidator.consolidation_engine import ConsolidationEngine
+        from src.generator.sieve_generator import SieveGenerator
+        filters = parse_scraped_filters(FakeScraper.raw_filters)
+        consolidated, _ = ConsolidationEngine().consolidate(filters, include_disabled=True)
+        return SieveGenerator.merge_with_existing(SieveGenerator().generate(consolidated), "")
 
     async def close(self):
         pass

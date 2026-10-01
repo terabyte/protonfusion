@@ -8,6 +8,7 @@ from src.main import app
 from src.backup.backup_manager import BackupManager
 from src.generator.sieve_generator import SieveGenerator
 from src.models.filter_models import (
+    ScrapeEvidence,
     ProtonMailFilter, FilterCondition, FilterAction,
     ConditionType, Operator, ActionType,
 )
@@ -22,6 +23,9 @@ def _filter(sender: str, folder: str = "Spam", enabled: bool = True) -> ProtonMa
         enabled=enabled,
         conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value=sender)],
         actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": folder})],
+        # A complete scrape, so cleanup's backup-completeness guard passes and
+        # these tests exercise only the live-section coverage guard.
+        raw=ScrapeEvidence(conditions_text="the sender", actions_text=f"Move to {folder}"),
     )
 
 
