@@ -606,6 +606,50 @@ class TestSyncRefusesIncompleteSources:
         assert "- Filter partial@x.com" in result.output
 
 
+class TestSyncRefusesUnparsableMergedScript:
+    """sync validates the merged script and refuses to upload one that does not parse."""
+
+    BROKEN_USER_RULES = 'require ["fileinto"];\nif header :contains "Subject" "x" { fileinto "X";\n'
+
+    @pytest.fixture
+    def account(self, cli_snapshots_dir, fake_sync):
+        f = _filter("a@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([f], sieve_script=self.BROKEN_USER_RULES)
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        FakeScraper.filters = [f]
+        fake_sync.live_script = self.BROKEN_USER_RULES
+
+    def test_sync_refuses_and_touches_nothing(self, account, fake_sync):
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        assert "merged Sieve script does not parse" in result.output
+        assert "Sync refused" in result.output
+        assert fake_sync.calls == []
+
+    def test_dry_run_reports_refusal(self, account, fake_sync):
+        result = runner.invoke(app, ["sync", "--dry-run"])
+        assert result.exit_code == 1, result.output
+        assert "merged Sieve script does not parse" in result.output
+
+    def test_show_diff_only_reports_refusal(self, account, fake_sync):
+        result = runner.invoke(app, ["sync", "--show-diff-only"])
+        assert result.exit_code == 1, result.output
+        assert "merged Sieve script does not parse" in result.output
+        assert fake_sync.calls == []
+
+
+@pytest.mark.parametrize("script,ok", [
+    ('require ["fileinto"];\nif header :is "From" "a" { fileinto "X"; }', True),
+    ('require "fileinto";\nrequire ["imap4flags"];\nkeep;', True),
+    ('keep;\nrequire ["fileinto"];', False),
+    ('if header :is "From" "a" { fileinto "X";', False),
+    ('', True),
+])
+def test_merged_script_problem(script, ok):
+    from src.main import _merged_script_problem
+    assert (_merged_script_problem(script) is None) is ok
+
+
 class TestCleanupExitCode:
     """cleanup exits 1 whenever it kept back anything it would otherwise delete."""
 

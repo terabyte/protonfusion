@@ -33,6 +33,7 @@ from src.parser.filter_parser import parse_scraped_filters
 from src.consolidator.consolidation_engine import ConsolidationEngine
 from src.generator.sieve_generator import SieveGenerator, SieveGenerationError, SECTION_BEGIN
 from src.generator.sieve_rules import SieveParseError, compare_sections, extract_section, script_facts
+from src.generator.sieve_rules import _Parser as _SieveParser, _tokenize as _sieve_tokenize
 from src.consolidator.carry_forward import facts_to_filters, filter_facts, is_carried, label_targets
 
 SIEVE_FILTER_NAME = "ProtonFusion Consolidated"
@@ -1040,6 +1041,45 @@ def _uploaded_facts(merged_script: str) -> set:
         return set()
 
 
+def _merged_script_problem(script: str) -> Optional[str]:
+    """Why the merged script is not valid Sieve, or None if it parses.
+
+    Stand-in for the generator's script validator (validate_script), which
+    is landing separately; once it exists this body should call it. Until
+    then: the whole script must tokenize and parse with the sieve_rules
+    parser, and every `require` must come before any other command
+    (RFC 5228 section 3.2), which is what a merge mishandling an unusual
+    `require` breaks. Constructs that parser does not support, such as
+    multi-line `text:` literals, are reported as problems too, so a script
+    is never uploaded unchecked.
+    """
+    try:
+        commands = _SieveParser(_sieve_tokenize(script)).parse_commands()
+    except SieveParseError as e:
+        return str(e)
+    seen_other_command = False
+    for command in commands:
+        if command.name != "require":
+            seen_other_command = True
+        elif seen_other_command:
+            return "a 'require' comes after other commands (RFC 5228 section 3.2)"
+    return None
+
+
+def _report_merged_script_problem(script: str) -> bool:
+    """Print why the merged script cannot be uploaded; True if it can."""
+    problem = _merged_script_problem(script)
+    if problem is None:
+        return True
+    console.print(Panel(
+        f"[bold red]The merged Sieve script does not parse: {escape(problem)}[/]\n"
+        "Uploading it could leave the account with a broken or partly applied script. "
+        "Check the rules outside the ProtonFusion section in the live script.",
+        title="Script Validation", border_style="red",
+    ))
+    return False
+
+
 def _refuse_incomplete_sources(incomplete: List[ProtonMailFilter], allow_incomplete: bool) -> None:
     """Refuse the sync (exit 1) when the script holds rules from incomplete filters.
 
@@ -1186,6 +1226,8 @@ def sync(
             else:
                 preview = "\n".join(merged.split("\n")[:40])
                 console.print(Panel(preview + "\n...", title="Merged Script Preview (first 40 lines)", border_style="cyan"))
+        if not _report_merged_script_problem(backed_up_merge):
+            safe = False
         if not safe:
             console.print("[bold red]A real sync would REFUSE and change nothing.")
             raise typer.Exit(1)
@@ -1220,6 +1262,8 @@ def sync(
                 backup_script=bkup.sieve_script,
             )
             merged_script = SieveGenerator.merge_with_existing(sieve_script, existing_script)
+            if safe and not _report_merged_script_problem(merged_script):
+                safe = False
             if not safe:
                 console.print("[bold red]A real sync would REFUSE and change nothing.")
             else:
@@ -1286,6 +1330,9 @@ def sync(
             return False
 
         merged_script = SieveGenerator.merge_with_existing(sieve_script, existing_script)
+        if not _report_merged_script_problem(merged_script):
+            console.print("[bold red]Sync refused. No filters were disabled and nothing was uploaded.")
+            return False
         if existing_script and SECTION_BEGIN not in existing_script:
             console.print("[yellow]User rules detected; preserving them outside ProtonFusion section")
 
