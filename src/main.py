@@ -13,6 +13,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
+from rich.markup import escape
 from rich import print as rprint
 
 from src.utils.config import (
@@ -47,6 +48,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _print_incomplete(filters: List[ProtonMailFilter], heading: str):
+    """List filters the scraper could not fully read, with each reason."""
+    console.print(f"[bold red]{heading}")
+    for f in filters:
+        console.print(f"  [red]- {escape(f.name)}")
+        for issue in f.scrape_issues:
+            console.print(f"      {escape(issue)}")
+
+
 def _get_credentials(credentials_file: str, manual_login: bool):
     """Load credentials if applicable."""
     if manual_login:
@@ -63,8 +73,16 @@ def backup(
     manual_login: bool = typer.Option(False, "--manual-login", help="Force manual login"),
     output: str = typer.Option("", "--output", help="Custom output path for backup file"),
     workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
+    allow_incomplete: bool = typer.Option(
+        False, "--allow-incomplete",
+        help="Save the snapshot even if some filters could not be fully read (they are flagged in backup.json)",
+    ),
 ):
-    """Scrape current filters and save to a timestamped snapshot."""
+    """Scrape current filters and save to a timestamped snapshot.
+
+    Fails (exit 1, nothing saved) if any filter could not be fully read,
+    unless --allow-incomplete is given.
+    """
     from src.scraper.protonmail_scraper import ProtonMailScraper
 
     creds = _get_credentials(credentials_file, manual_login)
@@ -89,13 +107,37 @@ def backup(
             raw_filters = await scraper.scrape_all_filters(workers=workers)
             console.print(f"[green]Scraped {len(raw_filters)} filters")
 
+            # Parse filters
+            filters = parse_scraped_filters(raw_filters)
+
+            # A filter the scraper could not fully read must not be saved
+            # as though it were whole: consolidate would build Sieve without
+            # the missing parts, and cleanup would then delete the only
+            # complete copy. Refuse unless the user explicitly accepts it.
+            incomplete = [f for f in filters if not f.is_complete]
+            unparsed = len(raw_filters) - len(filters)
+            if incomplete or unparsed:
+                if incomplete:
+                    _print_incomplete(
+                        incomplete,
+                        f"{len(incomplete)} filter(s) could not be fully read:",
+                    )
+                if unparsed:
+                    console.print(f"[bold red]{unparsed} scraped filter(s) could not be parsed (see log above).")
+                if not allow_incomplete:
+                    console.print(
+                        "[bold red]Backup NOT saved.[/] Their actions or conditions may be incomplete, "
+                        "so a Sieve script built from them could silently drop behaviour.\n"
+                        "Re-run with --allow-incomplete to save anyway; the filters are flagged in "
+                        "backup.json and cleanup will refuse to delete them."
+                    )
+                    raise typer.Exit(1)
+                console.print("[yellow]--allow-incomplete given: saving with these filters flagged.")
+
             with console.status("[bold green]Reading existing Sieve script..."):
                 sieve_script = await scraper.read_sieve_script(
                     filter_name=SIEVE_FILTER_NAME,
                 )
-
-            # Parse filters
-            filters = parse_scraped_filters(raw_filters)
 
             # Create backup
             manager = BackupManager()
@@ -112,6 +154,8 @@ def backup(
                 f"Disabled: {bkup.metadata.disabled_count}",
                 f"Checksum: {bkup.checksum[:30]}...",
             ]
+            if incomplete:
+                backup_lines.append(f"[yellow]Incomplete (flagged): {len(incomplete)}[/]")
             if sieve_script:
                 backup_lines.append(f"\nSieve script captured: {len(sieve_script)} chars")
                 if SECTION_BEGIN not in sieve_script:
@@ -240,7 +284,8 @@ def _display_filters(filters: list, source: str = "ProtonMail account"):
                 action_parts.append(a.type.value)
         actions_str = ", ".join(action_parts) if action_parts else "[dim]none[/]"
 
-        table.add_row(str(i), f.name, status, conds_str, actions_str)
+        name_str = escape(f.name) if f.is_complete else f"{escape(f.name)} [red](incomplete)[/]"
+        table.add_row(str(i), name_str, status, conds_str, actions_str)
 
     console.print(table)
 
@@ -394,6 +439,14 @@ def consolidate(
             backup_filters.append(override.filter)
         else:
             backup_filters.append(f)
+
+    incomplete = [f for f in backup_filters + archived_filters if not f.is_complete and f.name not in exclude_names]
+    if incomplete:
+        _print_incomplete(
+            incomplete,
+            "Warning: these filters were not fully read when backed up; "
+            "the generated Sieve may be missing their unread parts:",
+        )
 
     if archived_filters:
         console.print(f"[cyan]Including {len(archived_filters)} archived filters from archive")
