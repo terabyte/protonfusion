@@ -31,8 +31,11 @@ python -m pytest tests/test_sieve_generator.py::test_generate_basic_rule -v
 | `test_diff.py` | Filter comparison (added, removed, modified, state_changed, unchanged), status-aware diffing |
 | `test_snapshot.py` | Snapshot CLI commands: view, set-status, remove (using Typer CliRunner) |
 | `test_config.py` | Configuration loading, credential parsing |
-| `test_scraper.py` | Selector validation (offline, no browser needed) |
+| `test_scraper.py` | Selector validation and the "Label as" row parser (offline, no browser needed) |
 | `test_parallel_scraping.py` | Worker distribution logic, chunk assignment |
+| `test_label_scraping.py` | Integration: label chips/button shapes and raw evidence against the mock page |
+| `test_scrape_completeness.py` | Integration: filters the scraper cannot fully read are flagged (mock page `?set=edge`) |
+| `test_cli_safety.py` | `backup` refusing incomplete scrapes and `cleanup` refusing unverified deletions (fake browser) |
 
 ### Key Fixtures (`conftest.py`)
 

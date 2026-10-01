@@ -59,6 +59,12 @@ python -m src.main backup
 
 Each backup creates a snapshot at `snapshots/<timestamp>/backup.json`.
 
+If any filter could not be fully read (an action row ProtonFusion does not
+understand, a label row it cannot parse, an unknown condition operator),
+`backup` lists each one with the reason and exits with status 1 without
+saving. Pass `--allow-incomplete` to save anyway; those filters are flagged in
+`backup.json` and `cleanup` will not delete them.
+
 ### 4. Analyze consolidation opportunities
 
 ```bash
@@ -150,7 +156,7 @@ A GitHub Actions workflow runs unit + integration tests on every push and pull r
 | `sync` | Upload Sieve script and disable old UI filters |
 | `sync --show-diff-only` | Preview Sieve changes against the live script (no upload) |
 | `restore` | Restore filters to a previous backup state |
-| `cleanup` | Delete disabled filters (with confirmation) |
+| `cleanup` | Delete disabled filters that have a verified backup copy (with confirmation) |
 | `snapshot view` | View merged backup + archive filters grouped by status |
 | `snapshot set-status` | Change a filter's lifecycle status (enabled/disabled/archived/deprecated) |
 | `snapshot remove` | Remove a filter from the archive |
@@ -222,6 +228,8 @@ ProtonFusion is designed to be non-destructive:
 - **Disable, don't delete**: When syncing, old UI filters are disabled (not deleted). You can re-enable them anytime.
 - **Dry-run mode**: Preview what `sync` and `cleanup` will do before committing.
 - **Checksums**: Backups include SHA256 checksums to detect corruption.
+- **Incomplete reads are loud**: A filter the scraper cannot fully read stops `backup` (override: `--allow-incomplete`). Each backed-up filter also keeps the wizard's raw text, so a field the parser missed can still be recovered.
+- **Cleanup needs a verified copy**: `cleanup` only deletes a disabled filter if the latest snapshot holds an identical, complete copy with raw text. Others are listed and kept (override: `--allow-incomplete`). Backups made before format 1.1 have no raw text, so run `backup` again after upgrading.
 - **Restore**: One command to roll back to any previous backup.
 
 ## Architecture
@@ -273,7 +281,7 @@ backup → consolidate → sync → cleanup → backup → consolidate → ...
 1. `backup` scrapes live filters into `backup.json` and copies `archive.json` from the previous snapshot
 2. `consolidate` reads both files, generates Sieve, and auto-archives included backup filters
 3. `sync` uploads the Sieve script and disables UI filters
-4. `cleanup` deletes disabled UI filters from ProtonMail
+4. `cleanup` deletes disabled UI filters from ProtonMail, refusing any without a complete backup copy
 5. Next `backup` scrapes the now-reduced filter list; archived filters carry forward via `archive.json`
 6. Next `consolidate` still has all rules from the archive
 

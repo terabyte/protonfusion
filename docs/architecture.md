@@ -63,9 +63,16 @@ ProtonMailFilter
 ├── logic: LogicType (AND | OR)
 ├── conditions: List[FilterCondition]
 │   └── FilterCondition { type: ConditionType, operator: Operator, value: str }
-└── actions: List[FilterAction]
-    └── FilterAction { type: ActionType, parameters: dict }
+├── actions: List[FilterAction]
+│   └── FilterAction { type: ActionType, parameters: dict }
+├── raw: ScrapeEvidence | None          # wizard text captured at scrape time
+│   └── { conditions_text, actions_text, sieve_text }
+└── scrape_issues: List[str]            # non-empty = not fully read
 ```
+
+`raw` and `scrape_issues` describe how a filter was read, not what it does, so
+`content_hash` and the diff engine ignore them. A label action is
+`{"type": "label", "parameters": {"label": "<name>"}}`, one per label.
 
 After consolidation, filters are represented as `ConsolidatedFilter`:
 
@@ -126,6 +133,8 @@ The scraper uses **Playwright** to automate Chromium. ProtonMail has no public f
 - Reading/writing Sieve scripts via the CodeMirror 5 JavaScript API
 
 **`ProtonMailScraper`** (read-only) scrapes filter details by opening each filter's edit modal and stepping through the wizard (Name → Conditions → Actions). It supports parallel scraping across multiple browser tabs.
+
+The scraper never guesses. Anything it sees but cannot parse (an unknown action row, an unreadable dropdown, an unknown condition type or operator, a wizard that will not open) is added to that filter's `scrape_issues`, and a filter that fails outright is kept as a flagged stub instead of dropped. It also stores each step's visible text and form-field state in `raw`. `backup` refuses to save while any filter is incomplete unless given `--allow-incomplete`.
 
 **`ProtonMailSync`** (write operations) handles creating, deleting, enabling, and disabling filters, as well as uploading Sieve scripts.
 
@@ -218,6 +227,10 @@ snapshots/
 ### backup.json
 
 Contains the full Pydantic-serialized `Backup` object: metadata (filter counts, account email, tool version), the list of `ProtonMailFilter` objects, the existing Sieve script (captured from the account at backup time), and a SHA-256 checksum for integrity verification.
+
+`version` is `1.1` for backups that carry `raw`/`scrape_issues` on each filter. `1.0` backups still load, and their checksum is verified without those fields.
+
+`cleanup` deletes a disabled filter only if the latest snapshot's `backup.json` or `archive.json` holds a copy with the same `content_hash`, no `scrape_issues`, and non-null `raw` (see `unverified_for_deletion` in `backup_manager.py`). Override with `--allow-incomplete`.
 
 ### manifest.json
 

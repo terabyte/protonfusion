@@ -70,6 +70,20 @@ Clicking "Edit" opens a multi-step wizard modal:
   - Type dropdown: Move to, Label as, Mark as read, Star, Archive, Permanently delete
   - Parameter (folder/label selector, when applicable)
 
+The scraper reads three rows by `data-testid`: `filter-modal:folder-row`,
+`filter-modal:label-row` and `filter-modal:mark-as-row`. Any other visible
+`filter-modal:*-row` in the Actions step marks the filter incomplete.
+
+**"Label as" row (unverified).** The label reader
+(`ProtonMailScraper._read_label_row`) was written without access to the live
+DOM. It assumes selected labels appear either as chips
+(`.label-stack-item-text`, or `.label-stack-item [title]`) or in the dropdown
+button's `aria-label`/text as a comma-separated list, with "Do not label" (and
+similar placeholders) meaning none. Any text in the row it cannot account for,
+or a button showing a count such as "2 labels", is reported as a scrape issue
+rather than read as "no labels". Check this against the live UI and adjust
+`FILTER_LABEL_CHIPS` / `FILTER_LABEL_BUTTONS` in `selectors.py` if it differs.
+
 Dropdowns use `button.select` to open and `li.dropdown-item` for options (not native `<select>` elements).
 
 ## Sieve Editor
