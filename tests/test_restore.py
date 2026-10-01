@@ -189,6 +189,7 @@ class FakeBrowser:
     read_error = None
     upload_result = True  # False, or an exception instance to raise
     toggle_fails: set = set()  # (name, enabled) pairs set_row_enabled refuses
+    toggle_refuses: set = set()  # (name, enabled) pairs whose switch ignores the click
     last_toggle_refused = False
     calls: list = []
     account_email = "test@proton.me"
@@ -214,7 +215,8 @@ class FakeBrowser:
         return FakeBrowser.live_script
 
     async def set_row_enabled(self, index, name, enabled):
-        if (name, enabled) in FakeBrowser.toggle_fails:
+        self.last_toggle_refused = (name, enabled) in FakeBrowser.toggle_refuses
+        if (name, enabled) in FakeBrowser.toggle_fails or self.last_toggle_refused:
             return False
         FakeBrowser.calls.append(("enable" if enabled else "disable", name))
         return True
@@ -249,6 +251,7 @@ def cli_env(tmp_path, monkeypatch):
     FakeBrowser.read_error = None
     FakeBrowser.upload_result = True
     FakeBrowser.toggle_fails = set()
+    FakeBrowser.toggle_refuses = set()
     FakeBrowser.calls = []
     return snapshots_dir
 
@@ -317,6 +320,8 @@ class TestRestoreCommand:
     def test_preview_shows_changes_and_diff(self, after_sync):
         result = runner.invoke(app, ["restore", "--backup", "latest", "--dry-run"])
         assert result.exit_code == 0, result.output
+        snapshot = BackupManager(after_sync).snapshot_dir_for("latest").name
+        assert f"Restore preview: backup '{snapshot}'" in result.output
         assert "Will enable 2 filter(s)" in result.output and "- Old (row 0)" in result.output
         assert "Will disable 1 filter(s)" in result.output and "- Spare (row 1)" in result.output
         assert "1 condition/action pairs removed, 0 added" in result.output
@@ -355,7 +360,7 @@ class TestRestoreCommand:
             ("enable", "Old"), ("enable", "New"), ("upload", OLD_SCRIPT, SIEVE_FILTER_NAME),
         ]
         assert "Restore did NOT complete." in result.output
-        assert "unchanged: the upload did not complete" in result.output
+        assert "not confirmed: the upload did not complete" in result.output
         assert "not attempted" in result.output
         assert "no mail is left unfiltered" in result.output
 
@@ -393,7 +398,8 @@ class TestRestoreCommand:
         FakeBrowser.calls = []
         result = runner.invoke(app, ["restore", "--backup", "latest", "--allow-empty-script"], input="y\n")
         assert result.exit_code == 0, result.output
-        assert FakeBrowser.calls == [("enable", "Old"), ("enable", "New"), ("disable", SIEVE_FILTER_NAME)]
+        # ProtonFusion's filter goes off first: the active-filter limit counts it (V8)
+        assert FakeBrowser.calls == [("disable", SIEVE_FILTER_NAME), ("enable", "Old"), ("enable", "New")]
         assert f"'{SIEVE_FILTER_NAME}' disabled" in result.output
 
     def test_backup_predating_protonfusion_section(self, cli_env):
@@ -447,7 +453,7 @@ class TestRestoreCommand:
 
 
 def test_rollback_help_describes_full_rollback():
-    text = _rollback_help("2026-01-01_00-00-00", Path("/snaps/2026-01-01_00-00-00"))
+    text = _rollback_help(Path("/snaps/2026-01-01_00-00-00"))
     assert "restore --backup 2026-01-01_00-00-00" in text
     assert "Sieve script" in text and "UI" in text
     assert "/snaps/2026-01-01_00-00-00/backup.json" in text
@@ -528,3 +534,78 @@ class TestRestoreLeavesNoRuleInNeitherPlace:
         assert FakeBrowser.calls == []
         assert 'address from :is "new@x"' in result.output
         assert 'address from :is "old@x"' not in result.output
+
+
+class TestRestoreFilterLimit:
+    """V8: ProtonMail limits active filters, and ProtonFusion's own filter counts."""
+
+    @pytest.fixture
+    def pf_off_in_backup(self, cli_env):
+        """Backup: "Old" and "New" on, ProtonFusion's filter off. Live: the reverse, same script."""
+        BackupManager(cli_env).create_backup([
+            _filter("Old", "old@x", priority=0),
+            _filter("New", "new@x", priority=1),
+            _sieve(SIEVE_FILTER_NAME, NEW_SCRIPT, enabled=False, priority=2),
+        ], sieve_script=NEW_SCRIPT)
+        FakeBrowser.current = [
+            _filter("Old", "old@x", enabled=False, priority=0),
+            _filter("New", "new@x", enabled=False, priority=1),
+            _sieve(SIEVE_FILTER_NAME, NEW_SCRIPT, enabled=True, priority=2),
+        ]
+        FakeBrowser.live_script = NEW_SCRIPT
+        return cli_env
+
+    def test_protonfusion_filter_switched_off_before_enabling(self, pf_off_in_backup):
+        result = runner.invoke(app, ["restore", "--backup", "latest"], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert FakeBrowser.calls == [
+            ("disable", SIEVE_FILTER_NAME), ("enable", "Old"), ("enable", "New"),
+        ]
+
+    def test_failed_enable_switches_protonfusion_back_on(self, pf_off_in_backup):
+        """Keeps the guarantee: a failure part-way leaves every rule that was active active."""
+        FakeBrowser.toggle_fails = {("New", True)}
+        result = runner.invoke(app, ["restore", "--backup", "latest"], input="y\n")
+        assert result.exit_code == 1, result.output
+        assert FakeBrowser.calls == [
+            ("disable", SIEVE_FILTER_NAME), ("enable", "Old"), ("enable", SIEVE_FILTER_NAME),
+        ]
+        assert "no mail is left unfiltered" in result.output
+        assert "was switched back on" in result.output.replace("\n", "")
+
+    def test_protonfusion_not_back_on_is_reported(self, pf_off_in_backup):
+        FakeBrowser.toggle_fails = {("New", True), (SIEVE_FILTER_NAME, True)}
+        result = runner.invoke(app, ["restore", "--backup", "latest"], input="y\n")
+        assert result.exit_code == 1, result.output
+        assert "could not be switched back on" in result.output
+        assert "no mail is left unfiltered" not in result.output
+
+    def test_upload_with_protonfusion_off_in_backup(self, cli_env):
+        """Off first, then enable, upload (which switches it on), then off again."""
+        BackupManager(cli_env).create_backup([
+            _filter("Old", "old@x", priority=0),
+            _filter("New", "new@x", priority=1),
+            _sieve(SIEVE_FILTER_NAME, OLD_SCRIPT, enabled=False, priority=2),
+        ], sieve_script=OLD_SCRIPT)
+        FakeBrowser.current = [
+            _filter("Old", "old@x", enabled=False, priority=0),
+            _filter("New", "new@x", enabled=False, priority=1),
+            _sieve(SIEVE_FILTER_NAME, NEW_SCRIPT, enabled=True, priority=2),
+        ]
+        FakeBrowser.live_script = NEW_SCRIPT
+        result = runner.invoke(app, ["restore", "--backup", "latest"], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert FakeBrowser.calls == [
+            ("disable", SIEVE_FILTER_NAME), ("enable", "Old"), ("enable", "New"),
+            ("upload", OLD_SCRIPT, SIEVE_FILTER_NAME), ("disable", SIEVE_FILTER_NAME),
+        ]
+        assert "Disabled: 1 of 1" in result.output
+
+    def test_refused_enable_reported_as_probable_limit(self, after_sync):
+        """ProtonFusion's filter stays on in the backup, so the order is unchanged; say why it stopped."""
+        FakeBrowser.toggle_refuses = {("New", True)}
+        result = runner.invoke(app, ["restore", "--backup", "latest"], input="y\n")
+        assert result.exit_code == 1, result.output
+        assert FakeBrowser.calls == [("enable", "Old")]
+        assert "active-filter limit" in result.output
+        assert "Enabled: 1 of 2 (Old)" in result.output

@@ -100,6 +100,9 @@ class RestoreEngine:
 
     def __init__(self, sync: ProtonMailSync):
         self.sync = sync
+        # Filters whose switch did not turn on when clicked: how ProtonMail
+        # refuses an enable at the account's active-filter limit
+        self.enable_refused: List[str] = []
 
     @staticmethod
     def plan(backup: Backup, current_filters: List[ProtonMailFilter]) -> RestorePlan:
@@ -164,6 +167,8 @@ class RestoreEngine:
                     done.append(backed.name)
                 elif self.sync.last_toggle_refused:
                     errors.append(f"{backed.name}: failed to {verb}: its switch did not change when clicked")
+                    if enabled:
+                        self.enable_refused.append(backed.name)
                 else:
                     errors.append(f"{backed.name}: failed to {verb} (row {live.priority} not found unambiguously)")
             except Exception as e:
