@@ -1423,11 +1423,16 @@ def cleanup(
     is present in the live ProtonFusion section, so deleting it never removes
     the last copy of a rule (e.g. after a refused or failed sync). Sieve filters
     (including the ProtonFusion one) are never deleted, and neither is any filter
-    whose name another filter shares, since deletion works by name. Auto-archives
-    disabled filters before deletion to preserve them for future consolidation,
-    except those it refuses, so a refusal holds on the next run too.
+    whose name another filter shares, since deletion works by name.
     Also refuses to delete any filter without a complete backup copy in the
     latest snapshot, unless --allow-incomplete is given.
+
+    Once the deletion is confirmed, and only then, each filter about to be
+    deleted is added to the latest snapshot's archive.json: as ARCHIVED
+    (kept in future scripts) if its rules are in the live section, or as
+    DEPRECATED (kept for the record, never consolidated) if it was deleted
+    with --include-uncovered. A dry run or a declined confirmation writes
+    nothing.
 
     Exits 1 whenever it kept back a filter it would otherwise have deleted
     (uncovered, unverified, or sharing a name) or a deletion failed, so a
@@ -1484,6 +1489,7 @@ def cleanup(
         # which has no rules at all) cannot be shown covered: its parsed
         # rules are only part of it, and an empty set is trivially a subset.
         uncovered = [f for f in disabled if not f.is_complete or not filter_facts(f) <= live_facts]
+        uncovered_ids = {id(f) for f in uncovered}
         if uncovered:
             console.print(
                 f"\n[bold red]{len(uncovered)} disabled filters have rules that are NOT in the "
@@ -1515,34 +1521,6 @@ def cleanup(
             pass  # No snapshot: every filter is unverified
         unverified = unverified_for_deletion(disabled, backed_up)
         unverified_ids = {id(f) for f, _ in unverified}
-
-        # Auto-archive any disabled filters missing from the archive. Filters
-        # this run refuses are left out: archiving the live copy would give
-        # the next run the "verified backup copy" this run found missing.
-        try:
-            latest_dir = manager.snapshot_dir_for("latest")
-            archive_entries = manager.load_archive(latest_dir)
-            archive_hashes = {e.filter.content_hash for e in archive_entries}
-            now_ts = datetime.now(timezone.utc).isoformat()
-            auto_archived = 0
-            for f in disabled:
-                if id(f) in unverified_ids and not allow_incomplete:
-                    continue
-                if f.content_hash not in archive_hashes:
-                    archived_f = f.model_copy(deep=True)
-                    archived_f.status = FilterStatus.ARCHIVED
-                    archived_f.enabled = False
-                    archive_entries.append(ArchiveEntry(
-                        filter=archived_f,
-                        archived_at=now_ts,
-                        source_snapshot=latest_dir.name,
-                    ))
-                    auto_archived += 1
-            if auto_archived:
-                manager.write_archive(latest_dir, archive_entries)
-                console.print(f"[cyan]Auto-archived {auto_archived} filters missing from archive")
-        except FileNotFoundError:
-            pass  # No latest snapshot, skip archive step
 
         console.print(f"\n[bold yellow]Found {len(disabled)} disabled filters:")
         for f in disabled:
@@ -1586,7 +1564,10 @@ def cleanup(
             to_delete = [f for f in to_delete if name_counts[f.name] == 1]
 
         if dry_run:
-            console.print(f"\n[bold yellow]DRY RUN - No filters will be deleted ({len(to_delete)} would be).")
+            console.print(
+                f"\n[bold yellow]DRY RUN - No filters will be deleted ({len(to_delete)} would be) "
+                "and nothing is written."
+            )
             if held_back:
                 raise typer.Exit(1)
             return
@@ -1601,6 +1582,8 @@ def cleanup(
             if held_back:
                 raise typer.Exit(1)
             return
+
+        _archive_before_deletion(manager, to_delete, uncovered_ids)
 
         sync_client = ProtonMailSync(headless=headless, credentials=creds, storage_state_path=state or None)
         try:
@@ -1624,6 +1607,51 @@ def cleanup(
             raise typer.Exit(1)
 
     _run_browser_command(_run())
+
+
+def _archive_before_deletion(
+    manager: BackupManager, to_delete: List[ProtonMailFilter], uncovered_ids: set,
+) -> None:
+    """Add each filter cleanup is about to delete to the latest archive.json.
+
+    Called only after the deletion is confirmed, and only for the filters
+    being deleted, so a dry run, a declined prompt or a refused filter
+    leaves the archive untouched (archiving a refused filter's live copy
+    would give the next run the backup copy this run found missing).
+
+    A filter whose rules are in the live section is archived as ARCHIVED,
+    so future scripts keep its rules. One deleted with --include-uncovered
+    (id in uncovered_ids) is archived as DEPRECATED: its rules are not
+    live, and it was disabled, so consolidating it would switch on a rule
+    the user had switched off. It stays recoverable with
+    'snapshot set-status'. A hash already in the archive is left as it is.
+    """
+    try:
+        latest_dir = manager.snapshot_dir_for("latest")
+    except FileNotFoundError:
+        return  # No snapshot to archive into; deletion was verified without one
+    archive_entries = manager.load_archive(latest_dir)
+    archive_hashes = {e.filter.content_hash for e in archive_entries}
+    now_ts = datetime.now(timezone.utc).isoformat()
+    added = {FilterStatus.ARCHIVED: 0, FilterStatus.DEPRECATED: 0}
+    for f in to_delete:
+        if f.content_hash in archive_hashes:
+            continue
+        archive_hashes.add(f.content_hash)
+        status = FilterStatus.DEPRECATED if id(f) in uncovered_ids else FilterStatus.ARCHIVED
+        archived_f = f.model_copy(deep=True)
+        archived_f.status = status
+        archived_f.enabled = False
+        archive_entries.append(ArchiveEntry(
+            filter=archived_f, archived_at=now_ts, source_snapshot=latest_dir.name,
+        ))
+        added[status] += 1
+    if any(added.values()):
+        manager.write_archive(latest_dir, archive_entries)
+        console.print(
+            f"[cyan]Archived before deletion: {added[FilterStatus.ARCHIVED]} (rules live), "
+            f"{added[FilterStatus.DEPRECATED]} deprecated (rules not live, kept for the record)"
+        )
 
 
 # --- Snapshot sub-commands ---

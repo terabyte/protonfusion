@@ -184,6 +184,8 @@ All commands that interact with ProtonMail accept `--state` and `--credentials-f
 - `--workers N` / `-w N` - Number of parallel browser tabs for scraping (default: 5, max: 10). Use `-w 1` for sequential scraping. Accepted by `backup`, `show`, `diff`, `restore` and `cleanup`.
 - `--manual-login` - Force manual login even if credentials file exists. Accepted by `backup` and `show` only.
 
+`backup`, `sync` and `cleanup` exit with status 1 whenever they refuse or hold anything back (including a dry run that would), so scripts can tell a partial run from a complete one; a live Sieve script that could not be read is a refusal.
+
 ### Examples
 
 ```bash
@@ -307,7 +309,7 @@ backup → consolidate → sync → cleanup → backup → consolidate → ...
 1. `backup` scrapes live filters into `backup.json` and copies `archive.json` from the previous snapshot
 2. `consolidate` reads both files, generates Sieve, and auto-archives included backup filters
 3. `sync` uploads the Sieve script and disables the UI filters it replaces
-4. `cleanup` deletes disabled UI filters from ProtonMail, holding back any whose rules are not in the live ProtonFusion section or that lack a verified backup copy
+4. `cleanup` deletes disabled UI filters from ProtonMail, holding back any whose rules are not in the live ProtonFusion section or that lack a verified backup copy. After you confirm, each filter it deletes is added to `archive.json` (as `archived`, or as `deprecated` if deleted with `--include-uncovered`, so a rule that was not live does not come back); `--dry-run` and a declined prompt write nothing
 5. Next `backup` scrapes the now-reduced filter list; archived filters carry forward via `archive.json`
 6. Next `consolidate` still has all rules from the archive
 

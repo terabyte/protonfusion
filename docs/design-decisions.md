@@ -63,7 +63,9 @@ On every `backup`, `archive.json` is copied from the previous snapshot (via the 
 
 ### Post-Consolidation Auto-Archiving
 
-When `consolidate` runs, backup filters that were included in Sieve generation are automatically moved to `archive.json` as `archived`. This prepares the archive for the next cycle — after `sync` and `cleanup` remove UI filters, the next backup won't find them, but the archive still has them.
+When `consolidate` runs, backup filters that were included in Sieve generation are automatically moved to `archive.json` as `archived`. This prepares the archive for the next cycle: after `sync` and `cleanup` remove UI filters, the next backup won't find them, but the archive still has them. Inclusion is tracked by `content_hash`, never by name, so a disabled filter that shares a name with an included one is not archived (and its rule does not reach the next script).
+
+`cleanup` archives too, but only after the deletion is confirmed and only the filters it is deleting: a dry run or a declined prompt writes nothing, and a filter it refuses is not archived (its live copy would otherwise become the "verified backup copy" the next run checks for). A filter deleted with `--include-uncovered` is archived as `deprecated`, not `archived`: its rules are not in the live section and it was disabled, so consolidating it would switch on a rule the user had switched off.
 
 ### Refusing to Drop Live Rules
 
