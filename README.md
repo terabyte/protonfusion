@@ -175,7 +175,7 @@ A GitHub Actions workflow runs unit + integration tests on every push and pull r
 
 All commands that interact with ProtonMail accept `--state` and `--credentials-file`; most also accept the others:
 
-- `--state PATH` - Saved session file from `login` (default: `$PROTONFUSION_STORAGE_STATE`, else `~/.config/protonfusion/storage_state.json`). Used whenever it exists.
+- `--state PATH` - Saved session file from `login` (default: `$PROTONFUSION_STORAGE_STATE`, else `~/.config/protonfusion/storage_state.json`). Used whenever it exists; if `--credentials-file` names a different account than the one the session was saved for, the command refuses (exit 1).
 - `--credentials-file .credentials` - Use stored credentials instead of manual login (`login` uses it only to pre-fill the form)
 - `--headless` - Run browser without a visible window (all except `login`, which always shows the browser)
 - `--workers N` / `-w N` - Number of parallel browser tabs for scraping (default: 5, max: 10). Use `-w 1` for sequential scraping. Accepted by `backup`, `show`, `diff`, `restore` and `cleanup`.

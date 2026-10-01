@@ -3,7 +3,6 @@
 import asyncio
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Optional, Union
 from urllib.parse import urlparse
@@ -14,9 +13,10 @@ from src.scraper import selectors
 from src.utils.config import (
     Credentials,
     PROTONMAIL_LOGIN_URL, MAIL_HOST, ACCOUNT_HOST, INBOX_PATH, FILTERS_PATH,
-    DEFAULT_ACCOUNT_SLOT, proton_url, slot_from_url, resolve_storage_state_path,
+    DEFAULT_ACCOUNT_SLOT, proton_url, slot_from_url, loggable_url, loggable_text, resolve_storage_state_path,
     LOGIN_TIMEOUT_MS, PAGE_LOAD_TIMEOUT_MS, ELEMENT_TIMEOUT_MS,
 )
+from src.utils.private_files import write_private_file
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +40,8 @@ MAX_ONBOARDING_MODALS = 6
 
 # How long a saved session gets to open the mail app before it counts as dead.
 SESSION_CHECK_MS = 30000
-# Our own metadata key inside the saved storage-state JSON (the account slot);
-# stripped before the state is handed to Playwright.
+# Our own metadata key inside the saved storage-state JSON (the account slot
+# and email); stripped before the state is handed to Playwright.
 STATE_META_KEY = "protonfusion"
 SESSION_POLL_S = 0.5
 
@@ -50,23 +50,43 @@ class SessionExpiredError(RuntimeError):
     """No usable saved session, and logging in here would need a human."""
 
 
-def write_private_file(path: Path, text: str):
-    """Write text to path readable only by the owner.
+class SessionAccountMismatchError(SessionExpiredError):
+    """The saved session belongs to a different account than --credentials-file.
 
-    Any directories created are 0700 and the file is 0600 (via umask), and the
-    write goes through a temp file + rename so a crash never leaves half a file.
+    A subclass of SessionExpiredError because the fix is the same (sign in
+    to the right account with `login`) and so is the handling: exit cleanly.
     """
-    old_umask = os.umask(0o077)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(text)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    finally:
-        os.umask(old_umask)
+
+
+class SieveReadError(RuntimeError):
+    """The live Sieve script could not be read.
+
+    Distinct from there being no script (read_sieve_script returns "" for
+    that): a failed read must never be treated as an empty script.
+    """
+
+
+# Proton serves every account at all of these domains, and the mail app shows
+# just one of them, so an address at any of them names the same account.
+PROTON_DOMAINS = {"proton.me", "protonmail.com", "protonmail.ch", "pm.me"}
+
+
+def same_account(username: str, email: str) -> bool:
+    """True if a login username and an account email name the same Proton account.
+
+    Case-insensitive. A bare username ("alice") matches the email's local
+    part, as Proton accepts either at login; two Proton-domain addresses
+    match on the local part.
+    """
+    username = username.strip().lower()
+    email = email.strip().lower()
+    if username == email:
+        return True
+    local, _, domain = email.partition("@")
+    if "@" not in username:
+        return username == local
+    user_local, _, user_domain = username.partition("@")
+    return user_domain in PROTON_DOMAINS and domain in PROTON_DOMAINS and user_local == local
 
 
 class ProtonMailBrowser:
@@ -96,6 +116,8 @@ class ProtonMailBrowser:
         self.page: Optional[Page] = None
         self._playwright = None
         self.account_email: str = ""
+        # Account the loaded saved session was saved for ("" if unknown).
+        self.session_account_email: str = ""
         # Session slot from the /u/<slot>/ part of Proton URLs; updated from the
         # URL the browser lands on after login or session reuse.
         self.account_slot: int = DEFAULT_ACCOUNT_SLOT
@@ -141,7 +163,8 @@ class ProtonMailBrowser:
         """Read the saved session file, or None if absent or unreadable.
 
         Also restores the account slot recorded when the session was saved, so
-        session reuse goes straight to the right /u/<slot>/.
+        session reuse goes straight to the right /u/<slot>/, and the account
+        email, so reuse can be checked against --credentials-file.
         """
         path = self.storage_state_path
         if not path.exists():
@@ -158,6 +181,8 @@ class ProtonMailBrowser:
         slot = meta.get("account_slot")
         if isinstance(slot, int) and slot >= 0:
             self.account_slot = slot
+        email = meta.get("account_email")
+        self.session_account_email = email if isinstance(email, str) else ""
         self.session_loaded = True
         logger.info("Loading saved session from %s", path)
         return state
@@ -165,12 +190,18 @@ class ProtonMailBrowser:
     async def save_storage_state(self, path: Optional[Path] = None) -> Path:
         """Save the context's cookies + localStorage (owner-only) and return the path.
 
-        The file holds live auth cookies: it is written 0600 in a 0700 directory
-        and its contents are never logged.
+        The file holds live auth cookies: it is written 0600 (a directory this
+        creates is 0700; an existing one is left as is) and its contents are
+        never logged.
         """
         path = Path(path) if path else self.storage_state_path
         state = await self.context.storage_state()
-        state[STATE_META_KEY] = {"account_slot": self.account_slot}
+        state[STATE_META_KEY] = {
+            "account_slot": self.account_slot,
+            # The live email if read this run, else the one the session was
+            # saved with: a refresh must not forget whose session this is.
+            "account_email": self.account_email or self.session_account_email,
+        }
         write_private_file(path, json.dumps(state))
         logger.info("Saved browser session to %s", path)
         return path
@@ -181,7 +212,8 @@ class ProtonMailBrowser:
         Uses stored credentials if available, otherwise waits for manual login.
         """
         page = self.page
-        if not await self._reuse_saved_session():
+        reused = await self._reuse_saved_session()
+        if not reused:
             self._check_login_is_possible()
             await page.goto(
                 PROTONMAIL_LOGIN_URL,
@@ -198,7 +230,38 @@ class ProtonMailBrowser:
                 # Headed fallback after an expired session: replace the dead file.
                 self._save_state_on_close = True
         await self._after_login()
+        if reused:
+            self._check_session_account()
         return True
+
+    def _check_session_account(self):
+        """Refuse a reused session that belongs to another account than the credentials.
+
+        Without this, --credentials-file naming account B would silently run
+        against the saved session for account A. Only checked when credentials
+        were given; the account is the email read from the mail app, else the
+        one recorded when the session was saved.
+        """
+        if not self.credentials:
+            return
+        username = self.credentials.username
+        account = self.account_email or self.session_account_email
+        if not account:
+            logger.warning(
+                "Could not tell which account the saved session at %s belongs to; "
+                "not checked against %s", self.storage_state_path, username,
+            )
+            return
+        if same_account(username, account):
+            return
+        # Refusing: leave the other account's session file exactly as it was.
+        self._save_state_on_close = False
+        raise SessionAccountMismatchError(
+            f"The saved session at {self.storage_state_path} is for {account}, but the "
+            f"credentials file is for {username}. Run 'python -m src.main login' to save a "
+            "session for that account (use --state to keep both), or pass --state with "
+            "that account's session file."
+        )
 
     def _check_login_is_possible(self):
         """Fail fast, with the fix, instead of stalling on a login nobody can finish.
@@ -243,7 +306,7 @@ class ProtonMailBrowser:
                 f"Timed out after {timeout_ms // 1000}s waiting for the Proton Mail inbox to load. "
                 "Run 'login' again (raise --timeout if you need longer)."
             )
-        logger.info("Signed in (mail app at %s)", page.url)
+        logger.info("Signed in (mail app at %s)", loggable_url(page.url))
         await self._after_login()
 
     async def _prefill_credentials(self):
@@ -273,7 +336,7 @@ class ProtonMailBrowser:
             try:
                 await self.page.wait_for_selector(selectors.COMPOSE_BUTTON, timeout=POST_LOGIN_SETTLE_MS)
             except Exception:
-                logger.debug("Mail app did not finish loading after login (%s)", self.page.url)
+                logger.debug("Mail app did not finish loading after login (%s)", loggable_url(self.page.url))
         await self.dismiss_onboarding_modals()
         if not self.account_email:
             await self._capture_account_email()
@@ -316,7 +379,7 @@ class ProtonMailBrowser:
         page = self.page
         await page.goto(self.mail_url(INBOX_PATH), wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
         if not await self._wait_for_mail_app_or_login(SESSION_CHECK_MS):
-            logger.warning("Saved session did not reach the mail app (ended at %s)", page.url)
+            logger.warning("Saved session did not reach the mail app (ended at %s)", loggable_url(page.url))
             return False
         logger.info("Reused saved session")
         # Proton may rotate tokens during the run; write them back on close so
@@ -362,12 +425,12 @@ class ProtonMailBrowser:
                 lambda url: "/mail/" in url or "/apps" in url,
                 timeout=LOGIN_TIMEOUT_MS,
             )
-            logger.info("Login successful (redirected to: %s)", page.url)
+            logger.info("Login successful (redirected to: %s)", loggable_url(page.url))
             return True
 
         except Exception as e:
             raise RuntimeError(
-                f"Automated login failed: {e}. Check the credentials file. If Proton is "
+                f"Automated login failed: {loggable_text(str(e))}. Check the credentials file. If Proton is "
                 "showing Human Verification (CAPTCHA), run 'python -m src.main login' to "
                 "sign in by hand and save a session."
             )
@@ -383,7 +446,7 @@ class ProtonMailBrowser:
                 lambda url: "/mail/" in url or "/apps" in url,
                 timeout=LOGIN_TIMEOUT_MS,
             )
-            logger.info("Manual login detected (redirected to: %s)", page.url)
+            logger.info("Manual login detected (redirected to: %s)", loggable_url(page.url))
             return True
         except Exception:
             raise RuntimeError("Login timed out. Please try again.")
@@ -398,11 +461,11 @@ class ProtonMailBrowser:
         try:
             await self._open_filters_directly()
         except Exception as e:
-            logger.warning("Direct navigation to filters failed (%s); trying the settings menu", e)
+            logger.warning("Direct navigation to filters failed (%s); trying the settings menu", loggable_text(str(e)))
             await self._navigate_to_filters_via_menu()
             await self._wait_for_filters_page()
             await self._assert_filter_page_structure()
-        logger.info("Navigated to filter settings at %s", self.page.url)
+        logger.info("Navigated to filter settings at %s", loggable_url(self.page.url))
 
     async def _open_filters_directly(self):
         """Load the filters page by URL; raises if it does not render as expected."""
@@ -475,7 +538,7 @@ class ProtonMailBrowser:
         # Page heading
         h1 = await page.query_selector(selectors.PAGE_HEADING)
         if not h1:
-            raise RuntimeError("Filter page missing <h1> heading. URL: " + page.url)
+            raise RuntimeError("Filter page missing <h1> heading. URL: " + loggable_url(page.url))
         h1_text = (await h1.inner_text()).strip()
         if h1_text != "Filters":
             raise RuntimeError(
@@ -509,16 +572,19 @@ class ProtonMailBrowser:
 
         If filter_name is provided, looks for that named filter and opens it.
         Otherwise, opens the "Add sieve filter" modal to read the default content.
-        Returns the script text, or empty string if not found.
+
+        Returns the script text. "" means there genuinely is no script: no
+        filter by that name in the Custom filters list, or an empty one.
+        Raises SieveReadError when the read itself failed (list or editor not
+        found, timeout, any other error): callers must refuse rather than
+        treat that as "no script", or a sync would overwrite everything
+        outside the ProtonFusion section and a backup would record nothing.
         """
         page = self.page
 
         try:
-            opened = False
-
             if filter_name:
-                opened = await self._open_sieve_filter_by_name(filter_name)
-                if not opened:
+                if not await self._open_sieve_filter_by_name(filter_name):
                     logger.info("Sieve filter '%s' not found", filter_name)
                     return ""
             else:
@@ -527,13 +593,9 @@ class ProtonMailBrowser:
                 if add_btn and await add_btn.is_visible():
                     await add_btn.click()
                     await page.wait_for_timeout(ALL_SETTINGS_LOAD_MS)
-                    opened = True
                 else:
                     logger.info("No sieve filter to read (Add button not available)")
                     return ""
-
-            if not opened:
-                return ""
 
             # Wait for CodeMirror to initialize
             try:
@@ -541,14 +603,15 @@ class ProtonMailBrowser:
                     selectors.SIEVE_EDITOR_CM, timeout=ELEMENT_TIMEOUT_MS,
                 )
             except Exception:
-                logger.warning("CodeMirror editor not found in Sieve modal")
-                return ""
+                raise SieveReadError("the Sieve editor did not open")
 
-            # Read content via CodeMirror 5 API
+            # Read content via CodeMirror 5 API; null means no editor instance.
             content = await page.evaluate(
                 "() => { const cm = document.querySelector('.CodeMirror'); "
-                "return cm && cm.CodeMirror ? cm.CodeMirror.getValue() : ''; }"
+                "return cm && cm.CodeMirror ? cm.CodeMirror.getValue() : null; }"
             )
+            if content is None:
+                raise SieveReadError("the Sieve editor has no CodeMirror instance to read")
 
             # Close the modal without saving
             close_btn = await page.query_selector(
@@ -558,7 +621,7 @@ class ProtonMailBrowser:
                 await close_btn.click()
                 await page.wait_for_timeout(MODAL_TRANSITION_MS)
 
-            script = (content or "").strip()
+            script = content.strip()
             logger.info(
                 "Read Sieve script: %d chars, %d lines",
                 len(script),
@@ -566,21 +629,26 @@ class ProtonMailBrowser:
             )
             return script
 
-        except Exception as e:
+        except SieveReadError as e:
             logger.error("Failed to read Sieve script: %s", e)
-            return ""
+            raise
+        except Exception as e:
+            reason = loggable_text(str(e))
+            logger.error("Failed to read Sieve script: %s", reason)
+            raise SieveReadError(reason) from e
 
     async def _open_sieve_filter_by_name(self, name: str) -> bool:
         """Find a filter by name in the list and click its Edit button.
 
-        Returns True if the filter was found and the edit modal was opened.
-        Scoped to the Custom filters section only.
+        Returns True if the filter was found and the edit modal was opened,
+        False if no filter in the Custom filters list has that name. Raises
+        SieveReadError if the list is missing or the filter is listed but
+        could not be opened, since neither means the filter is absent.
         """
         page = self.page
         section = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
         if not section:
-            logger.warning("Custom filters section not found")
-            return False
+            raise SieveReadError("the Custom filters section was not found")
         rows = await section.query_selector_all(selectors.FILTER_TABLE_ROWS)
 
         for row in rows:
@@ -601,10 +669,11 @@ class ProtonMailBrowser:
                     edit_btn = await row.query_selector(
                         f'{selectors.FILTER_EDIT_BUTTON}, {selectors.FILTER_EDIT_BUTTON_ALT}'
                     )
-                    if edit_btn:
-                        await edit_btn.click()
-                        await page.wait_for_timeout(ALL_SETTINGS_LOAD_MS)
-                        return True
+                    if not edit_btn:
+                        raise SieveReadError(f"filter '{name}' is listed but has no Edit button")
+                    await edit_btn.click()
+                    await page.wait_for_timeout(ALL_SETTINGS_LOAD_MS)
+                    return True
 
         return False
 

@@ -636,3 +636,27 @@ class TestUnverifiedForDeletion:
     def test_incomplete_copy(self):
         [(f, reason)] = unverified_for_deletion([self._f()], [self._f(issues=["label row unreadable"])])
         assert "label row unreadable" in reason
+
+
+class TestSnapshotFilePermissions:
+    """Snapshot files hold the user's filter data: owner-only, like the session file."""
+
+    def test_backup_json_is_0600(self, temp_snapshots_dir, sample_filters_list):
+        manager = BackupManager(temp_snapshots_dir)
+        manager.create_backup(sample_filters_list)
+        backup_file = temp_snapshots_dir / "latest" / "backup.json"
+        assert (backup_file.stat().st_mode & 0o777) == 0o600
+        assert (backup_file.resolve().parent.stat().st_mode & 0o777) == 0o700
+
+    def test_archive_and_manifest_are_0600(self, temp_snapshots_dir, sample_filters_list):
+        manager = BackupManager(temp_snapshots_dir)
+        manager.create_backup(sample_filters_list)
+        snapshot_dir = (temp_snapshots_dir / "latest").resolve()
+        manager.write_archive(snapshot_dir, [])
+        manager.write_manifest(snapshot_dir, sample_filters_list, "consolidated.sieve")
+        assert (snapshot_dir / "archive.json").stat().st_mode & 0o777 == 0o600
+        assert (snapshot_dir / "manifest.json").stat().st_mode & 0o777 == 0o600
+
+        (snapshot_dir / "manifest.json").chmod(0o644)
+        assert manager.promote_manifest(snapshot_dir)
+        assert (snapshot_dir / "manifest.json").stat().st_mode & 0o777 == 0o600

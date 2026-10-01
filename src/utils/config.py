@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Optional, Tuple
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 
 # Project paths
@@ -50,6 +50,28 @@ def slot_from_url(url: str) -> Optional[int]:
         return None
     match = _SLOT_RE.match(parsed.path)
     return int(match.group(1)) if match else None
+
+
+def loggable_url(url: str) -> str:
+    """The URL without its query string and fragment, safe to log or show.
+
+    During Proton's session fork the fragment carries a selector and key, and
+    the browser URL is logged exactly when a login stalls mid-flow, so every
+    logged or raised page URL goes through this.
+    """
+    return urlunparse(urlparse(url or "")._replace(params="", query="", fragment=""))
+
+
+_URL_RE = re.compile(r"https?://[^\s\"'<>]+")
+
+
+def loggable_text(text: str) -> str:
+    """text with every http(s) URL in it passed through loggable_url.
+
+    For messages we do not compose ourselves, such as a Playwright error,
+    whose call log can name the URL the page navigated to.
+    """
+    return _URL_RE.sub(lambda m: loggable_url(m.group(0)), text or "")
 
 
 # Saved browser session (Playwright storage state: cookies + localStorage).

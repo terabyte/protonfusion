@@ -41,6 +41,7 @@ class FakeSync:
 
     live_script = ""
     calls: list = []
+    read_error = None  # set to a SieveReadError to make the live read fail
 
     def __init__(self, *args, **kwargs):
         pass
@@ -55,6 +56,8 @@ class FakeSync:
         pass
 
     async def read_sieve_script(self, filter_name=""):
+        if type(self).read_error:
+            raise type(self).read_error
         return type(self).live_script
 
     async def disable_all_ui_filters(self):
@@ -95,6 +98,7 @@ def fake_sync(monkeypatch):
     import src.scraper.protonmail_sync
     FakeSync.live_script = ""
     FakeSync.calls = []
+    FakeSync.read_error = None
     monkeypatch.setattr(src.scraper.protonmail_sync, "ProtonMailSync", FakeSync)
     return FakeSync
 
@@ -320,3 +324,39 @@ def test_consolidate_refuses_filter_containing_section_marker(cli_snapshots_dir,
     assert result.exit_code == 1
     assert "Sneaky" in result.output
     assert "section marker" in result.output
+
+
+class TestFailedLiveReadRefuses:
+    """A failed read of the live script is never taken for "no script"."""
+
+    @staticmethod
+    def _fail(fake_sync):
+        from src.scraper.browser import SieveReadError
+        fake_sync.read_error = SieveReadError("the Sieve editor did not open")
+
+    def test_sync_refuses_and_touches_nothing(self, shrunk_account, fake_sync):
+        self._fail(fake_sync)
+        result = runner.invoke(app, ["sync", "--allow-rule-removal"])
+        assert result.exit_code == 1
+        assert fake_sync.calls == []
+        assert "Could not read the live Sieve script" in result.output
+        assert "Nothing was changed" in result.output
+
+    def test_show_diff_only_refuses(self, shrunk_account, fake_sync):
+        self._fail(fake_sync)
+        result = runner.invoke(app, ["sync", "--show-diff-only"])
+        assert result.exit_code == 1
+        assert "Could not read the live Sieve script" in result.output
+
+    def test_cleanup_deletes_nothing_even_with_include_uncovered(
+        self, cli_snapshots_dir, fake_sync, fake_scraper,
+    ):
+        orphan = _filter("nowhere@x.com", enabled=False)
+        fake_scraper.filters = [orphan]
+        BackupManager(cli_snapshots_dir).create_backup([orphan])
+        self._fail(fake_sync)
+
+        result = runner.invoke(app, ["cleanup", "--include-uncovered"], input="y\n")
+        assert result.exit_code == 1
+        assert fake_sync.calls == []
+        assert "Could not read the live Sieve script" in result.output

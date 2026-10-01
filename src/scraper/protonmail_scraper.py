@@ -67,10 +67,13 @@ CHECKBOX_LABEL_JS = (
 )
 
 # Raw evidence for one wizard step: the enclosing modal's visible text plus
-# the state of its visible form fields, which innerText leaves out.
+# the state of its visible form fields, which innerText leaves out. "" when
+# the anchor is not inside a modal: falling back to the page body would save
+# the whole settings page, every visible input included, as evidence.
 STEP_TEXT_JS = """
 (anchor) => {
-  const root = anchor.closest('dialog, [role="dialog"], [class*="modal"]') || document.body;
+  const root = anchor.closest('dialog, [role="dialog"], [class*="modal"]');
+  if (!root) return '';
   const shown = el => el.offsetParent !== null || el.getClientRects().length > 0;
   const lines = [root.innerText.trim()];
   for (const field of root.querySelectorAll('input, textarea, select')) {
@@ -434,18 +437,23 @@ class ProtonMailScraper(ProtonMailBrowser):
         Finds the modal around the first matching anchor (a row of this step,
         else the Next button) and returns its innerText plus the state of its
         visible form fields, which innerText does not include (text input
-        values, checkbox/radio states, dropdown aria-labels). Falls back to
-        the page body if no modal container is found. Never raises: evidence
+        values, checkbox/radio states, dropdown aria-labels).
+
+        Returns "" when no anchor is found or the anchor is not inside a
+        modal, never the page body: that would capture the whole settings
+        page. Callers record "" as a scrape issue. Never raises: evidence
         capture must not be the thing that breaks a scrape.
         """
         try:
             for anchor_selector in anchor_selectors:
                 anchor = await page.query_selector(anchor_selector)
                 if anchor:
-                    return await anchor.evaluate(STEP_TEXT_JS)
-            return await page.evaluate(
-                "() => document.body.innerText"
-            )
+                    text = await anchor.evaluate(STEP_TEXT_JS)
+                    if not text:
+                        logger.debug("Step anchor %s is not inside a modal", anchor_selector)
+                    return text
+            logger.debug("No step anchor found among %s", anchor_selectors)
+            return ""
         except Exception as e:
             logger.debug("Could not capture step text: %s", e)
             return ""
