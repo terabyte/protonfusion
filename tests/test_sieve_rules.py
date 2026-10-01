@@ -152,8 +152,14 @@ class TestExtractSection:
         assert extract_section("keep;") is None
         assert extract_section("") is None
 
-    def test_none_with_begin_only(self):
-        assert extract_section(f"{SECTION_BEGIN}\nkeep;") is None
+    def test_begin_without_end_raises(self):
+        """A truncated section must fail closed, not read as absent."""
+        with pytest.raises(SieveParseError):
+            extract_section(f"{SECTION_BEGIN}\nkeep;")
+
+    def test_compare_against_truncated_live_section_raises(self):
+        with pytest.raises(SieveParseError):
+            compare_sections(f"{SECTION_BEGIN}\nkeep;", "keep;")
 
 
 class TestCompareSections:

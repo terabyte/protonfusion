@@ -444,3 +444,36 @@ class TestCleanupExitCode:
         result = runner.invoke(app, ["cleanup"], input="y\n")
         assert result.exit_code == 1, result.output
         assert "1 filter(s) were not deleted" in result.output
+
+
+class TestTruncatedLiveSection:
+    """A live script with BEGIN but no END must refuse everywhere, never crash or pass."""
+
+    @staticmethod
+    def _truncate(script: str) -> str:
+        from src.generator.sieve_generator import SECTION_END
+        return script.replace(SECTION_END, "")
+
+    def test_sync_refuses(self, shrunk_account, fake_sync):
+        fake_sync.live_script = self._truncate(shrunk_account)
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1
+        assert "BEGIN marker but no END" in result.output
+        assert fake_sync.calls == []
+
+    def test_cleanup_deletes_nothing(self, cli_snapshots_dir, fake_sync, fake_scraper):
+        covered = _filter("in-sieve@x.com", enabled=False)
+        fake_scraper.filters = [covered]
+        fake_sync.live_script = self._truncate(_section_for([covered]))
+        BackupManager(cli_snapshots_dir).create_backup([covered])
+        result = runner.invoke(app, ["cleanup"], input="y\n")
+        assert result.exit_code == 1, result.output
+        assert "Could not parse" in result.output
+        assert fake_sync.calls == []
+
+    def test_consolidate_warns(self, cli_snapshots_dir, fake_sync):
+        f = _filter("a@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([f], sieve_script=self._truncate(_section_for([f])))
+        result = runner.invoke(app, ["consolidate"])
+        assert result.exit_code == 0, result.output
+        assert "Could not parse the ProtonFusion section" in result.output

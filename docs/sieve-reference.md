@@ -172,7 +172,7 @@ Only the marked section is compared. User rules outside the markers are kept by 
 - **Order and `stop` between rules are not compared.** Two sections with the same pairs in a different order can behave differently if one rule stops processing before another runs.
 - **Constructs ProtonFusion does not generate are compared by text.** `not`, `size`, `exists`, relational matches, `elsif`/`else` chains and nested `if` blocks become opaque entries that only count as kept if the new section contains the identical construct. This fails closed: hand edits inside the section cause a refusal rather than a silent loss.
 - **Case.** Test values are compared case-insensitively, as the default `i;ascii-casemap` comparator matches them, and are listed lowercased. Action arguments such as folder names are compared exactly.
-- **A section that does not parse** at all causes a refusal.
+- **A section that does not parse** at all causes a refusal, and so does a BEGIN marker with no END marker after it.
 
 ## Rule Ordering
 

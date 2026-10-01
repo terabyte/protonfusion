@@ -564,7 +564,7 @@ def consolidate(
     # After `cleanup` it may be the only copy of some rules.
     carried_count = 0
     live_script = bkup.sieve_script or ""
-    if extract_section(live_script) is not None:
+    if SECTION_BEGIN in live_script:
         try:
             comparison = compare_sections(live_script, sieve_script)
         except SieveParseError as e:
@@ -1265,15 +1265,15 @@ def cleanup(
         held_back: List[ProtonMailFilter] = []
 
         # Only filters whose rules are all in the live section are safe to delete.
+        # An unparsable section leaves live_facts empty, so nothing counts as covered.
         live_facts = set()
-        live_section = extract_section(live_script or "")
-        if live_section is None:
-            console.print("[yellow]No ProtonFusion section found in the live Sieve script.")
-        else:
-            try:
+        try:
+            if extract_section(live_script or "") is None:
+                console.print("[yellow]No ProtonFusion section found in the live Sieve script.")
+            else:
                 live_facts = script_facts(live_script)
-            except SieveParseError as e:
-                console.print(f"[red]Could not parse the live ProtonFusion section: {escape(str(e))}")
+        except SieveParseError as e:
+            console.print(f"[red]Could not parse the live ProtonFusion section: {escape(str(e))}")
         uncovered = [f for f in disabled if not filter_facts(f) <= live_facts]
         if uncovered:
             console.print(

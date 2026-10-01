@@ -467,7 +467,12 @@ def parse_rules(section_text: str) -> List[ParsedRule]:
 
 
 def extract_section(script: str) -> Optional[str]:
-    """Return the text between the ProtonFusion markers, or None if absent."""
+    """Return the text between the ProtonFusion markers, or None if absent.
+
+    Raises SieveParseError for a BEGIN marker with no END after it. Reading
+    that as "no section" would make every comparison against it report
+    nothing dropped, so it fails closed like any other unparsable section.
+    """
     if not script:
         return None
     begin = script.find(SECTION_BEGIN)
@@ -475,7 +480,7 @@ def extract_section(script: str) -> Optional[str]:
         return None
     end = script.find(SECTION_END, begin + len(SECTION_BEGIN))
     if end == -1:
-        return None
+        raise SieveParseError("ProtonFusion section has a BEGIN marker but no END marker")
     return script[begin + len(SECTION_BEGIN):end]
 
 
