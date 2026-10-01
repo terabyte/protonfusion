@@ -63,7 +63,7 @@ class TestSnapshotView:
             name="Archived Rule",
             status=FilterStatus.ARCHIVED,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="old@test.com")],
-            actions=[FilterAction(type=ActionType.DELETE)],
+            actions=[FilterAction(type=ActionType.TRASH)],
         )
         manager.write_archive(snapshot_dir, [ArchiveEntry(filter=archived_filter)])
 

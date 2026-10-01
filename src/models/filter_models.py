@@ -35,9 +35,9 @@ class ActionType(str, Enum):
     # `discard;` (which Proton documents as deleting "immediately and
     # permanently").
     TRASH = "trash"
-    # Old name for TRASH, kept as an enum alias so existing callers still
-    # mean Trash. Backups store the old value "delete"; see
-    # LEGACY_ACTION_TYPES.
+    # Old name for TRASH, kept only as a compatibility alias: nothing in
+    # src/ uses it (one test pins it), so use TRASH. Backups holding the old value
+    # "delete" are read through LEGACY_ACTION_TYPES, not through this alias.
     DELETE = "trash"
 
 

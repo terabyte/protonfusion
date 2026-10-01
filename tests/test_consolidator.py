@@ -34,17 +34,17 @@ class TestGroupByAction:
             ProtonMailFilter(
                 name="Spam 1",
                 conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam1")],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
             ProtonMailFilter(
                 name="Spam 2",
                 conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam2")],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
             ProtonMailFilter(
                 name="Spam 3",
                 conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam3")],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
         ]
 
@@ -60,7 +60,7 @@ class TestGroupByAction:
             ProtonMailFilter(
                 name="Delete",
                 conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam")],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
             ProtonMailFilter(
                 name="Archive",
@@ -80,13 +80,13 @@ class TestGroupByAction:
                 name="Enabled",
                 enabled=True,
                 conditions=[],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
             ProtonMailFilter(
                 name="Disabled",
                 enabled=False,
                 conditions=[],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
         ]
 
@@ -137,9 +137,9 @@ class TestGroupByAction:
     def test_source_filters_tracked(self):
         """Test that source filter names are tracked."""
         filters = [
-            ProtonMailFilter(name="Filter A", conditions=[], actions=[FilterAction(type=ActionType.DELETE)]),
-            ProtonMailFilter(name="Filter B", conditions=[], actions=[FilterAction(type=ActionType.DELETE)]),
-            ProtonMailFilter(name="Filter C", conditions=[], actions=[FilterAction(type=ActionType.DELETE)]),
+            ProtonMailFilter(name="Filter A", conditions=[], actions=[FilterAction(type=ActionType.TRASH)]),
+            ProtonMailFilter(name="Filter B", conditions=[], actions=[FilterAction(type=ActionType.TRASH)]),
+            ProtonMailFilter(name="Filter C", conditions=[], actions=[FilterAction(type=ActionType.TRASH)]),
         ]
 
         result = group_by_action(filters)
@@ -150,8 +150,8 @@ class TestGroupByAction:
     def test_consolidated_name_generated(self):
         """Test that consolidated filter gets descriptive name."""
         filters = [
-            ProtonMailFilter(name="F1", conditions=[], actions=[FilterAction(type=ActionType.DELETE)]),
-            ProtonMailFilter(name="F2", conditions=[], actions=[FilterAction(type=ActionType.DELETE)]),
+            ProtonMailFilter(name="F1", conditions=[], actions=[FilterAction(type=ActionType.TRASH)]),
+            ProtonMailFilter(name="F2", conditions=[], actions=[FilterAction(type=ActionType.TRASH)]),
         ]
 
         result = group_by_action(filters)
@@ -169,7 +169,7 @@ class TestGroupByAction:
                     FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="alice"),
                     FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
                 ],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
         ]
 
@@ -191,7 +191,7 @@ class TestGroupByAction:
                     FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="alice"),
                     FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
                 ],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
         ]
 
@@ -223,14 +223,14 @@ class TestGroupByAction:
                     FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="alice"),
                     FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
                 ],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
             ProtonMailFilter(
                 name="Single condition",
                 conditions=[
                     FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="bob"),
                 ],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
         ]
 
@@ -263,7 +263,7 @@ class TestGroupByAction:
                     FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="alice"),
                     FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
                 ],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
             ProtonMailFilter(
                 name="Filter B",
@@ -272,7 +272,7 @@ class TestGroupByAction:
                     FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="bob"),
                     FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="sale"),
                 ],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
         ]
 
@@ -367,7 +367,7 @@ class TestMergeConditions:
                 ConditionGroup(conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="a")]),
                 ConditionGroup(conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="b")]),
             ],
-            actions=[FilterAction(type=ActionType.DELETE)],
+            actions=[FilterAction(type=ActionType.TRASH)],
             source_filters=["A", "B"],
             filter_count=2
         )
@@ -394,7 +394,7 @@ class TestMergeConditions:
                 # Single-condition group
                 ConditionGroup(conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="bob")]),
             ],
-            actions=[FilterAction(type=ActionType.DELETE)],
+            actions=[FilterAction(type=ActionType.TRASH)],
         )
 
         result = merge_conditions([cf])
@@ -426,7 +426,7 @@ class TestMergeConditions:
                     ]
                 ),
             ],
-            actions=[FilterAction(type=ActionType.DELETE)],
+            actions=[FilterAction(type=ActionType.TRASH)],
         )
 
         result = merge_conditions([cf])
@@ -455,7 +455,7 @@ class TestOptimizeOrdering:
         cf = ConsolidatedFilter(
             name="Test",
             condition_groups=[],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         result = optimize_ordering([cf])
@@ -466,7 +466,7 @@ class TestOptimizeOrdering:
         """Test that delete actions come first."""
         filters = [
             ConsolidatedFilter(name="Move", actions=[FilterAction(type=ActionType.MOVE_TO)], filter_count=1),
-            ConsolidatedFilter(name="Delete", actions=[FilterAction(type=ActionType.DELETE)], filter_count=1),
+            ConsolidatedFilter(name="Delete", actions=[FilterAction(type=ActionType.TRASH)], filter_count=1),
             ConsolidatedFilter(name="Label", actions=[FilterAction(type=ActionType.LABEL)], filter_count=1),
         ]
 
@@ -478,7 +478,7 @@ class TestOptimizeOrdering:
         """Test that filters are ordered by action priority."""
         filters = [
             ConsolidatedFilter(name="Star", actions=[FilterAction(type=ActionType.STAR)], filter_count=1),
-            ConsolidatedFilter(name="Delete", actions=[FilterAction(type=ActionType.DELETE)], filter_count=1),
+            ConsolidatedFilter(name="Delete", actions=[FilterAction(type=ActionType.TRASH)], filter_count=1),
             ConsolidatedFilter(name="Archive", actions=[FilterAction(type=ActionType.ARCHIVE)], filter_count=1),
             ConsolidatedFilter(name="Move", actions=[FilterAction(type=ActionType.MOVE_TO)], filter_count=1),
             ConsolidatedFilter(name="Label", actions=[FilterAction(type=ActionType.LABEL)], filter_count=1),
@@ -494,9 +494,9 @@ class TestOptimizeOrdering:
     def test_filter_count_secondary_sort(self):
         """Test that higher filter_count comes first within same action type."""
         filters = [
-            ConsolidatedFilter(name="Delete 1", actions=[FilterAction(type=ActionType.DELETE)], filter_count=1),
-            ConsolidatedFilter(name="Delete 5", actions=[FilterAction(type=ActionType.DELETE)], filter_count=5),
-            ConsolidatedFilter(name="Delete 3", actions=[FilterAction(type=ActionType.DELETE)], filter_count=3),
+            ConsolidatedFilter(name="Delete 1", actions=[FilterAction(type=ActionType.TRASH)], filter_count=1),
+            ConsolidatedFilter(name="Delete 5", actions=[FilterAction(type=ActionType.TRASH)], filter_count=5),
+            ConsolidatedFilter(name="Delete 3", actions=[FilterAction(type=ActionType.TRASH)], filter_count=3),
         ]
 
         result = optimize_ordering(filters)
@@ -526,13 +526,13 @@ class TestConsolidationEngine:
                 name="Spam 1",
                 enabled=True,
                 conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam1")],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
             ProtonMailFilter(
                 name="Spam 2",
                 enabled=True,
                 conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam2")],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
         ]
         engine = ConsolidationEngine()
@@ -564,7 +564,7 @@ class TestConsolidationEngine:
                 name=f"Filter {i}",
                 enabled=True,
                 conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value=f"test{i}")],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             )
             for i in range(5)
         ]
@@ -585,7 +585,7 @@ class TestConsolidationEngine:
                 name=f"Spam {i}",
                 enabled=True,
                 conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value=f"spam{i}")],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             )
             for i in range(10)
         ]
@@ -604,13 +604,13 @@ class TestConsolidationEngine:
                 name="Delete 1",
                 enabled=True,
                 conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam")],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
             ProtonMailFilter(
                 name="Delete 2",
                 enabled=True,
                 conditions=[FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="ad")],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
             ProtonMailFilter(
                 name="Disabled",
@@ -637,7 +637,7 @@ class TestConsolidationEngine:
                 name=f"Spam {i}",
                 enabled=True,
                 conditions=[],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             )
             for i in range(5)
         ]
@@ -657,13 +657,13 @@ class TestConsolidationEngine:
                 name="Spam 1",
                 enabled=True,
                 conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam1@test.com")],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
             ProtonMailFilter(
                 name="Spam 2",
                 enabled=True,
                 conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam2@test.com")],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
             # Group 2: Move newsletters
             ProtonMailFilter(
@@ -688,7 +688,7 @@ class TestConsolidationEngine:
         assert report.original_count == 4
         assert report.consolidated_count == 2
         # Delete should come first (higher priority)
-        assert consolidated[0].actions[0].type == ActionType.DELETE
+        assert consolidated[0].actions[0].type == ActionType.TRASH
 
     def test_pipeline_preserves_and_logic(self):
         """Test that the full pipeline preserves AND logic through all strategies."""
@@ -700,14 +700,14 @@ class TestConsolidationEngine:
                     FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="alice"),
                     FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
                 ],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
             ProtonMailFilter(
                 name="Simple filter",
                 conditions=[
                     FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="bob"),
                 ],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
         ]
         engine = ConsolidationEngine()
@@ -733,7 +733,7 @@ class TestConsolidationEngine:
                     FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="alice"),
                     FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
                 ],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
             # OR filter: must stay as anyof
             ProtonMailFilter(
@@ -743,18 +743,18 @@ class TestConsolidationEngine:
                     FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="charlie"),
                     FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="sale"),
                 ],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
             # Two single-condition filters that CAN be merged
             ProtonMailFilter(
                 name="Single 1",
                 conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam1")],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
             ProtonMailFilter(
                 name="Single 2",
                 conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam2")],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
         ]
         engine = ConsolidationEngine()
@@ -780,7 +780,7 @@ class TestConsolidationEngine:
 class TestDisabledFilterHandling:
     """Test include_disabled and synced_filter_hashes parameters."""
 
-    def _make_filter(self, name, enabled=True, action_type=ActionType.DELETE):
+    def _make_filter(self, name, enabled=True, action_type=ActionType.TRASH):
         return ProtonMailFilter(
             name=name,
             enabled=enabled,
@@ -988,13 +988,13 @@ class TestDisabledFilterHandling:
             name="Block spam",
             enabled=False,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam@old.com")],
-            actions=[FilterAction(type=ActionType.DELETE)],
+            actions=[FilterAction(type=ActionType.TRASH)],
         )
         edited = ProtonMailFilter(
             name="Block spam",
             enabled=False,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam@new.com")],
-            actions=[FilterAction(type=ActionType.DELETE)],
+            actions=[FilterAction(type=ActionType.TRASH)],
         )
         synced_hashes = {original.content_hash}
 
@@ -1011,7 +1011,7 @@ class TestDisabledFilterHandling:
 class TestStatusBasedSelection:
     """Test four-status filter selection in consolidation engine."""
 
-    def _make_filter(self, name, status=FilterStatus.ENABLED, action_type=ActionType.DELETE):
+    def _make_filter(self, name, status=FilterStatus.ENABLED, action_type=ActionType.TRASH):
         return ProtonMailFilter(
             name=name,
             status=status,

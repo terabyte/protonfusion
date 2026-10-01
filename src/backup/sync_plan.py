@@ -70,9 +70,10 @@ def manifest_describes(manifest: Optional[dict], sieve_path: Path) -> bool:
 
     Paths are compared as the same file on disk when both exist (so a
     relative path, a symlink or a different spelling of the same path all
-    match), else by their resolved absolute form. A relative path in the
-    manifest resolves against the current directory, so run from elsewhere
-    it simply does not match, which only costs the manifest's narrowing.
+    match), else by their resolved absolute form. consolidate records an
+    absolute path; a relative one (from a manifest written before it did)
+    resolves against the current directory, so run from elsewhere it
+    simply does not match, which only costs the manifest's narrowing.
     """
     manifest_script = (manifest or {}).get("sieve_file")
     if not manifest_script:

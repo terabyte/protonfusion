@@ -96,7 +96,7 @@ def sample_condition_recipient():
 def sample_action_delete():
     """Sample delete action."""
     return FilterAction(
-        type=ActionType.DELETE,
+        type=ActionType.TRASH,
         parameters={}
     )
 
@@ -194,7 +194,7 @@ def sample_consolidated_filter():
             ConditionGroup(conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam3@test.com")]),
         ],
         actions=[
-            FilterAction(type=ActionType.DELETE, parameters={}),
+            FilterAction(type=ActionType.TRASH, parameters={}),
         ],
         source_filters=["Spam Filter 1", "Spam Filter 2", "Spam Filter 3"],
         filter_count=3

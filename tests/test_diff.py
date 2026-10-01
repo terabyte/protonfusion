@@ -83,13 +83,13 @@ class TestDiffEngine:
             name="Test",
             enabled=True,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test")],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
         new = ProtonMailFilter(
             name="Test",
             enabled=False,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test")],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         diff = engine.compare_filter_lists([old], [new])
@@ -106,12 +106,12 @@ class TestDiffEngine:
         old = ProtonMailFilter(
             name="Test",
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="old")],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
         new = ProtonMailFilter(
             name="Test",
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="new")],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         diff = engine.compare_filter_lists([old], [new])
@@ -170,13 +170,13 @@ class TestDiffEngine:
             name="Test",
             enabled=True,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="old")],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
         new = ProtonMailFilter(
             name="Test",
             enabled=False,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="new")],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         diff = engine.compare_filter_lists([old], [new])
@@ -311,14 +311,14 @@ class TestDiffEngine:
             enabled=True,
             priority=1,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test")],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
         f2 = ProtonMailFilter(
             name="Test",
             enabled=True,
             priority=1,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test")],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         assert engine._filters_equal(f1, f2)

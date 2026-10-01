@@ -11,7 +11,7 @@ import pytest
 from src.scraper import selectors
 from src.scraper.browser import (
     ProtonMailBrowser, SessionAccountMismatchError, SessionExpiredError, SieveReadError,
-    name_from_edit_label, same_account,
+    name_from_edit_label, row_filter_name, same_account,
 )
 
 
@@ -481,6 +481,22 @@ class TestOpenSieveFilterByName:
     ])
     def test_name_from_edit_label(self, aria, name):
         assert name_from_edit_label(aria) == name
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", ['Say "hi" twice', '"Quoted"', "Plain"])
+    async def test_scraper_reads_names_like_row_filter_name(self, name):
+        """The scraper records a quoted name exactly, as sync and restore will look for it."""
+        from src.scraper.protonmail_scraper import ProtonMailScraper
+
+        class NoModalPage:
+            async def query_selector(self, selector):
+                return None
+
+        edit = FakeElement(aria=f'Edit filter "{name}"')
+        row = FakeElement(children={selectors.FILTER_EDIT_BUTTON: edit})
+        scraper = ProtonMailScraper(headless=True)
+        data = await scraper._scrape_single_filter(row, 0, page=NoModalPage())
+        assert data["name"] == name == await row_filter_name(row)
 
     @pytest.mark.asyncio
     async def test_substring_name_listed_first_is_not_opened(self):

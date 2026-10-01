@@ -74,7 +74,7 @@ class TestFilterAction:
 
     def test_action_default_parameters(self):
         """Test that parameters defaults to empty dict."""
-        action = FilterAction(type=ActionType.DELETE)
+        action = FilterAction(type=ActionType.TRASH)
         assert action.parameters == {}
 
     def test_action_serialization(self):
@@ -124,7 +124,7 @@ class TestProtonMailFilter:
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam")
             ],
             actions=[
-                FilterAction(type=ActionType.DELETE)
+                FilterAction(type=ActionType.TRASH)
             ]
         )
         assert f.name == "Complex Filter"
@@ -213,7 +213,7 @@ class TestConsolidatedFilter:
                 ]),
             ],
             actions=[
-                FilterAction(type=ActionType.DELETE)
+                FilterAction(type=ActionType.TRASH)
             ],
             source_filters=["Filter 1", "Filter 2", "Filter 3"],
             filter_count=3
@@ -461,13 +461,13 @@ class TestFilterStatus:
             name="Test",
             status=FilterStatus.ENABLED,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="x")],
-            actions=[FilterAction(type=ActionType.DELETE)],
+            actions=[FilterAction(type=ActionType.TRASH)],
         )
         f_archived = ProtonMailFilter(
             name="Test",
             status=FilterStatus.ARCHIVED,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="x")],
-            actions=[FilterAction(type=ActionType.DELETE)],
+            actions=[FilterAction(type=ActionType.TRASH)],
         )
         assert f_enabled.content_hash == f_archived.content_hash
 
@@ -515,7 +515,7 @@ class TestArchiveEntry:
             name="Test",
             status=FilterStatus.ARCHIVED,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="x")],
-            actions=[FilterAction(type=ActionType.DELETE)],
+            actions=[FilterAction(type=ActionType.TRASH)],
         )
         entry = ArchiveEntry(filter=f, archived_at="2025-01-01T00:00:00Z", source_snapshot="snap1")
         data = entry.model_dump()

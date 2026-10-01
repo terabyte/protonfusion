@@ -238,7 +238,7 @@ def test_dropped_listing_escapes_rich_markup(cli_snapshots_dir, fake_sync):
     spam = ProtonMailFilter(
         name="tagged",
         conditions=[FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="[SPAM]")],
-        actions=[FilterAction(type=ActionType.DELETE)],
+        actions=[FilterAction(type=ActionType.TRASH)],
     )
     fake_sync.live_script = _section_for([spam, _filter("a@x.com")])
     BackupManager(cli_snapshots_dir).create_backup([_filter("a@x.com")], sieve_script=fake_sync.live_script)
@@ -344,7 +344,7 @@ def test_consolidate_refuses_filter_containing_section_marker(cli_snapshots_dir,
         name="Sneaky",
         conditions=[FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS,
                                     value=f"x\n{SECTION_END}\ny")],
-        actions=[FilterAction(type=ActionType.DELETE)],
+        actions=[FilterAction(type=ActionType.TRASH)],
     )
     BackupManager(cli_snapshots_dir).create_backup([sneaky])
     result = runner.invoke(app, ["consolidate"])
@@ -639,12 +639,95 @@ class TestSyncRefusesUnparsableMergedScript:
         assert fake_sync.calls == []
 
 
+class TestSyncUnchangedScript:
+    """When the live script already is the merged one, sync does not upload.
+
+    Proton keeps Save disabled for an unchanged script, so an upload would
+    be reported as failed. Sync still disables the replaced filters and
+    makes sure ProtonFusion's own filter is on.
+    """
+
+    @pytest.fixture
+    def account(self, cli_snapshots_dir, fake_sync):
+        f = _filter("a@x.com")
+        manager = BackupManager(cli_snapshots_dir)
+        manager.create_backup([f])
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        generated = (manager.snapshot_dir_for("latest") / "consolidated.sieve").read_text()
+        # Trailing whitespace only: still "the same script".
+        fake_sync.live_script = SieveGenerator.merge_with_existing(generated, "") + "  \n\n"
+        return f
+
+    @staticmethod
+    def _pf_row(enabled: bool) -> ProtonMailFilter:
+        return ProtonMailFilter(
+            name=SIEVE_FILTER_NAME, enabled=enabled, priority=1, is_sieve=True,
+            raw=ScrapeEvidence(sieve_text="keep;"),
+        )
+
+    def test_no_upload_and_filters_still_disabled(self, account, fake_sync):
+        FakeScraper.filters = [account, self._pf_row(enabled=True)]
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 0, result.output
+        assert fake_sync.calls == [("disable", account.name)]
+        assert "nothing to upload" in result.output
+        assert "Sieve uploaded: No (already up to date)" in result.output
+
+    def test_switched_off_script_filter_is_switched_on(self, account, fake_sync):
+        FakeScraper.filters = [account, self._pf_row(enabled=False)]
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 0, result.output
+        assert fake_sync.calls == [("disable", account.name), ("enable", SIEVE_FILTER_NAME)]
+
+    def test_failed_switch_on_reenables_disabled_filters(self, account, fake_sync):
+        FakeScraper.filters = [account, self._pf_row(enabled=False)]
+        fake_sync.toggle_fails = {(SIEVE_FILTER_NAME, True)}
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        assert f"Failed to switch on the '{SIEVE_FILTER_NAME}' filter" in result.output
+        assert fake_sync.calls == [("disable", account.name), ("enable", account.name)]
+
+    def test_script_filter_not_found_refuses(self, account, fake_sync):
+        FakeScraper.filters = [account]
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        assert "Sync refused" in result.output
+        assert fake_sync.calls == []
+
+
+class TestSyncKeepsUserVacationRule:
+    """A live script with a text: literal (vacation rule) merges, validates and uploads."""
+
+    VACATION = (
+        'require ["vacation"];\n'
+        'if header :contains "Subject" "hello" {\n'
+        '  vacation :days 1 text:\nAway until Monday.\n.\n;\n'
+        '}\n'
+    )
+
+    def test_sync_uploads_with_vacation_rule_kept(self, cli_snapshots_dir, fake_sync):
+        f = _filter("a@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([f], sieve_script=self.VACATION)
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        FakeScraper.filters = [f]
+        fake_sync.live_script = self.VACATION
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 0, result.output
+        (uploaded,) = [arg for op, arg in fake_sync.calls if op == "upload"]
+        assert "Away until Monday." in uploaded
+        assert '"vacation"' in uploaded
+
+
 @pytest.mark.parametrize("script,ok", [
     ('require ["fileinto"];\nif header :is "From" "a" { fileinto "X"; }', True),
     ('require "fileinto";\nrequire ["imap4flags"];\nkeep;', True),
     ('keep;\nrequire ["fileinto"];', False),
     ('if header :is "From" "a" { fileinto "X";', False),
     ('', True),
+    # A user vacation rule: multi-line text: literals are valid Sieve.
+    ('require ["vacation"];\nvacation :days 1 text:\nAway until Monday.\n.\n;\n', True),
+    # fileinto used without being required
+    ('if header :is "From" "a" { fileinto "X"; }', False),
 ])
 def test_merged_script_problem(script, ok):
     from src.main import _merged_script_problem
@@ -909,6 +992,7 @@ class TestSyncDisablesOnlyReplacedFilters:
     def test_relative_manifest_path_from_other_directory(
         self, cli_snapshots_dir, fake_sync, tmp_path, monkeypatch,
     ):
+        """consolidate stores the resolved path, so a relative --output still matches from elsewhere."""
         a, b = _filter("a@x.com"), _filter("b@x.com")
         BackupManager(cli_snapshots_dir).create_backup([a, b])
         work = tmp_path / "work"
@@ -920,7 +1004,9 @@ class TestSyncDisablesOnlyReplacedFilters:
         elsewhere.mkdir()
         monkeypatch.chdir(elsewhere)
         result = runner.invoke(app, ["sync", "--sieve", str(work / "out.sieve")])
-        self._assert_b_kept(fake_sync, result, a, b)
+        assert result.exit_code == 0, result.output
+        assert "No consolidate manifest describes this script" not in result.output
+        assert self._toggled(fake_sync, "disable") == [a.name]
 
     def test_relative_manifest_path_same_directory_uses_manifest(
         self, cli_snapshots_dir, fake_sync, tmp_path, monkeypatch,

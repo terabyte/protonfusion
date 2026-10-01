@@ -35,8 +35,9 @@ from src.utils.private_files import write_private_file
 from src.parser.filter_parser import parse_scraped_filters
 from src.consolidator.consolidation_engine import ConsolidationEngine
 from src.generator.sieve_generator import SieveGenerator, SieveGenerationError, SECTION_BEGIN
-from src.generator.sieve_rules import SieveParseError, compare_sections, extract_section, script_facts
-from src.generator.sieve_rules import _Parser as _SieveParser, _tokenize as _sieve_tokenize
+from src.generator.sieve_rules import (
+    SieveParseError, compare_sections, current_forms, extract_section, script_facts, validate_script,
+)
 from src.consolidator.carry_forward import facts_to_filters, filter_facts, is_carried, label_targets
 
 SIEVE_FILTER_NAME = "ProtonFusion Consolidated"
@@ -687,7 +688,10 @@ def consolidate(
             suppressed = set()
             for f in intentionally_removed:
                 suppressed |= filter_facts(f)
-            to_carry = [fact for fact in comparison.dropped if fact not in suppressed]
+            # A live rule written by an older version (discard for Trash, a
+            # begins-with without its wildcard) matches the removed filter
+            # only in its current form.
+            to_carry = [fact for fact in comparison.dropped if not current_forms(fact) & suppressed]
 
             # The backup and archive say which fileinto targets are labels
             known_labels = label_targets(list(bkup.filters) + [e.filter for e in archive_entries])
@@ -786,8 +790,10 @@ def consolidate(
             "[yellow]'sync' will refuse this script unless given --allow-incomplete. "
             "Run 'backup' again, then 'consolidate', to fix it."
         )
+    # Absolute, so sync matches the manifest to this script from any
+    # working directory (a relative --output would only match from here).
     manager.write_manifest(
-        snapshot_dir, processed_filters, str(out_path),
+        snapshot_dir, processed_filters, str(out_path.resolve()),
         without_evidence=[f.name for f in without_evidence],
         incomplete_excluded=report.incomplete_excluded,
         incomplete_included=report.incomplete_included,
@@ -1165,33 +1171,37 @@ def _uploaded_facts(merged_script: str) -> set:
 
 
 def _merged_script_problem(script: str) -> Optional[str]:
-    """Why the merged script is not valid Sieve, or None if it parses.
+    """Why the merged script is not valid Sieve, or None if it is.
 
-    Stand-in for the generator's script validator (validate_script), which
-    is landing separately; once it exists this body should call it. Until
-    then: the whole script must tokenize and parse with the sieve_rules
-    parser, and every `require` must come before any other command
-    (RFC 5228 section 3.2), which is what a merge mishandling an unusual
-    `require` breaks. Constructs that parser does not support, such as
-    multi-line `text:` literals, are reported as problems too, so a script
-    is never uploaded unchecked.
+    sieve_rules.validate_script is the check: the script must parse
+    (including multi-line text: literals), every require must come before
+    any other command (RFC 5228 section 3.2), and the extensions
+    ProtonFusion's own commands need must be required.
     """
     try:
-        commands = _SieveParser(_sieve_tokenize(script)).parse_commands()
+        validate_script(script)
     except SieveParseError as e:
         return str(e)
-    seen_other_command = False
-    for command in commands:
-        if command.name != "require":
-            seen_other_command = True
-        elif seen_other_command:
-            return "a 'require' comes after other commands (RFC 5228 section 3.2)"
     return None
 
 
-def _report_merged_script_problem(script: str) -> bool:
-    """Print why the merged script cannot be uploaded; True if it can."""
-    problem = _merged_script_problem(script)
+def _merge_for_upload(new_script: str, existing_script: str) -> tuple[Optional[str], Optional[str]]:
+    """Merge the new script into the existing one: (merged, None), or (None, why not).
+
+    merge_with_existing raises SieveParseError when either script does not
+    parse (usually the user's rules outside the ProtonFusion section), and
+    a merge that succeeds is still validated, so every caller gets one
+    answer to "can this be uploaded?" and refuses the same way.
+    """
+    try:
+        merged = SieveGenerator.merge_with_existing(new_script, existing_script)
+    except SieveParseError as e:
+        return None, f"{e} (in the existing script or the new one, so they could not be merged)"
+    return merged, _merged_script_problem(merged)
+
+
+def _report_merged_script_problem(problem: Optional[str]) -> bool:
+    """Print why the merged script cannot be uploaded; True if there is no problem."""
     if problem is None:
         return True
     console.print(Panel(
@@ -1268,7 +1278,9 @@ def sync(
     filter 'consolidate' put into it) are disabled. Sieve filters, filters
     created or changed after the backup, and filters that cannot be read in
     full stay enabled. If the upload fails, every filter this run disabled
-    is enabled again.
+    is enabled again. When the live script already matches (ignoring
+    trailing whitespace) nothing is uploaded; the filters are still
+    disabled and ProtonFusion's Sieve filter is switched on if it is off.
 
     Refuses (exit 1, nothing changed) if the new ProtonFusion section would drop
     any rule present in the live section, unless --allow-rule-removal is given.
@@ -1280,7 +1292,7 @@ def sync(
     1.3, which may hold misread operators), unless --allow-old-snapshot is given.
     """
     from src.scraper.protonmail_scraper import ProtonMailScraper
-    from src.scraper.protonmail_sync import ProtonMailSync
+    from src.scraper.protonmail_sync import ProtonMailSync, normalize_script
 
     _workers = max(1, min(workers, 10))
     manager = BackupManager()
@@ -1335,9 +1347,11 @@ def sync(
         console.print(Panel("[bold yellow]DRY RUN - No changes will be made"))
         console.print(f"\nWould upload Sieve script ({len(sieve_script)} chars)")
         _print_carried_source(from_manifest, backup_id)
-        backed_up_merge = SieveGenerator.merge_with_existing(sieve_script, bkup.sieve_script or "")
+        backed_up_merge, merge_problem = _merge_for_upload(sieve_script, bkup.sieve_script or "")
         _print_disable_plan(
-            plan_disable(bkup.filters, carried, reference, SIEVE_FILTER_NAME, _uploaded_facts(backed_up_merge)),
+            plan_disable(
+                bkup.filters, carried, reference, SIEVE_FILTER_NAME, _uploaded_facts(backed_up_merge or ""),
+            ),
             backup_id, preview=True,
         )
         console.print(
@@ -1355,8 +1369,8 @@ def sync(
         )
 
         # Show merge preview if backup has an existing sieve script
-        if bkup.sieve_script:
-            merged = SieveGenerator.merge_with_existing(sieve_script, bkup.sieve_script)
+        if bkup.sieve_script and backed_up_merge is not None:
+            merged = backed_up_merge
             console.print(f"\n[cyan]Existing Sieve script in backup: {len(bkup.sieve_script)} chars")
             if SECTION_BEGIN not in bkup.sieve_script:
                 console.print("[yellow]User rules detected — will be preserved outside ProtonFusion section")
@@ -1365,7 +1379,7 @@ def sync(
             else:
                 preview = "\n".join(merged.split("\n")[:40])
                 console.print(Panel(preview + "\n...", title="Merged Script Preview (first 40 lines)", border_style="cyan"))
-        if not _report_merged_script_problem(backed_up_merge):
+        if not _report_merged_script_problem(merge_problem):
             safe = False
         if not safe:
             console.print("[bold red]A real sync would REFUSE and change nothing.")
@@ -1400,9 +1414,13 @@ def sync(
                 existing_script, sieve_script, allow_rule_removal,
                 backup_script=bkup.sieve_script,
             )
-            merged_script = SieveGenerator.merge_with_existing(sieve_script, existing_script)
-            if safe and not _report_merged_script_problem(merged_script):
+            merged_script, merge_problem = _merge_for_upload(sieve_script, existing_script)
+            if not _report_merged_script_problem(merge_problem):
                 safe = False
+            if merged_script is None:
+                # Nothing to diff against: the scripts could not be merged.
+                console.print("[bold red]A real sync would REFUSE and change nothing.")
+                return False
             if not safe:
                 console.print("[bold red]A real sync would REFUSE and change nothing.")
             else:
@@ -1414,7 +1432,7 @@ def sync(
                     backup_id, preview=True,
                 )
 
-            if existing_script == merged_script:
+            if normalize_script(existing_script) == normalize_script(merged_script):
                 console.print(Panel("[bold green]No changes: the live script already matches."))
                 return safe
 
@@ -1468,12 +1486,31 @@ def sync(
             console.print("[bold red]Sync refused. No filters were disabled and nothing was uploaded.")
             return False
 
-        merged_script = SieveGenerator.merge_with_existing(sieve_script, existing_script)
-        if not _report_merged_script_problem(merged_script):
+        merged_script, merge_problem = _merge_for_upload(sieve_script, existing_script)
+        if not _report_merged_script_problem(merge_problem):
             console.print("[bold red]Sync refused. No filters were disabled and nothing was uploaded.")
             return False
         if existing_script and SECTION_BEGIN not in existing_script:
             console.print("[yellow]User rules detected; preserving them outside ProtonFusion section")
+
+        # Nothing to upload when the live script already is the merged one:
+        # Proton keeps Save disabled for an unchanged script, so upload_sieve
+        # would report a failure. The script's filter must still be on before
+        # the UI filters go off, so it is located now (refusing if it cannot
+        # be) and switched on in place of the upload if needed.
+        unchanged = bool(existing_script) and normalize_script(merged_script) == normalize_script(existing_script)
+        live_pf = None
+        if unchanged:
+            pf_rows = [f for f in live_filters if f.is_sieve and f.name == SIEVE_FILTER_NAME]
+            if len(pf_rows) != 1:
+                console.print(
+                    f"[bold red]The live script already matches, but {len(pf_rows)} Sieve filters named "
+                    f"'{SIEVE_FILTER_NAME}' were read, so there is no telling whether the one holding it "
+                    "is switched on.[/]\n"
+                    "[bold red]Sync refused. No filters were disabled and nothing was uploaded."
+                )
+                return False
+            live_pf = pf_rows[0]
 
         _print_carried_source(from_manifest, backup_id)
         plan = plan_disable(live_filters, carried, reference, SIEVE_FILTER_NAME, _uploaded_facts(merged_script))
@@ -1525,17 +1562,27 @@ def sync(
                 for f in not_disabled:
                     console.print(f"  [yellow]- {escape(f.name)}")
 
-            console.print("[bold green]Uploading merged Sieve script...")
             upload_error = None
             try:
-                success = await sync_client.upload_sieve(merged_script, filter_name=SIEVE_FILTER_NAME)
+                if unchanged:
+                    console.print("[green]The live Sieve script already matches the merged one; nothing to upload.")
+                    # Same end state an upload guarantees: the script's filter is on.
+                    success = live_pf.enabled or await sync_client.set_row_enabled(
+                        live_pf.priority, live_pf.name, True, expected_names=expected_names,
+                    )
+                else:
+                    console.print("[bold green]Uploading merged Sieve script...")
+                    success = await sync_client.upload_sieve(merged_script, filter_name=SIEVE_FILTER_NAME)
             except Exception as e:
                 success = False
                 upload_error = e
 
             if not success:
                 reason = f" ({escape(loggable_text(str(upload_error)))})" if upload_error else ""
-                console.print(f"[bold red]Failed to upload Sieve script{reason}.")
+                if unchanged:
+                    console.print(f"[bold red]Failed to switch on the '{SIEVE_FILTER_NAME}' filter{reason}.")
+                else:
+                    console.print(f"[bold red]Failed to upload Sieve script{reason}.")
                 if sync_client.upload_hit_filter_limit:
                     console.print(
                         "[yellow]The 'Add sieve filter' button was missing, which is how ProtonMail "
@@ -1546,13 +1593,14 @@ def sync(
                 await _reenable_after_failed_upload(sync_client, disabled, backup_id, expected_names)
                 return False
 
-            console.print("[green]Sieve script uploaded successfully!")
+            if not unchanged:
+                console.print("[green]Sieve script uploaded successfully!")
             if manager.promote_manifest(snapshot_dir):
                 console.print("[cyan]Sync manifest updated")
 
             console.print(Panel(
                 f"[bold green]Sync complete![/]\n\n"
-                f"Sieve uploaded: Yes\n"
+                f"Sieve uploaded: {'No (already up to date)' if unchanged else 'Yes'}\n"
                 f"Filters disabled: {len(disabled)}\n"
                 f"Filters left enabled: {len(plan.left_enabled) + len(not_disabled)}\n\n"
                 + _rollback_help(backup_id, snapshot_dir),
@@ -1677,7 +1725,7 @@ def restore(
     script while the account does, unless --allow-empty-script.
     """
     from src.scraper.protonmail_scraper import ProtonMailScraper
-    from src.scraper.protonmail_sync import ProtonMailSync
+    from src.scraper.protonmail_sync import ProtonMailSync, normalize_script
     from src.backup.restore_engine import RestoreEngine
 
     creds = _get_credentials(credentials_file, False)
@@ -1708,8 +1756,10 @@ def restore(
 
         # What to do with the script: nothing, upload the backed-up one, or
         # (backup had none) disable ProtonFusion's filter.
+        # Trailing whitespace is ignored: Proton keeps Save disabled for a
+        # script that has not changed, so uploading it would fail.
         script_action = "none"
-        if target_script and target_script != live_script:
+        if target_script and normalize_script(target_script) != normalize_script(live_script):
             script_action = "upload"
         elif not target_script and live_script:
             console.print(

@@ -424,7 +424,7 @@ class TestArchiveIO:
             name=name,
             status=status,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value=f"{name}@test.com")],
-            actions=[FilterAction(type=ActionType.DELETE)],
+            actions=[FilterAction(type=ActionType.TRASH)],
         )
         return ArchiveEntry(filter=f, archived_at="2025-01-01T00:00:00Z", source_snapshot="snap1")
 
@@ -623,7 +623,7 @@ class TestUnknownValuesOnLoad:
             name=name,
             raw=ScrapeEvidence(conditions_text="c", actions_text="a"),
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="promo@x")],
-            actions=[FilterAction(type=ActionType.DELETE)],
+            actions=[FilterAction(type=ActionType.TRASH)],
         )
 
     def _edit_json(self, path, edit):

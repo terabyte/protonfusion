@@ -80,12 +80,12 @@ class TestRestoreEngine:
         By name, the first "News" row would have taken both toggles."""
         backed_up = [
             _filter("News", "keep@x", enabled=True, priority=0),
-            _filter("News", "drop@x", enabled=False, priority=1, action=ActionType.DELETE),
+            _filter("News", "drop@x", enabled=False, priority=1, action=ActionType.TRASH),
         ]
         # Since the backup, a sync disabled the first and someone enabled the second
         current = [
             _filter("News", "keep@x", enabled=False, priority=0),
-            _filter("News", "drop@x", enabled=True, priority=1, action=ActionType.DELETE),
+            _filter("News", "drop@x", enabled=True, priority=1, action=ActionType.TRASH),
         ]
         report, sync = _restore(backed_up, current)
         assert sorted(sync.calls) == [(0, "News", True), (1, "News", False)]
@@ -256,6 +256,14 @@ class TestRestoreCommand:
             ("disable", "Spare"),
         ]
         assert "Restore complete." in result.output
+
+    def test_unchanged_script_is_not_uploaded(self, after_sync):
+        """Proton keeps Save disabled for an unchanged script; trailing whitespace is no change."""
+        FakeBrowser.live_script = OLD_SCRIPT + "  \n\n"
+        result = runner.invoke(app, ["restore", "--backup", "latest"], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert FakeBrowser.calls == [("enable", "Old"), ("disable", "Spare")]
+        assert "Sieve script: already as in the backup" in result.output
 
     def test_safety_backup_taken_and_named(self, after_sync):
         latest_before = (after_sync / "latest").resolve()

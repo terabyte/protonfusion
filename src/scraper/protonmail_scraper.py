@@ -13,7 +13,7 @@ from src.models.filter_models import (
 )
 from src.scraper import selectors
 from src.scraper.browser import (
-    ProtonMailBrowser, MODAL_TRANSITION_MS, DROPDOWN_MS, FILTERS_PAGE_LOAD_MS,
+    ProtonMailBrowser, MODAL_TRANSITION_MS, DROPDOWN_MS, FILTERS_PAGE_LOAD_MS, row_filter_name,
 )
 from src.utils.config import FILTERS_PATH, PAGE_LOAD_TIMEOUT_MS
 
@@ -317,19 +317,9 @@ class ProtonMailScraper(ProtonMailBrowser):
         if page is None:
             page = self.page
 
-        # Get filter name from Edit button's aria-label
-        name = ""
-        edit_btn = await item.query_selector(selectors.FILTER_EDIT_BUTTON)
-        if edit_btn:
-            aria = await edit_btn.get_attribute("aria-label")
-            if aria and '"' in aria:
-                name = aria.split('"')[1]
-        if not name:
-            tds = await item.query_selector_all("td")
-            if len(tds) >= 2:
-                name = (await tds[1].inner_text()).strip()
-            elif tds:
-                name = (await tds[0].inner_text()).strip()
+        # The same reading sync and restore use to find a row by name, so a
+        # name with quotes in it is recorded exactly as they will look for it.
+        name = await row_filter_name(item)
         if not name:
             name_el = await item.query_selector(selectors.FILTER_NAME_FALLBACK)
             name = await name_el.inner_text() if name_el else f"Filter {idx}"
