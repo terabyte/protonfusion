@@ -1110,3 +1110,57 @@ class TestAttachmentCondition:
     def test_operator_type_mismatch_refused(self, ctype, operator):
         with pytest.raises(SieveGenerationError, match="does not apply"):
             SieveGenerator().generate([self._attachment_rule(operator, ctype)])
+
+
+class TestRequireForms:
+    """require "x"; and require lists over several lines (panel cases)."""
+
+    SINGLE = 'require "fileinto";\nif address :is "From" "a" { fileinto "x"; }\n'
+    MULTILINE = (
+        'require [\n'
+        '    "fileinto",  # folders\n'
+        '    "imap4flags"\n'
+        '];\n'
+        'if address :is "From" "a" { fileinto "x"; addflag "\\\\Seen"; }\n'
+    )
+
+    def test_single_string_form_parsed(self):
+        assert SieveGenerator.parse_require_extensions(self.SINGLE) == {"fileinto"}
+
+    def test_multiline_list_parsed(self):
+        assert SieveGenerator.parse_require_extensions(self.MULTILINE) == {"fileinto", "imap4flags"}
+
+    def test_mixed_forms_parsed(self):
+        script = 'require "fileinto";\nrequire ["imap4flags", "vacation"];\n'
+        assert SieveGenerator.parse_require_extensions(script) == {"fileinto", "imap4flags", "vacation"}
+
+    @pytest.mark.parametrize("script", [SINGLE, MULTILINE])
+    def test_strip_leaves_no_fragment(self, script):
+        stripped = SieveGenerator.strip_require_lines(script)
+        assert "require" not in stripped
+        assert '"imap4flags"' not in stripped and "];" not in stripped
+        assert stripped.startswith("if address")
+
+    def test_strip_keeps_command_sharing_the_line(self):
+        stripped = SieveGenerator.strip_require_lines('require "fileinto"; if true { fileinto "x"; }\n')
+        assert stripped.strip() == 'if true { fileinto "x"; }'
+
+    def test_require_word_in_string_or_comment_untouched(self):
+        script = '# require "x";\nif header :contains "Subject" "require [\\"a\\"];" { keep; }\n'
+        assert SieveGenerator.strip_require_lines(script) == script
+        assert SieveGenerator.parse_require_extensions(script) == set()
+
+    @pytest.mark.parametrize("existing", [SINGLE, MULTILINE])
+    def test_merged_script_is_valid(self, existing):
+        from src.generator.sieve_rules import validate_script
+        generated = SieveGenerator().generate([ConsolidatedFilter(
+            name="r", condition_groups=_ANY_SENDER, actions=[FilterAction(type=ActionType.MARK_READ)])])
+        merged = SieveGenerator.merge_with_existing(generated, existing)
+        validate_script(merged)
+        assert merged.count("require") == 1
+        assert merged.startswith('require ["fileinto", "imap4flags"];')
+
+    def test_merge_of_unparsable_existing_script_raises(self):
+        from src.generator.sieve_rules import SieveParseError
+        with pytest.raises(SieveParseError):
+            SieveGenerator.merge_with_existing("", 'if true { keep;\n')

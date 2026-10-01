@@ -5,6 +5,7 @@ import pytest
 from src.generator.sieve_generator import SieveGenerator, SECTION_BEGIN, SECTION_END
 from src.generator.sieve_rules import (
     SieveParseError, compare_sections, extract_section, parse_rules, script_facts,
+    validate_script,
 )
 from src.models.filter_models import (
     ConsolidatedFilter, ConditionGroup, FilterCondition, FilterAction,
@@ -366,3 +367,38 @@ class TestArchiveCase:
 
     def test_other_folder_case_still_matters(self):
         assert script_facts('if true { fileinto "Work"; }') != script_facts('if true { fileinto "work"; }')
+
+
+class TestValidateScript:
+    """validate_script: the check a merged script must pass before upload."""
+
+    @pytest.mark.parametrize("script", [
+        'require ["fileinto"];\nif address :is "From" "a" { fileinto "x"; }\n',
+        'require "fileinto";\nrequire "imap4flags";\nif true { fileinto "x"; addflag "\\\\Seen"; }\n',
+        '# comment only\n',
+        '',
+        'if true { keep; } elsif false { stop; } else { keep; }',
+        'require ["vacation"];\nvacation :days 1 text:\nI am away.\n..dot-stuffed\n.\n;\n',
+    ])
+    def test_valid(self, script):
+        validate_script(script)
+
+    @pytest.mark.parametrize("script, needle", [
+        ('if true { keep; }\nrequire "fileinto";\n', "before any other command"),
+        ('if true { require "fileinto"; }', "before any other command"),
+        ('if true { fileinto "x"; }', "without require 'fileinto'"),
+        ('require ["fileinto"];\nif true { addflag "\\\\Seen"; }', "without require 'imap4flags'"),
+        ('else { keep; }', "without a preceding 'if'"),
+        ('require 5;', "string"),
+        ('require ["fileinto"];\n"fileinto"];\nif true { keep; }', "expected 'ident'"),
+        ('if true { keep;', "unterminated"),
+        ('vacation text:\nno end\n', "unterminated"),
+    ])
+    def test_invalid(self, script, needle):
+        with pytest.raises(SieveParseError, match=needle):
+            validate_script(script)
+
+    def test_text_literal_value(self):
+        from src.generator.sieve_rules import _tokenize
+        (tok,) = [t for t in _tokenize('text:\nline one\n..two\n.\n') if t.kind == "string"]
+        assert tok.value == "line one\n.two\n"

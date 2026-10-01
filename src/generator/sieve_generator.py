@@ -1,7 +1,6 @@
 """Generate Sieve scripts from consolidated filters."""
 
 import logging
-import re
 from typing import List, Optional, Set
 
 from src.models.filter_models import (
@@ -336,19 +335,24 @@ class SieveGenerator:
 
     @staticmethod
     def parse_require_extensions(script: str) -> Set[str]:
-        """Extract extension names from require lines in a Sieve script."""
-        extensions = set()
-        for match in re.finditer(r'require\s+\[([^\]]+)\]\s*;', script):
-            for ext in re.findall(r'"([^"]+)"', match.group(1)):
-                extensions.add(ext)
-        return extensions
+        """Extension names from every require in a Sieve script.
+
+        Uses the Sieve tokenizer, so `require "x";` and a require list split
+        over lines are both read. Raises SieveParseError if the script does
+        not parse.
+        """
+        # Imported here: sieve_rules imports this module at load time
+        from src.generator.sieve_rules import require_extensions
+        return require_extensions(script)
 
     @staticmethod
     def strip_require_lines(script: str) -> str:
-        """Remove require statements from a Sieve script."""
-        lines = script.split("\n")
-        filtered = [l for l in lines if not re.match(r'\s*require\s+\[', l)]
-        return "\n".join(filtered)
+        """Remove every require command from a Sieve script, keeping the rest as written.
+
+        Raises SieveParseError if the script does not parse.
+        """
+        from src.generator.sieve_rules import strip_requires
+        return strip_requires(script)
 
     @staticmethod
     def wrap_with_markers(script: str) -> str:
@@ -375,6 +379,10 @@ class SieveGenerator:
 
         Deduplicates require extensions from every part into a single sorted
         require statement at the top.
+
+        Raises SieveParseError if either script does not parse. The result
+        should still be checked with sieve_rules.validate_script before it
+        is uploaded.
         """
         if not existing_script or not existing_script.strip():
             existing_script = ""

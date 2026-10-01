@@ -165,9 +165,11 @@ ProtonFusion wraps its generated rules in section markers:
 This allows ProtonFusion to coexist with hand-written Sieve rules. When you re-run consolidation and sync:
 
 1. Everything between the markers is replaced with the new rules
-2. Everything outside the markers is preserved **in its original position**: rules above the section stay above it, rules below stay below it. Sieve runs top to bottom, so this matters: a hand-written `keep; stop;` exception above the section only works while it stays above the section's `discard` rules.
-3. `require` statements from every part are merged, deduplicated, and emitted as a single line at the top
+2. Everything outside the markers is preserved **in its original position**: rules above the section stay above it, rules below stay below it. Sieve runs top to bottom, so this matters: a hand-written `keep; stop;` exception above the section only works while it stays above the section's rules.
+3. `require` statements from every part are merged, deduplicated, and emitted as a single line at the top. They are found with the Sieve tokenizer, so both forms (`require "fileinto";` and `require ["a", "b"];`) are recognised, on one line or split over several, and a `require` inside a comment or string is left alone. A part that does not parse as Sieve is an error rather than a guess.
 4. If the existing script has no markers at all, it is treated as user content and placed after the new section
+
+The merged script is checked with `validate_script` (in `src/generator/sieve_rules.py`) before upload: it must parse (multi-line `text:` literals included), every `require` must come before any other command (RFC 5228 section 3.2), `elsif`/`else` must follow an `if`, and the extension commands ProtonFusion writes (`fileinto`, `addflag`) must be required.
 
 The markers are found by plain text search, so `consolidate` refuses (naming the filter) if a filter's name, condition value or folder contains either marker line. Line breaks in filter names are flattened to spaces in the generated `#` comments.
 

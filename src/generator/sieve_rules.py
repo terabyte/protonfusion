@@ -78,6 +78,48 @@ class SieveParseError(ValueError):
 class _Token:
     kind: str  # "ident", "tag", "string", "number", or the punctuation char
     value: str
+    # Character offsets of the token in the source, [start, end). Not part
+    # of equality: two tokens with the same kind and value are the same.
+    start: int = field(default=-1, compare=False)
+    end: int = field(default=-1, compare=False)
+
+
+def _read_multiline_text(text: str, i: int) -> Tuple[str, int]:
+    """Read an RFC 5228 section 2.4.2 `text:` literal starting just after "text:".
+
+    Grammar: optional spaces/tabs, then a hash comment or a line break, then
+    lines up to one consisting of a single ".". A line starting with ".." is
+    dot-stuffed (one dot removed). Returns (value, offset after the closing
+    "." line).
+    """
+    n = len(text)
+    while i < n and text[i] in " \t":
+        i += 1
+    if i < n and text[i] == "#":
+        newline = text.find("\n", i)
+        if newline == -1:
+            raise SieveParseError("unterminated text: literal")
+        i = newline + 1
+    elif text.startswith("\r\n", i):
+        i += 2
+    elif i < n and text[i] == "\n":
+        i += 1
+    else:
+        raise SieveParseError("text: must be followed by a line break")
+    lines = []
+    while True:
+        newline = text.find("\n", i)
+        if newline == -1:
+            raise SieveParseError("unterminated text: literal")
+        line = text[i:newline]
+        i = newline + 1
+        if line.endswith("\r"):
+            line = line[:-1]
+        if line == ".":
+            return "".join(lines), i
+        if line.startswith(".."):
+            line = line[1:]
+        lines.append(line + "\n")
 
 
 def _tokenize(text: str) -> List[_Token]:
@@ -98,6 +140,7 @@ def _tokenize(text: str) -> List[_Token]:
                 raise SieveParseError("unterminated /* comment")
             i = close + 2
         elif ch == '"':
+            start = i
             i += 1
             chars = []
             while True:
@@ -114,14 +157,14 @@ def _tokenize(text: str) -> List[_Token]:
                 else:
                     chars.append(c)
                     i += 1
-            tokens.append(_Token("string", "".join(chars)))
+            tokens.append(_Token("string", "".join(chars), start, i))
         elif ch == ":":
             j = i + 1
             while j < n and (text[j].isalnum() or text[j] == "_"):
                 j += 1
             if j == i + 1:
                 raise SieveParseError(f"bare ':' at offset {i}")
-            tokens.append(_Token("tag", text[i:j].lower()))
+            tokens.append(_Token("tag", text[i:j].lower(), i, j))
             i = j
         elif ch.isalpha() or ch == "_":
             j = i
@@ -129,8 +172,11 @@ def _tokenize(text: str) -> List[_Token]:
                 j += 1
             word = text[i:j]
             if word.lower() == "text" and j < n and text[j] == ":":
-                raise SieveParseError("multi-line text: literals are not supported")
-            tokens.append(_Token("ident", word.lower()))
+                value, end = _read_multiline_text(text, j + 1)
+                tokens.append(_Token("string", value, i, end))
+                i = end
+                continue
+            tokens.append(_Token("ident", word.lower(), i, j))
             i = j
         elif ch.isdigit():
             j = i
@@ -138,10 +184,10 @@ def _tokenize(text: str) -> List[_Token]:
                 j += 1
             if j < n and text[j] in "KMGkmg":
                 j += 1
-            tokens.append(_Token("number", text[i:j].upper()))
+            tokens.append(_Token("number", text[i:j].upper(), i, j))
             i = j
         elif ch in "[](){},;":
-            tokens.append(_Token(ch, ch))
+            tokens.append(_Token(ch, ch, i, i + 1))
             i += 1
         else:
             raise SieveParseError(f"unexpected character {ch!r} at offset {i}")
@@ -166,6 +212,10 @@ class _Command:
     args: List[Argument] = field(default_factory=list)
     tests: List[_Test] = field(default_factory=list)
     block: Optional[List["_Command"]] = None
+    # Character offsets of the whole command (through its ";" or "}") in
+    # the source, [start, end).
+    start: int = -1
+    end: int = -1
 
 
 class _Parser:
@@ -244,8 +294,9 @@ class _Parser:
         return test
 
     def _parse_command(self) -> _Command:
-        name = self._expect("ident").value
-        cmd = _Command(name=name, args=self._parse_arguments())
+        name_token = self._expect("ident")
+        name = name_token.value
+        cmd = _Command(name=name, args=self._parse_arguments(), start=name_token.start)
         tok = self._peek()
         if tok is not None and tok.kind == "ident":
             cmd.tests.append(self._parse_test())
@@ -260,12 +311,121 @@ class _Parser:
         if tok.kind == ";":
             if name in ("if", "elsif", "else"):
                 raise SieveParseError(f"{name!r} without a block")
+            cmd.end = tok.end
             return cmd
         if tok.kind == "{":
             cmd.block = self.parse_commands(in_block=True)
-            self._expect("}")
+            cmd.end = self._expect("}").end
             return cmd
         raise SieveParseError(f"expected ';' or '{{' after {name!r}, got {tok.value!r}")
+
+
+# --- require handling and whole-script validation ----------------------------
+
+def _parse_script(text: str) -> List[_Command]:
+    """Tokenize and parse a script's top-level commands; SieveParseError if malformed."""
+    return _Parser(_tokenize(text)).parse_commands()
+
+
+def _require_names(cmd: _Command) -> List[str]:
+    """Extension names of one require command: `require "x";` or `require ["a", "b"];`."""
+    if len(cmd.args) != 1 or cmd.tests or cmd.block is not None:
+        raise SieveParseError("require takes exactly one string or string list")
+    arg = cmd.args[0]
+    if isinstance(arg, tuple):
+        return list(arg)
+    if arg.kind == "string":
+        return [arg.value]
+    raise SieveParseError(f"require takes a string or string list, not {arg.value!r}")
+
+
+def require_extensions(script: str) -> Set[str]:
+    """Extension names from every top-level require command of a script.
+
+    Handles both forms (`require "x";` and `require ["a", "b"];`) on one or
+    many lines, with comments anywhere. Raises SieveParseError if the
+    script does not parse.
+    """
+    names: Set[str] = set()
+    for cmd in _parse_script(script):
+        if cmd.name == "require":
+            names.update(_require_names(cmd))
+    return names
+
+
+def strip_requires(script: str) -> str:
+    """Return the script with every top-level require command removed.
+
+    Everything else (comments, blank lines, layout) is kept as written. A
+    line left holding only whitespace by the removal is dropped along with
+    its line break. Raises SieveParseError if the script does not parse.
+    """
+    spans = [(cmd.start, cmd.end) for cmd in _parse_script(script) if cmd.name == "require"]
+    out = []
+    pos = 0
+    for start, end in spans:
+        line_start = script.rfind("\n", 0, start) + 1
+        line_end = script.find("\n", end)
+        line_end = len(script) if line_end == -1 else line_end
+        alone = not script[line_start:start].strip() and not script[end:line_end].strip()
+        if alone:
+            # Remove the whole line, including its line break
+            start = max(line_start, pos)
+            end = min(line_end + 1, len(script))
+        out.append(script[pos:start])
+        pos = end
+    out.append(script[pos:])
+    return "".join(out)
+
+
+# Commands from extensions ProtonFusion generates, and the extension each
+# needs. A merged script that uses one without requiring it is rejected by
+# the server, so validate_script checks these.
+_COMMAND_EXTENSIONS = {
+    "fileinto": "fileinto",
+    "addflag": "imap4flags",
+    "setflag": "imap4flags",
+    "removeflag": "imap4flags",
+}
+
+
+def _check_commands(commands: List[_Command], required: Set[str], top_level: bool) -> None:
+    """Recursive part of validate_script for one command list."""
+    seen_other = False
+    previous = None
+    for cmd in commands:
+        if cmd.name == "require":
+            if not top_level or seen_other:
+                raise SieveParseError("require must come before any other command")
+        else:
+            seen_other = True
+        if cmd.name in ("elsif", "else") and previous not in ("if", "elsif"):
+            raise SieveParseError(f"{cmd.name!r} without a preceding 'if'")
+        needed = _COMMAND_EXTENSIONS.get(cmd.name)
+        if needed and needed not in required:
+            raise SieveParseError(f"{cmd.name!r} used without require {needed!r}")
+        if cmd.block is not None:
+            _check_commands(cmd.block, required, top_level=False)
+        previous = cmd.name
+
+
+def validate_script(text: str) -> None:
+    """Raise SieveParseError unless `text` is a well-formed Sieve script.
+
+    Meant for a merged script before it is uploaded. Checks that it
+    tokenizes and parses (RFC 5228 grammar, including text: literals), that
+    every require is at the top before any other command (RFC 5228 section
+    3.2) and has a valid argument, that elsif/else follow an if, and that
+    the extension commands ProtonFusion generates (fileinto, addflag ...)
+    are required. It does not check commands or tests ProtonFusion never
+    writes.
+    """
+    commands = _parse_script(text)
+    required: Set[str] = set()
+    for cmd in commands:
+        if cmd.name == "require":
+            required.update(_require_names(cmd))
+    _check_commands(commands, required, top_level=True)
 
 
 # --- Canonical text (for display and for opaque facts) -----------------------
