@@ -288,7 +288,7 @@ class TestBackupManager:
             data = json.load(f)
 
         assert "version" in data
-        assert data["version"] == "1.1"
+        assert data["version"] == "1.2"
 
     def test_backup_contains_timestamp(self, temp_snapshots_dir, sample_filters_list):
         """Test that saved backup contains timestamp."""
@@ -541,14 +541,14 @@ class TestArchiveIO:
 
 
 class TestBackupFormatVersions:
-    """Backup format 1.1 adds scrape evidence; 1.0 backups must still verify."""
+    """Formats 1.1 and 1.2 add filter fields; older backups must still verify."""
 
-    def _write_v10_backup(self, snapshots_dir, filters):
-        """Write a backup.json exactly as format 1.0 did (no evidence fields)."""
-        dumps = [f.model_dump(exclude={"raw", "scrape_issues"}) for f in filters]
+    def _write_old_backup(self, snapshots_dir, filters, version, exclude):
+        """Write a backup.json as an older format did, without the `exclude` fields."""
+        dumps = [f.model_dump(exclude=exclude) for f in filters]
         checksum_json = json.dumps({"filters": dumps, "sieve_script": ""}, sort_keys=True, default=str)
         data = {
-            "version": "1.0",
+            "version": version,
             "timestamp": "2026-01-01T00:00:00",
             "metadata": {"filter_count": len(filters)},
             "filters": dumps,
@@ -559,6 +559,18 @@ class TestBackupFormatVersions:
         snap.mkdir()
         (snap / "backup.json").write_text(json.dumps(data))
         (snapshots_dir / "latest").symlink_to(snap.name)
+
+    def _write_v10_backup(self, snapshots_dir, filters):
+        """Write a backup.json exactly as format 1.0 did (no evidence fields)."""
+        self._write_old_backup(snapshots_dir, filters, "1.0", {"raw", "scrape_issues", "is_sieve"})
+
+    def test_v11_backup_without_sieve_flag_verifies(self, temp_snapshots_dir):
+        sieve = ProtonMailFilter(name="S", raw=ScrapeEvidence(sieve_text="keep;"))
+        self._write_old_backup(temp_snapshots_dir, [sieve], "1.1", {"is_sieve"})
+        manager = BackupManager(temp_snapshots_dir)
+        backup = manager.load_backup("latest")
+        assert backup.filters[0].is_sieve is True
+        assert manager.verify_backup(backup) is True
 
     def test_v10_backup_loads_and_verifies(self, temp_snapshots_dir, sample_filters_list):
         self._write_v10_backup(temp_snapshots_dir, sample_filters_list)
@@ -577,7 +589,7 @@ class TestBackupFormatVersions:
         )
         manager.create_backup([f])
         data = json.loads((manager.snapshot_dir_for("latest") / "backup.json").read_text())
-        assert data["version"] == "1.1"
+        assert data["version"] == "1.2"
         assert data["filters"][0]["raw"]["actions_text"] == "Label as\nWork"
         assert data["filters"][0]["scrape_issues"] == ["label row unreadable"]
 

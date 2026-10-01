@@ -7,13 +7,13 @@ from typer.testing import CliRunner
 
 from src.main import app
 from src.backup.backup_manager import BackupManager
-from src.consolidator.carry_forward import CARRIED_PREFIX, facts_to_filters
+from src.consolidator.carry_forward import CARRIED_PREFIX, facts_to_filters, label_targets
 from src.consolidator.consolidation_engine import ConsolidationEngine
 from src.generator.sieve_generator import SieveGenerator
 from src.generator.sieve_rules import compare_sections, script_facts
 from src.models.filter_models import (
     ProtonMailFilter, FilterCondition, FilterAction, FilterStatus,
-    ConditionType, Operator, ActionType, LogicType,
+    ConditionType, Operator, ActionType, LogicType, ScrapeEvidence,
 )
 from tests.test_sync_safety import (  # noqa: F401  (fixtures)
     _filter, _section_for, _wide_console, cli_snapshots_dir, fake_sync, shrunk_account,
@@ -81,6 +81,30 @@ class TestFactsToFilters:
         assert len(filters) == 1
         assert filters[0].conditions[0].value.count("|") == 49
 
+    def test_fileinto_is_move_to_without_label_info(self):
+        """The Sieve cannot tell a label from a folder, so the default is MOVE_TO."""
+        (f,), _ = facts_to_filters(_generated_facts([_filter("a", folder="Work")]))
+        assert [a.type for a in f.actions] == [ActionType.MOVE_TO]
+
+    def test_known_label_stays_label(self):
+        labelled = ProtonMailFilter(
+            name="L",
+            conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="a")],
+            actions=[FilterAction(type=ActionType.LABEL, parameters={"label": "Receipts"})],
+        )
+        facts = _generated_facts([labelled])
+        (f,), unconvertible = facts_to_filters(facts, label_names=label_targets([labelled]))
+        assert unconvertible == []
+        assert f.actions == [FilterAction(type=ActionType.LABEL, parameters={"label": "Receipts"})]
+        assert _generated_facts([f]) == facts
+
+    def test_name_used_as_label_and_folder_falls_back_to_move_to(self):
+        both = [
+            ProtonMailFilter(name="L", actions=[FilterAction(type=ActionType.LABEL, parameters={"label": "Work"})]),
+            ProtonMailFilter(name="M", actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "Work"})]),
+        ]
+        assert label_targets(both) == set()
+
     def test_label_makes_names_unique_per_run(self):
         facts = _generated_facts([_filter("a")])
         (f1,), _ = facts_to_filters(facts, label="2026-01-01")
@@ -102,6 +126,28 @@ class TestFactsToFilters:
 
 
 class TestConsolidateKeepLiveRules:
+
+    def test_carried_label_rule_keeps_label_type(self, cli_snapshots_dir, fake_sync):
+        """A live rule filing into a name the backup knows as a label comes back as LABEL."""
+        def labelled(sender):
+            return ProtonMailFilter(
+                name=f"L {sender}",
+                conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value=sender)],
+                actions=[FilterAction(type=ActionType.LABEL, parameters={"label": "Receipts"})],
+                raw=ScrapeEvidence(conditions_text="the sender", actions_text="Label as Receipts"),
+            )
+        survivor, deleted = labelled("kept@x.com"), labelled("gone@x.com")
+        live = _section_for([survivor, deleted])
+        manager = BackupManager(cli_snapshots_dir)
+        manager.create_backup([survivor], sieve_script=live)
+
+        result = runner.invoke(app, ["consolidate", "--keep-live-rules"])
+        assert result.exit_code == 0, result.output
+        carried = [
+            e.filter for e in manager.load_archive(manager.snapshot_dir_for("latest"))
+            if e.filter.name.startswith(CARRIED_PREFIX)
+        ]
+        assert [a.type for f in carried for a in f.actions] == [ActionType.LABEL]
 
     def test_without_flag_warns(self, shrunk_account):
         result = runner.invoke(app, ["consolidate"])

@@ -107,6 +107,9 @@ def parse_filter(raw: dict) -> ProtonMailFilter:
     logic_str = raw.get("logic", "and").lower()
     logic = LogicType.OR if logic_str == "or" else LogicType.AND
 
+    # Left out when absent so the model derives it from raw.sieve_text
+    extra = {"is_sieve": raw["is_sieve"]} if "is_sieve" in raw else {}
+
     return ProtonMailFilter(
         name=raw.get("name", "Unknown Filter"),
         enabled=raw.get("enabled", True),
@@ -116,6 +119,7 @@ def parse_filter(raw: dict) -> ProtonMailFilter:
         actions=actions,
         raw=raw.get("raw"),
         scrape_issues=list(raw.get("scrape_issues", [])),
+        **extra,
     )
 
 

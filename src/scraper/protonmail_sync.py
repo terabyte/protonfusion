@@ -367,33 +367,57 @@ class ProtonMailSync(ProtonMailBrowser):
         return disabled
 
     async def delete_filter(self, name: str) -> bool:
-        """Delete a single filter by name."""
+        """Delete one disabled filter by name from the Custom filters section.
+
+        Rows can only be told apart by name, so this refuses (returns False,
+        deletes nothing) unless exactly one row has that name and its toggle
+        is off. With a shared name the wrong filter could go, and an enabled
+        filter is live mail handling that cleanup never means to delete.
+        """
         page = self.page
-        rows = await page.query_selector_all(selectors.FILTER_TABLE_ROWS)
+        section = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
+        if not section:
+            logger.warning("Custom filters section not found; not deleting '%s'", name)
+            return False
+        rows = await section.query_selector_all(selectors.FILTER_TABLE_ROWS)
 
+        matches = []
         for row in rows:
-            row_name = await self._get_filter_name(row)
-            if row_name == name:
-                dropdown = await row.query_selector(selectors.FILTER_ACTIONS_DROPDOWN)
-                if not dropdown:
-                    continue
+            if await self._get_filter_name(row) == name:
+                matches.append(row)
+        if not matches:
+            logger.warning("Filter '%s' not found for deletion", name)
+            return False
+        if len(matches) > 1:
+            logger.warning("%d filters are named '%s'; not deleting any of them", len(matches), name)
+            return False
 
-                await dropdown.click()
-                await page.wait_for_timeout(DROPDOWN_MS)
+        row = matches[0]
+        toggle_input = await row.query_selector(selectors.FILTER_TOGGLE)
+        if not toggle_input or await toggle_input.is_checked():
+            logger.warning("Filter '%s' is enabled (or its toggle is unreadable); not deleting", name)
+            return False
 
-                delete_item = await page.query_selector(
-                    f'{selectors.DROPDOWN_ITEM}:has-text("Delete")'
-                )
-                if delete_item:
-                    await delete_item.click()
-                    await page.wait_for_timeout(DROPDOWN_MS)
+        dropdown = await row.query_selector(selectors.FILTER_ACTIONS_DROPDOWN)
+        if not dropdown:
+            logger.warning("No actions menu for filter '%s'; not deleting", name)
+            return False
+        await dropdown.click()
+        await page.wait_for_timeout(DROPDOWN_MS)
 
-                    await self._confirm_delete()
-                    logger.info("Deleted filter: %s", name)
-                    return True
+        delete_item = await page.query_selector(
+            f'{selectors.DROPDOWN_ITEM}:has-text("Delete")'
+        )
+        if not delete_item:
+            logger.warning("No Delete option in the menu for filter '%s'", name)
+            return False
+        await delete_item.click()
+        await page.wait_for_timeout(DROPDOWN_MS)
 
-        logger.warning("Filter '%s' not found for deletion", name)
-        return False
+        if not await self._confirm_delete():
+            return False
+        logger.info("Deleted filter: %s", name)
+        return True
 
     async def delete_all_filters(self) -> int:
         """Delete all filters on the page. Returns count deleted."""

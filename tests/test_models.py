@@ -584,3 +584,36 @@ class TestScrapeEvidence:
             name="X", raw=ScrapeEvidence(actions_text="whatever"), scrape_issues=["x"],
         )
         assert a.content_hash == b.content_hash
+
+
+class TestSieveFilterMarker:
+    """A Sieve filter is a script, so it is marked and hashed by that script."""
+
+    def test_is_sieve_derived_from_captured_script(self):
+        """Backups written before is_sieve existed mark a Sieve filter only by its script."""
+        f = ProtonMailFilter.model_validate({"name": "S", "raw": {"sieve_text": 'fileinto "X";'}})
+        assert f.is_sieve is True
+
+    def test_wizard_filter_is_not_sieve(self):
+        f = ProtonMailFilter(name="W", raw=ScrapeEvidence(conditions_text="c", actions_text="a"))
+        assert f.is_sieve is False
+
+    def test_explicit_flag_wins(self):
+        """An empty script still means the Sieve editor opened."""
+        f = ProtonMailFilter(name="S", is_sieve=True, raw=ScrapeEvidence(sieve_text=""))
+        assert f.is_sieve is True
+
+    def test_flag_survives_roundtrip(self):
+        f = ProtonMailFilter(name="S", is_sieve=True, raw=ScrapeEvidence(sieve_text="keep;"))
+        assert ProtonMailFilter.model_validate(f.model_dump()).is_sieve is True
+
+    def test_content_hash_covers_script(self):
+        a = ProtonMailFilter(name="S", is_sieve=True, raw=ScrapeEvidence(sieve_text='fileinto "A";'))
+        b = ProtonMailFilter(name="S", is_sieve=True, raw=ScrapeEvidence(sieve_text='fileinto "B";'))
+        assert a.content_hash != b.content_hash
+
+    def test_content_hash_of_wizard_filter_unchanged(self):
+        """Only Sieve filters hash their script, so existing wizard hashes stay valid."""
+        a = ProtonMailFilter(name="X")
+        b = ProtonMailFilter(name="X", raw=ScrapeEvidence(sieve_text="", actions_text="a"))
+        assert a.content_hash == b.content_hash

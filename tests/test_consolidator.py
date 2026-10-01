@@ -9,6 +9,7 @@ from src.consolidator.strategies.optimize_ordering import optimize_ordering
 from src.models.filter_models import (
     ProtonMailFilter, FilterCondition, FilterAction, ConsolidatedFilter,
     ConditionGroup, ConditionType, Operator, ActionType, LogicType, FilterStatus,
+    ScrapeEvidence,
 )
 
 
@@ -1200,3 +1201,34 @@ class TestLabelActions:
         ])
         assert stats["action_distribution"] == {"label -> Red": 1, "label -> Blue": 1}
         assert stats["consolidation_opportunities"] == {}
+
+
+class TestSieveFiltersNotConsolidated:
+    """A Sieve filter has no conditions/actions; consolidating it would emit `keep;`."""
+
+    def _sieve(self, name="ProtonFusion Consolidated", enabled=True):
+        return ProtonMailFilter(
+            name=name, enabled=enabled, is_sieve=True,
+            raw=ScrapeEvidence(sieve_text='if true { fileinto "X"; }'),
+        )
+
+    def _wizard(self):
+        return ProtonMailFilter(
+            name="W",
+            conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="a@x.com")],
+            actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "F"})],
+        )
+
+    def test_sieve_filter_skipped(self):
+        consolidated, report = ConsolidationEngine().consolidate([self._sieve(), self._wizard()])
+        sources = [name for cf in consolidated for name in cf.source_filters]
+        assert sources == ["W"]
+        assert report.sieve_skipped == 1
+
+    def test_disabled_and_archived_sieve_filters_skipped(self):
+        archived = self._sieve(name="Old").model_copy(update={"status": FilterStatus.ARCHIVED, "enabled": False})
+        consolidated, report = ConsolidationEngine().consolidate(
+            [self._sieve(enabled=False)], include_disabled=True, archived_filters=[archived],
+        )
+        assert consolidated == []
+        assert report.sieve_skipped == 2

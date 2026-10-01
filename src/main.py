@@ -5,6 +5,7 @@ import difflib
 import json
 import logging
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -27,7 +28,7 @@ from src.parser.filter_parser import parse_scraped_filters
 from src.consolidator.consolidation_engine import ConsolidationEngine
 from src.generator.sieve_generator import SieveGenerator, SieveGenerationError, SECTION_BEGIN
 from src.generator.sieve_rules import SieveParseError, compare_sections, extract_section, script_facts
-from src.consolidator.carry_forward import facts_to_filters, filter_facts
+from src.consolidator.carry_forward import facts_to_filters, filter_facts, is_carried, label_targets
 
 SIEVE_FILTER_NAME = "ProtonFusion Consolidated"
 STATE_HELP = (
@@ -61,6 +62,16 @@ def _print_incomplete(filters: List[ProtonMailFilter], heading: str):
         console.print(f"  [red]- {escape(f.name)}")
         for issue in f.scrape_issues:
             console.print(f"      {escape(issue)}")
+
+
+def _without_evidence(filters: List[ProtonMailFilter]) -> List[ProtonMailFilter]:
+    """Filters with no raw scrape evidence, i.e. from a backup made before format 1.1.
+
+    They report no scrape issues only because the old scraper recorded none;
+    that is the scraper which silently dropped labels, so they are treated as
+    incomplete. Carried-forward filters were never scraped and are exempt.
+    """
+    return [f for f in filters if f.raw is None and not is_carried(f)]
 
 
 def _get_credentials(credentials_file: str, manual_login: bool):
@@ -573,7 +584,7 @@ def consolidate(
     # After `cleanup` it may be the only copy of some rules.
     carried_count = 0
     live_script = bkup.sieve_script or ""
-    if extract_section(live_script) is not None:
+    if SECTION_BEGIN in live_script:
         try:
             comparison = compare_sections(live_script, sieve_script)
         except SieveParseError as e:
@@ -594,7 +605,11 @@ def consolidate(
                 suppressed |= filter_facts(f)
             to_carry = [fact for fact in comparison.dropped if fact not in suppressed]
 
-            carried, unconvertible = facts_to_filters(to_carry, label=snapshot_dir.name)
+            # The backup and archive say which fileinto targets are labels
+            known_labels = label_targets(list(bkup.filters) + [e.filter for e in archive_entries])
+            carried, unconvertible = facts_to_filters(
+                to_carry, label=snapshot_dir.name, label_names=known_labels,
+            )
             known_hashes = {e.filter.content_hash for e in archive_entries}
             now_ts = datetime.now(timezone.utc).isoformat()
             for f in carried:
@@ -651,7 +666,23 @@ def consolidate(
         all_source_names.update(cf.source_filters)
     all_processed = backup_filters + archived_filters
     processed_filters = [f for f in all_processed if f.name in all_source_names]
-    manager.write_manifest(snapshot_dir, processed_filters, str(out_path))
+    without_evidence = _without_evidence(processed_filters)
+    if without_evidence:
+        console.print(
+            f"[bold red]Warning: {len(without_evidence)} filter(s) in this script come from a backup "
+            "made before format 1.1 and have no raw evidence. Labels or other actions the old "
+            "scraper missed are not in them:"
+        )
+        for f in without_evidence:
+            console.print(f"  [red]- {escape(f.name)}")
+        console.print(
+            "[yellow]'sync' will refuse this script unless given --allow-incomplete. "
+            "Run 'backup' again, then 'consolidate', to fix it."
+        )
+    manager.write_manifest(
+        snapshot_dir, processed_filters, str(out_path),
+        without_evidence=[f.name for f in without_evidence],
+    )
     console.print(f"[cyan]Manifest written to snapshot ({len(processed_filters)} filters)")
 
     # Post-consolidation archiving: move included backup filters to archive
@@ -691,6 +722,8 @@ def consolidate(
         report_lines.append(f"Archived (included): {report.archived_count}")
     if report.excluded_count > 0:
         report_lines.append(f"Excluded by name: {report.excluded_count}")
+    if report.sieve_skipped > 0:
+        report_lines.append(f"Sieve filters (left as they are): {report.sieve_skipped}")
     if carried_count > 0:
         report_lines.append(f"Carried forward from live Sieve (new archived filters): {carried_count}")
     report_lines.append(f"Consolidated rules: {report.consolidated_count}")
@@ -915,11 +948,17 @@ def sync(
         False, "--allow-rule-removal",
         help="Proceed even if the new ProtonFusion section drops rules present in the live one",
     ),
+    allow_incomplete: bool = typer.Option(
+        False, "--allow-incomplete",
+        help="Upload even if the script was built from filters with no raw evidence (pre-1.1 backups)",
+    ),
 ):
     """Upload Sieve script and disable old UI filters (reversible).
 
     Refuses (exit 1, nothing changed) if the new ProtonFusion section would drop
     any rule present in the live section, unless --allow-rule-removal is given.
+    Also refuses if 'consolidate' built the script from filters with no raw
+    evidence (backups made before format 1.1), unless --allow-incomplete is given.
     """
     from src.scraper.protonmail_sync import ProtonMailSync
 
@@ -941,6 +980,28 @@ def sync(
     sieve_script = sieve_path.read_text()
     creds = _get_credentials(credentials_file, False)
     bkup = manager.load_backup(backup_id)
+
+    # A script built from pre-1.1 filters may be missing their labels. The
+    # manifest only describes the snapshot's own script, so it is checked
+    # only when that is the script being uploaded.
+    manifest = manager.load_manifest(snapshot_dir) or {}
+    manifest_script = manifest.get("sieve_file")
+    without_evidence = manifest.get("without_evidence", [])
+    if without_evidence and manifest_script and Path(manifest_script).resolve() == sieve_path.resolve():
+        console.print(
+            f"[bold red]This script was built from {len(without_evidence)} filter(s) with no raw "
+            "evidence (backed up before format 1.1); labels or other actions may be missing:"
+        )
+        for name in without_evidence:
+            console.print(f"  [red]- {escape(name)}")
+        if allow_incomplete:
+            console.print("[yellow]--allow-incomplete given: proceeding anyway.")
+        else:
+            console.print(
+                "[bold red]Sync refused. No filters were disabled and nothing was uploaded.[/]\n"
+                "[yellow]Run 'backup' and 'consolidate' again, or pass --allow-incomplete."
+            )
+            raise typer.Exit(1)
 
     if dry_run:
         console.print(Panel("[bold yellow]DRY RUN - No changes will be made"))
@@ -1190,10 +1251,18 @@ def cleanup(
 
     A disabled filter is only deleted if every one of its conditions and actions
     is present in the live ProtonFusion section, so deleting it never removes
-    the last copy of a rule (e.g. after a refused or failed sync). Auto-archives
-    disabled filters before deletion to preserve them for future consolidation.
-    Also refuses (exit 1) to delete any filter without a complete backup copy in the
+    the last copy of a rule (e.g. after a refused or failed sync). Sieve filters
+    (including the ProtonFusion one) are never deleted, and neither is any filter
+    whose name another filter shares, since deletion works by name. Auto-archives
+    disabled filters before deletion to preserve them for future consolidation,
+    except those it refuses, so a refusal holds on the next run too.
+    Also refuses to delete any filter without a complete backup copy in the
     latest snapshot, unless --allow-incomplete is given.
+
+    Exits 1 whenever it kept back a filter it would otherwise have deleted
+    (uncovered, unverified, or sharing a name) or a deletion failed, so a
+    script can tell a partial cleanup from a complete one. Sieve filters are
+    never candidates, so leaving them alone does not count.
     """
     from src.scraper.protonmail_scraper import ProtonMailScraper
     from src.scraper.protonmail_sync import ProtonMailSync
@@ -1214,22 +1283,33 @@ def cleanup(
         finally:
             await scraper.close()
 
-        disabled = [f for f in filters if not f.enabled]
+        # A Sieve filter's rules live in its script, which the coverage and
+        # backup checks below cannot see, so it is never a deletion candidate.
+        # This includes SIEVE_FILTER_NAME itself, disabled by a failed sync.
+        disabled_sieve = [f for f in filters if not f.enabled and f.is_sieve]
+        if disabled_sieve:
+            console.print("[cyan]Leaving disabled Sieve filters alone (cleanup never deletes these):")
+            for f in disabled_sieve:
+                console.print(f"  [cyan]- {escape(f.name)}")
+        disabled = [f for f in filters if not f.enabled and not f.is_sieve]
 
         if not disabled:
             console.print("[green]No disabled filters to clean up.")
             return
 
+        # Every filter kept back for safety; any at all makes the exit code 1
+        held_back: List[ProtonMailFilter] = []
+
         # Only filters whose rules are all in the live section are safe to delete.
+        # An unparsable section leaves live_facts empty, so nothing counts as covered.
         live_facts = set()
-        live_section = extract_section(live_script or "")
-        if live_section is None:
-            console.print("[yellow]No ProtonFusion section found in the live Sieve script.")
-        else:
-            try:
+        try:
+            if extract_section(live_script or "") is None:
+                console.print("[yellow]No ProtonFusion section found in the live Sieve script.")
+            else:
                 live_facts = script_facts(live_script)
-            except SieveParseError as e:
-                console.print(f"[red]Could not parse the live ProtonFusion section: {escape(str(e))}")
+        except SieveParseError as e:
+            console.print(f"[red]Could not parse the live ProtonFusion section: {escape(str(e))}")
         uncovered = [f for f in disabled if not filter_facts(f) <= live_facts]
         if uncovered:
             console.print(
@@ -1245,10 +1325,11 @@ def cleanup(
                     "[yellow]Keeping them: deleting would lose their rules. Run 'sync' first, "
                     "or pass --include-uncovered to delete them anyway."
                 )
+                held_back += uncovered
                 disabled = [f for f in disabled if f not in uncovered]
                 if not disabled:
-                    console.print("[green]Nothing safe to delete.")
-                    return
+                    console.print("[yellow]Nothing safe to delete.")
+                    raise typer.Exit(1)
         # Deletion is the one irreversible step, so each filter needs a
         # backup copy known to be whole. Checked against the snapshot as it
         # was before the auto-archive below adds the live scrape to it.
@@ -1261,7 +1342,9 @@ def cleanup(
         unverified = unverified_for_deletion(disabled, backed_up)
         unverified_ids = {id(f) for f, _ in unverified}
 
-        # Auto-archive any disabled filters missing from the archive
+        # Auto-archive any disabled filters missing from the archive. Filters
+        # this run refuses are left out: archiving the live copy would give
+        # the next run the "verified backup copy" this run found missing.
         try:
             latest_dir = manager.snapshot_dir_for("latest")
             archive_entries = manager.load_archive(latest_dir)
@@ -1269,6 +1352,8 @@ def cleanup(
             now_ts = datetime.now(timezone.utc).isoformat()
             auto_archived = 0
             for f in disabled:
+                if id(f) in unverified_ids and not allow_incomplete:
+                    continue
                 if f.content_hash not in archive_hashes:
                     archived_f = f.model_copy(deep=True)
                     archived_f.status = FilterStatus.ARCHIVED
@@ -1306,28 +1391,40 @@ def cleanup(
                 console.print(f"  [red]- {escape(f.name)}[/]: {escape(reason)}")
             if refused:
                 console.print("[yellow]Re-run 'backup', or pass --allow-incomplete to delete them anyway.")
+                held_back += [f for f, _ in refused]
 
-        # delete_filter() works by name, so a verified filter sharing a name
-        # with a refused one is held back too, or the wrong one could go.
-        refused_names = {f.name for f, _ in refused}
-        to_delete = [
-            f for f in disabled
-            if not (refused and id(f) in unverified_ids) and f.name not in refused_names
-        ]
+        to_delete = [f for f in disabled if not (refused and id(f) in unverified_ids)]
+
+        # delete_filter() finds its row by name, so a filter whose name any
+        # other scraped filter shares (enabled or disabled, covered or not,
+        # Sieve or wizard) is held back: the wrong one could go.
+        name_counts = Counter(f.name for f in filters)
+        same_name = [f for f in to_delete if name_counts[f.name] > 1]
+        if same_name:
+            console.print(
+                f"\n[bold red]Keeping {len(same_name)} filter(s) whose name is shared with another "
+                "filter (deletion works by name, so the wrong one could go):"
+            )
+            for f in same_name:
+                console.print(f"  [red]- {escape(f.name)}")
+            console.print("[yellow]Rename them in ProtonMail so each name is unique, then re-run.")
+            held_back += same_name
+            to_delete = [f for f in to_delete if name_counts[f.name] == 1]
 
         if dry_run:
             console.print(f"\n[bold yellow]DRY RUN - No filters will be deleted ({len(to_delete)} would be).")
-            if refused:
+            if held_back:
                 raise typer.Exit(1)
             return
 
         if not to_delete:
+            console.print("[yellow]Nothing safe to delete.")
             raise typer.Exit(1)
 
         confirm = typer.confirm(f"\nDelete {len(to_delete)} disabled filters? This cannot be undone!")
         if not confirm:
             console.print("[yellow]Cleanup cancelled.")
-            if refused:
+            if held_back:
                 raise typer.Exit(1)
             return
 
@@ -1347,8 +1444,9 @@ def cleanup(
         finally:
             await sync_client.close()
 
-        if refused:
-            console.print(f"[bold red]{len(refused)} filter(s) were not deleted (see above).")
+        not_deleted = len(held_back) + len(to_delete) - deleted_count
+        if not_deleted:
+            console.print(f"[bold red]{not_deleted} filter(s) were not deleted (see above).")
             raise typer.Exit(1)
 
     _run_browser_command(_run())

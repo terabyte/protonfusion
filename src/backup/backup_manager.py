@@ -17,16 +17,21 @@ from src.utils.private_files import write_private_file
 
 logger = logging.getLogger(__name__)
 
-# Filter fields added in backup format 1.1. A 1.0 backup's checksum was
-# computed before they existed, so they are left out when verifying one;
-# otherwise their defaults would change the hashed JSON and every old
-# backup would fail verification.
+# Filter fields added after backup format 1.0, keyed by the last format
+# that did NOT have them. An older backup's checksum was computed before
+# they existed, so they are left out when verifying one; otherwise their
+# defaults would change the hashed JSON and every old backup would fail
+# verification.
 EVIDENCE_FIELDS = {"raw", "scrape_issues"}
+FIELDS_ADDED_AFTER = {
+    "1.0": EVIDENCE_FIELDS | {"is_sieve"},
+    "1.1": {"is_sieve"},
+}
 
 
 def compute_checksum(filters: List[ProtonMailFilter], sieve_script: str, version: str) -> str:
     """SHA-256 over the filters and Sieve script, in the layout of `version`."""
-    exclude = EVIDENCE_FIELDS if version == "1.0" else None
+    exclude = FIELDS_ADDED_AFTER.get(version)
     checksum_data = {
         "filters": [f.model_dump(exclude=exclude) for f in filters],
         "sieve_script": sieve_script,
@@ -251,14 +256,23 @@ class BackupManager:
 
     # --- Manifest methods ---
 
-    def write_manifest(self, snapshot_dir: Path, filters: list, sieve_file: str):
-        """Write manifest.json into a snapshot directory."""
+    def write_manifest(
+        self, snapshot_dir: Path, filters: list, sieve_file: str,
+        without_evidence: Optional[List[str]] = None,
+    ):
+        """Write manifest.json into a snapshot directory.
+
+        `without_evidence` names the filters in the script that have no raw
+        scrape evidence (backed up before format 1.1); `sync` refuses while
+        it is non-empty.
+        """
         manifest = {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "filter_hashes": sorted(set(f.content_hash for f in filters)),
             "filter_names": sorted(set(f.name for f in filters)),
             "filter_count": len(filters),
             "sieve_file": sieve_file,
+            "without_evidence": sorted(set(without_evidence or [])),
             "synced_at": None,
         }
         manifest_path = snapshot_dir / "manifest.json"

@@ -69,11 +69,15 @@ ProtonMailFilter
 │   └── FilterAction { type: ActionType, parameters: dict }
 ├── raw: ScrapeEvidence | None          # wizard text captured at scrape time
 │   └── { conditions_text, actions_text, sieve_text }
-└── scrape_issues: List[str]            # non-empty = not fully read
+├── scrape_issues: List[str]            # non-empty = not fully read
+└── is_sieve: bool                      # Edit opened the Sieve editor, not the wizard
 ```
 
 `raw` and `scrape_issues` describe how a filter was read, not what it does, so
-`content_hash` and the diff engine ignore them. A label action is
+`content_hash` and the diff engine ignore them. The exception is a Sieve filter
+(`is_sieve`): its script is the filter, so `content_hash` includes
+`raw.sieve_text`. Sieve filters have no conditions or actions to work with, so
+`consolidate` skips them and `cleanup` never deletes them. A label action is
 `{"type": "label", "parameters": {"label": "<name>"}}`, one per label.
 
 After consolidation, filters are represented as `ConsolidatedFilter`:
@@ -233,7 +237,7 @@ snapshots/
 
 Contains the full Pydantic-serialized `Backup` object: metadata (filter counts, account email, tool version), the list of `ProtonMailFilter` objects, the existing Sieve script (captured from the account at backup time), and a SHA-256 checksum for integrity verification.
 
-`version` is `1.1` for backups that carry `raw`/`scrape_issues` on each filter. `1.0` backups still load, and their checksum is verified without those fields.
+`version` is `1.2`: each filter carries `raw`, `scrape_issues` (added in 1.1) and `is_sieve` (added in 1.2). Older backups still load, and their checksum is verified without the fields their format lacked. For a backup without `is_sieve`, a filter with a captured `raw.sieve_text` is read as a Sieve filter.
 
 `cleanup` deletes a disabled filter only if the latest snapshot's `backup.json` or `archive.json` holds a copy with the same `content_hash`, no `scrape_issues`, and non-null `raw` (see `unverified_for_deletion` in `backup_manager.py`). Override with `--allow-incomplete`.
 
