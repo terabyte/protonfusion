@@ -176,7 +176,7 @@ A GitHub Actions workflow runs unit + integration tests on every push and pull r
 | `diff` | Compare two backups or a backup vs current state |
 | `sync` | Upload Sieve script and disable the UI filters whose rules it carries (Sieve filters and filters newer than the backup stay on; all are re-enabled if the upload fails); refuses if the new script drops live rules (`--allow-rule-removal` to override) or was built from pre-1.1 filters with no raw text (`--allow-incomplete` to override) |
 | `sync --show-diff-only` | Preview Sieve changes against the live script (no upload) |
-| `restore` | Turn UI filters on or off to match a backup (does not change the Sieve script; see Safety Design) |
+| `restore` | Roll back to a backup: UI filters' on/off states and the ProtonFusion Sieve script, after a preview and confirmation, with a safety backup first (`--dry-run` previews only) |
 | `cleanup` | Delete disabled filters whose rules are in the live Sieve section and that have a verified backup copy (with confirmation) |
 | `cleanup --include-uncovered` | Also delete disabled filters whose rules are NOT in the live ProtonFusion section |
 | `snapshot view` | View merged backup + archive filters grouped by status |
@@ -232,7 +232,7 @@ python -m src.main sync --sieve filters.sieve --backup latest
 # Compare two backups
 python -m src.main diff --backup1 2026-02-08_19-30-45 --backup2 2026-02-09_10-00-00
 
-# Turn UI filters back on/off as they were in a backup (the Sieve script is not changed)
+# Roll back to a backup: filter states and the Sieve script (previews, then asks)
 python -m src.main restore --backup 2026-02-08_19-30-45 --headless --credentials-file .credentials
 
 # View filters in latest snapshot (backup + archive merged, grouped by status)
@@ -266,7 +266,7 @@ ProtonFusion is designed to be non-destructive:
 - **Cleanup needs a verified copy**: `cleanup` only deletes a disabled filter if the latest snapshot holds an identical, complete copy with raw text. Others are listed and kept (override: `--allow-incomplete`). Backups made before format 1.1 have no raw text, so run `backup` again after upgrading. `consolidate` warns about such filters and `sync` refuses a script built from them (override: `--allow-incomplete`).
 - **Shared names are never deleted**: deletion works by name, so `cleanup` keeps any filter whose name another filter (enabled or not) also uses, and only ever deletes a disabled filter in the Custom filters list.
 - **Sieve filters are left alone**: `consolidate` skips filters written in Sieve (including ProtonFusion's own), and `cleanup` never deletes them.
-- **Restore (UI filters only)**: `restore --backup <snapshot>` turns UI filters on or off to match that backup, matching each by its content and row position so a shared name never toggles the wrong one, and lists any it could not match (exit 1). It does not change the Sieve script. To roll back the script after a `sync`, take `sieve_script` from that snapshot's `backup.json` (the script captured when the backup was made) and paste it back into the `ProtonFusion Consolidated` filter in ProtonMail, or re-sync it; until then the new script and the re-enabled filters both run.
+- **Restore is a full rollback**: `restore --backup <snapshot>` puts back the UI filters' on/off states and the `ProtonFusion Consolidated` script captured in that backup. It previews every filter it will toggle and a diff of the script, asks for confirmation (`--dry-run` stops at the preview), and first saves a safety backup of the current state, printing its id so the restore itself can be undone. Filters are matched by content and row position, so a shared name never toggles the wrong one; any it cannot match are listed and left alone (exit 1). It enables filters first, then replaces the script, then disables filters, so a failure part-way leaves extra filtering, never a rule switched off, and the report says exactly where it stopped. It refuses if the live script cannot be read, or if the backup holds no script while the account does (`--allow-empty-script` then disables the ProtonFusion filter instead). Restoring a backup from before ProtonFusion's first sync removes ProtonFusion's section; the preview says so.
 
 ## Architecture
 

@@ -122,11 +122,21 @@ class BackupManager:
     def __init__(self, snapshots_dir: Optional[Path] = None):
         self.snapshots_dir = snapshots_dir or SNAPSHOTS_DIR
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
+        # Directory of the snapshot create_backup most recently wrote
+        self.last_snapshot_dir: Optional[Path] = None
 
     def create_backup(
         self, filters: List[ProtonMailFilter], account_email: str = "", sieve_script: str = "",
+        make_latest: bool = True,
     ) -> Backup:
-        """Create a new backup inside a timestamped snapshot directory."""
+        """Create a new backup inside a timestamped snapshot directory.
+
+        The directory name is the timestamp, with a -2, -3, ... suffix if a
+        snapshot from the same second exists, so one never overwrites
+        another. Its path is left in self.last_snapshot_dir. With
+        make_latest=False (restore's safety backup) the `latest` link is
+        left where it was.
+        """
         now = datetime.now()
 
         enabled_count = sum(1 for f in filters if f.enabled)
@@ -154,7 +164,12 @@ class BackupManager:
         # Save backup.json inside a new snapshot subdirectory. It holds the
         # user's filter data, so like the session file it is owner-only (a
         # snapshot dir this creates is 0700).
-        dirname = now.strftime("%Y-%m-%d_%H-%M-%S")
+        base = now.strftime("%Y-%m-%d_%H-%M-%S")
+        dirname = base
+        suffix = 2
+        while (self.snapshots_dir / dirname).exists():
+            dirname = f"{base}-{suffix}"
+            suffix += 1
         snapshot_dir = self.snapshots_dir / dirname
         filepath = snapshot_dir / "backup.json"
         write_private_file(filepath, json.dumps(backup.model_dump(), indent=2, default=str))
@@ -163,10 +178,12 @@ class BackupManager:
         self.carry_forward_archive(snapshot_dir)
 
         # Update latest symlink at snapshots/latest -> dirname
-        latest_link = self.snapshots_dir / "latest"
-        if latest_link.exists() or latest_link.is_symlink():
-            latest_link.unlink()
-        latest_link.symlink_to(dirname)
+        if make_latest:
+            latest_link = self.snapshots_dir / "latest"
+            if latest_link.exists() or latest_link.is_symlink():
+                latest_link.unlink()
+            latest_link.symlink_to(dirname)
+        self.last_snapshot_dir = snapshot_dir
 
         logger.info("Backup created: %s (%d filters)", snapshot_dir, len(filters))
         return backup

@@ -19,7 +19,7 @@ from rich.markup import escape
 from rich import print as rprint
 
 from src.utils.config import (
-    load_credentials, SNAPSHOTS_DIR, TOOL_VERSION,
+    load_credentials, loggable_text, SNAPSHOTS_DIR, TOOL_VERSION,
 )
 from src.models.filter_models import ProtonMailFilter, FilterStatus
 from src.models.backup_models import Backup, ArchiveEntry
@@ -1421,16 +1421,77 @@ def sync(
 
 
 def _rollback_help(backup_id: str, snapshot_dir: Path) -> str:
-    """What to tell the user about undoing a sync: restore covers the UI
-    filters only, so the script has to be put back by hand."""
+    """What to tell the user about undoing a sync."""
     return (
-        f"[yellow]To roll back: 'restore --backup {escape(backup_id)}' turns the UI filters back on "
-        "or off as they were in that backup. It does NOT change the Sieve script, so until you put "
-        "the old script back, the new one and the re-enabled filters both run.\n"
-        f"The script captured with that backup is \"sieve_script\" in "
-        f"{escape(str(snapshot_dir / 'backup.json'))}: paste it back into the "
-        f"'{SIEVE_FILTER_NAME}' filter in ProtonMail (Settings > Filters), or re-sync it."
+        f"[yellow]To roll back: 'restore --backup {escape(backup_id)}' puts back both the UI "
+        "filters' on/off states and the Sieve script captured in that backup "
+        f"({escape(str(snapshot_dir / 'backup.json'))}), after a preview and confirmation, "
+        "and saves a safety backup first."
     )
+
+
+def _section_rules(script: str) -> Optional[set]:
+    """Rule facts of a script's ProtonFusion section; None if it has no section.
+
+    Raises SieveParseError if the section cannot be parsed.
+    """
+    if extract_section(script or "") is None:
+        return None
+    return script_facts(script)
+
+
+def _print_restore_script_preview(live_script: str, target_script: str, backup_id: str) -> None:
+    """Show how restoring would change the live script: a unified diff plus the
+    effect on ProtonFusion's section, in rules."""
+    try:
+        live_rules = _section_rules(live_script)
+        target_rules = _section_rules(target_script)
+    except SieveParseError as e:
+        live_rules = target_rules = None
+        console.print(f"[yellow]Could not compare the ProtonFusion sections rule by rule: {escape(str(e))}")
+    else:
+        if live_rules is not None and target_rules is None:
+            console.print(
+                f"[bold yellow]The backed-up script has no ProtonFusion section (the backup predates "
+                f"ProtonFusion's Sieve filter or its first sync): restoring it REMOVES ProtonFusion's "
+                f"section ({len(live_rules)} condition/action pairs) from the live script.[/]"
+            )
+        elif live_rules is not None and target_rules is not None:
+            console.print(
+                f"[cyan]ProtonFusion section: {len(live_rules - target_rules)} condition/action pairs "
+                f"removed, {len(target_rules - live_rules)} added.[/]"
+            )
+    console.print(
+        f"[cyan]The whole script of the '{SIEVE_FILTER_NAME}' filter is replaced, including any "
+        "text outside the ProtonFusion markers.[/]"
+    )
+    diff_lines = list(difflib.unified_diff(
+        live_script.splitlines(), target_script.splitlines(),
+        fromfile="live", tofile=f"backup {backup_id}", lineterm="",
+    ))
+    shown = "\n".join(diff_lines[:200]) + ("\n..." if len(diff_lines) > 200 else "")
+    console.print(Panel(escape(shown), title="Sieve script: live -> backup", border_style="cyan"))
+
+
+def _print_restore_filter_preview(plan) -> None:
+    """List the filter toggles a restore plan would make, and what it cannot restore."""
+    for pairs, verb, color in ((plan.to_enable, "enable", "green"), (plan.to_disable, "disable", "yellow")):
+        if pairs:
+            console.print(f"[{color}]Will {verb} {len(pairs)} filter(s):")
+            for backed, live in pairs:
+                console.print(f"  [{color}]- {escape(backed.name)} (row {live.priority})")
+    console.print(f"[cyan]Already as in the backup: {len(plan.already_correct)}")
+    if plan.unrestorable:
+        console.print(f"[bold red]Cannot restore {len(plan.unrestorable)} filter(s); they are left alone:")
+        for line in plan.unrestorable:
+            console.print(f"  [red]- {escape(line)}")
+    if plan.script_differs:
+        console.print(
+            "[yellow]Other Sieve filters whose script differs from the backup (the backup holds only "
+            f"'{SIEVE_FILTER_NAME}'s script, so only their on/off state is restored):"
+        )
+        for name in plan.script_differs:
+            console.print(f"  [yellow]- {escape(name)}")
 
 
 @app.command()
@@ -1440,15 +1501,34 @@ def restore(
     credentials_file: str = typer.Option("", "--credentials-file", help="Credentials file"),
     state: str = typer.Option("", "--state", help=STATE_HELP),
     workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would change, change nothing"),
+    allow_empty_script: bool = typer.Option(
+        False, "--allow-empty-script",
+        help=f"The backup holds no Sieve script but the account does: restore by disabling "
+             f"'{SIEVE_FILTER_NAME}' (stops every rule in it)",
+    ),
 ):
-    """Turn UI filters on or off to match a backup. Does not change the Sieve script.
+    """Roll the account back to a backup: UI filter states AND the ProtonFusion Sieve script.
 
-    Each backed-up filter is matched to the live one with the same content
-    (Sieve filters by name) and toggled by row position plus name, so a
-    shared name never toggles the wrong filter. Filters it cannot match,
-    or cannot match unambiguously, are listed and left alone, and the
-    command then exits 1. To put the Sieve script back as well, paste
-    backup.json's "sieve_script" into the ProtonFusion filter by hand.
+    Shows a preview (each filter it will enable or disable, and a diff of
+    the live script against the backed-up one), asks for confirmation, and
+    saves a safety backup of the current state first, printing its id so
+    the restore can itself be undone. --dry-run stops after the preview.
+
+    Filters are matched by content (Sieve filters by name) and toggled by
+    row position plus name, so a shared name never toggles the wrong one;
+    any it cannot match unambiguously are listed and left alone (exit 1).
+
+    Order, chosen so a failure part-way never leaves mail unfiltered: first
+    enable the filters the backup has on, then replace the script, then
+    disable the filters the backup has off. Until the last step every rule
+    from both the old and the current state is active, so a failure leaves
+    extra filtering (possibly the same rule twice), never a rule off. It
+    stops at the first failed enable or a failed upload and reports
+    exactly what state the account is in.
+
+    Refuses if the live script cannot be read, and if the backup holds no
+    script while the account does, unless --allow-empty-script.
     """
     from src.scraper.protonmail_scraper import ProtonMailScraper
     from src.scraper.protonmail_sync import ProtonMailSync
@@ -1458,73 +1538,189 @@ def restore(
     _workers = max(1, min(workers, 10))
     manager = BackupManager()
     bkup = manager.load_backup(backup_id)
-    snapshot_dir = manager.snapshot_dir_for(backup_id)
 
     async def _run() -> bool:
+        # Read everything first, in one read-only session. A failed live
+        # Sieve read raises SieveReadError, which _run_browser_command turns
+        # into a refusal before anything is changed or saved.
         scraper = ProtonMailScraper(headless=headless, credentials=creds, storage_state_path=state or None)
         try:
             await scraper.initialize()
             await scraper.login()
             await scraper.navigate_to_filters()
-            raw_filters = await scraper.scrape_all_filters(workers=_workers)
-            current_filters = parse_scraped_filters(raw_filters)
+            current_filters = parse_scraped_filters(await scraper.scrape_all_filters(workers=_workers))
+            live_script = await scraper.read_sieve_script(filter_name=SIEVE_FILTER_NAME) or ""
+            account_email = scraper.account_email
         finally:
             await scraper.close()
 
+        plan = RestoreEngine.plan(bkup, current_filters)
+        target_script = bkup.sieve_script or ""
+        # ProtonFusion's own filter has its script restored, not just its state
+        plan.script_differs = [n for n in plan.script_differs if n != SIEVE_FILTER_NAME]
+        live_pf = [f for f in current_filters if f.is_sieve and f.name == SIEVE_FILTER_NAME]
+
+        # What to do with the script: nothing, upload the backed-up one, or
+        # (backup had none) disable ProtonFusion's filter.
+        script_action = "none"
+        if target_script and target_script != live_script:
+            script_action = "upload"
+        elif not target_script and live_script:
+            console.print(
+                f"[bold red]Backup '{escape(backup_id)}' holds no Sieve script, but the account's "
+                f"'{SIEVE_FILTER_NAME}' filter has one ({len(live_script)} chars).[/]\n"
+                "Either the account had no ProtonFusion script when the backup was made, or the "
+                "backup predates script capture. Restoring means switching that script off: "
+                f"with --allow-empty-script, restore DISABLES the '{SIEVE_FILTER_NAME}' filter "
+                "(it is not deleted, so it can be switched back on), which stops every rule in it."
+            )
+            if not allow_empty_script:
+                console.print("[bold red]Restore refused. Nothing was changed.")
+                return False
+            if len(live_pf) != 1:
+                console.print(
+                    f"[bold red]Found {len(live_pf)} Sieve filters named '{SIEVE_FILTER_NAME}'; "
+                    "cannot tell which to disable. Restore refused. Nothing was changed."
+                )
+                return False
+            script_action = "disable"
+
+        # Saving a script switches ProtonFusion's filter on (upload_sieve
+        # makes sure of it), so if the backup has it off, switch it off
+        # again in the disable step, after the upload.
+        pf_disable_pairs = []
+        if script_action == "upload":
+            backed_pf = [f for f in bkup.filters if f.is_sieve and f.name == SIEVE_FILTER_NAME and not f.enabled]
+            already = {backed.name for backed, _ in plan.to_disable}
+            if backed_pf and len(live_pf) == 1 and SIEVE_FILTER_NAME not in already:
+                pf_disable_pairs = [(backed_pf[0], live_pf[0])]
+                plan.already_correct = [n for n in plan.already_correct if n != SIEVE_FILTER_NAME]
+        elif script_action == "disable":
+            plan.to_enable = [(b, l) for b, l in plan.to_enable if l.name != SIEVE_FILTER_NAME]
+            if SIEVE_FILTER_NAME not in {l.name for _, l in plan.to_disable}:
+                pf_disable_pairs = [(live_pf[0], live_pf[0])]
+        to_disable = plan.to_disable + pf_disable_pairs
+
+        # Preview
+        console.print(Panel(f"[bold]Restore preview: backup '{escape(backup_id)}'[/]", border_style="cyan"))
+        _print_restore_filter_preview(plan)
+        if pf_disable_pairs and script_action == "upload":
+            console.print(f"[yellow]'{SIEVE_FILTER_NAME}' is off in the backup: it is switched off after the upload.")
+        if script_action == "upload":
+            _print_restore_script_preview(live_script, target_script, backup_id)
+        elif script_action == "disable":
+            console.print(f"[bold yellow]Will DISABLE the '{SIEVE_FILTER_NAME}' filter (last step).")
+        else:
+            console.print("[cyan]Sieve script: already as in the backup, unchanged.")
+
+        restorable_ok = not plan.unrestorable
+        if not (plan.to_enable or to_disable or script_action != "none"):
+            console.print("[green]Nothing to change: the account already matches the backup.")
+            return restorable_ok
+        if dry_run:
+            console.print("\n[bold yellow]DRY RUN - nothing was changed and nothing was saved.")
+            return restorable_ok
+        if not typer.confirm("\nApply this restore?"):
+            console.print("[yellow]Restore cancelled. Nothing was changed.")
+            return restorable_ok
+
+        # Safety backup of the state about to be changed. Not made 'latest':
+        # after the restore it no longer describes the account.
+        manager.create_backup(
+            current_filters, account_email=account_email, sieve_script=live_script, make_latest=False,
+        )
+        safety_id = manager.last_snapshot_dir.name
+        console.print(
+            f"[cyan]Safety backup of the current state: {safety_id} "
+            f"(undo this restore with: restore --backup {safety_id})"
+        )
+
+        engine = None
+        enabled, enable_errors = [], []
+        disabled, disable_errors = [], []
+        script_status = "unchanged"
+        stopped_at = None
         sync_client = ProtonMailSync(headless=headless, credentials=creds, storage_state_path=state or None)
         try:
             await sync_client.initialize()
             await sync_client.login()
             await sync_client.navigate_to_filters()
+            engine = RestoreEngine(sync_client)
 
-            restore_engine = RestoreEngine(sync_client)
-            report = await restore_engine.restore_from_backup(bkup, current_filters)
+            # 1. Enable: only adds filtering
+            enabled, enable_errors = await engine.apply(plan.to_enable, True)
+            if enable_errors:
+                stopped_at = "enable"
 
-            not_restored = report["not_found"] + report["ambiguous"] + report["errors"]
-            heading = "[bold green]Restore complete![/]" if not not_restored else (
-                f"[bold red]Restore incomplete: {len(not_restored)} filter(s) not restored[/]"
-            )
-            console.print(Panel(
-                f"{heading}\n\n"
-                f"Enabled: {len(report['enabled'])}\n"
-                f"Disabled: {len(report['disabled'])}\n"
-                f"Already correct: {len(report['already_correct'])}\n"
-                f"Not found: {len(report['not_found'])}\n"
-                f"Ambiguous (left alone): {len(report['ambiguous'])}\n"
-                f"Errors: {len(report['errors'])}\n\n"
-                "[yellow]Only UI filter on/off states were restored; the Sieve script was not changed.",
-                title="Restore Report",
-            ))
+            # 2. Replace the script
+            if stopped_at is None and script_action == "upload":
+                try:
+                    uploaded = await sync_client.upload_sieve(target_script, filter_name=SIEVE_FILTER_NAME)
+                except Exception as e:
+                    uploaded = False
+                    script_status = (
+                        f"UNKNOWN: the upload raised an error ({loggable_text(str(e))}); the live script "
+                        "may or may not have changed. Check the filter in ProtonMail."
+                    )
+                else:
+                    script_status = "restored to the backed-up script" if uploaded else (
+                        "unchanged: the upload did not complete"
+                    )
+                if not uploaded:
+                    stopped_at = "upload"
 
-            for key, title in (
-                ("not_found", "Not found (deleted, or changed since the backup)"),
-                ("ambiguous", "Ambiguous, left alone"),
-                ("errors", "Errors"),
-            ):
-                if report[key]:
-                    console.print(f"\n[bold red]{title}:")
-                    for line in report[key]:
-                        console.print(f"  [red]- {escape(line)}")
-            if report["script_not_restored"]:
-                console.print(
-                    "\n[yellow]These Sieve filters' scripts differ from the backup (restore set their "
-                    "on/off state only):"
-                )
-                for name in report["script_not_restored"]:
-                    console.print(f"  [yellow]- {escape(name)}")
-            if bkup.sieve_script:
-                console.print(
-                    f"[cyan]The Sieve script captured with this backup is \"sieve_script\" in "
-                    f"{escape(str(snapshot_dir / 'backup.json'))}; paste it back into the "
-                    f"'{SIEVE_FILTER_NAME}' filter to restore the script too."
-                )
-            return not not_restored
-
+            # 3. Disable: only removes filtering, so last
+            if stopped_at is None:
+                disabled, disable_errors = await engine.apply(to_disable, False)
+                if script_action == "disable":
+                    pf_off = SIEVE_FILTER_NAME in disabled
+                    script_status = (
+                        f"'{SIEVE_FILTER_NAME}' disabled" if pf_off
+                        else f"unchanged: could not disable '{SIEVE_FILTER_NAME}'"
+                    )
         finally:
             await sync_client.close()
 
+        _print_restore_outcome(
+            plan, to_disable, enabled, enable_errors, disabled, disable_errors,
+            script_action, script_status, stopped_at, safety_id,
+        )
+        return restorable_ok and not (enable_errors or disable_errors or stopped_at)
+
     if not _run_browser_command(_run()):
         raise typer.Exit(1)
+
+
+def _print_restore_outcome(
+    plan, to_disable, enabled, enable_errors, disabled, disable_errors,
+    script_action, script_status, stopped_at, safety_id,
+) -> None:
+    """Say exactly what state the account is in after a (possibly partial) restore."""
+    complete = not (stopped_at or enable_errors or disable_errors or plan.unrestorable)
+    heading = "[bold green]Restore complete.[/]" if complete else "[bold red]Restore did NOT complete.[/]"
+    lines = [heading, ""]
+    lines.append(f"Enabled: {len(enabled)} of {len(plan.to_enable)}")
+    if script_action != "none":
+        lines.append(f"Sieve script: {escape(script_status)}")
+    if stopped_at:
+        lines.append(f"Disabled: none of {len(to_disable)} (not attempted: stopped before this step)")
+        lines.append(
+            "[yellow]Every rule from before the restore is still active alongside anything "
+            "re-enabled, so no mail is left unfiltered; some may be filtered twice.[/]"
+        )
+    else:
+        lines.append(f"Disabled: {len(disabled)} of {len(to_disable)}")
+    if plan.unrestorable:
+        lines.append(f"Not restorable (left alone): {len(plan.unrestorable)}")
+    lines.append(f"\nTo undo: restore --backup {safety_id}")
+    if not complete:
+        lines.append("To finish: fix the cause and run the same restore again (it only changes what still differs).")
+    console.print(Panel("\n".join(lines), title="Restore Report"))
+    for title, errors in (("Could not enable", enable_errors), ("Could not disable", disable_errors)):
+        if errors:
+            console.print(f"[bold red]{title}:")
+            for line in errors:
+                console.print(f"  [red]- {escape(line)}")
 
 
 @app.command()

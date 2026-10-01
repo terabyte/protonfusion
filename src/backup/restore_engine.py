@@ -1,12 +1,14 @@
-"""Restore filters' enabled/disabled state from a backup.
+"""Plan and apply the filter half of a restore: UI filters' enabled/disabled state.
 
-Restore only toggles UI filters on or off to match the backup. It does not
-create, delete or edit filters, and it never changes a Sieve script: the
-script as it was at backup time is kept in backup.json's `sieve_script`.
+The `restore` command also puts back the Sieve script captured in the
+backup; that half lives in the command, which orders the two (see
+src/main.py `restore`). This module only toggles filters on or off: it
+never creates, deletes or edits one.
 """
 
 import logging
 from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
 from src.models.backup_models import Backup
@@ -15,6 +17,9 @@ from src.scraper.protonmail_sync import ProtonMailSync
 
 logger = logging.getLogger(__name__)
 
+# (backed-up filter, live filter it was matched to)
+Pair = Tuple[ProtonMailFilter, ProtonMailFilter]
+
 
 def _identity(f: ProtonMailFilter) -> Tuple[str, str]:
     """The key a live filter must share with its backup copy to be the same filter.
@@ -22,8 +27,9 @@ def _identity(f: ProtonMailFilter) -> Tuple[str, str]:
     A wizard filter is its content (content_hash covers name, logic,
     conditions and actions), so a filter edited since the backup, or a
     different filter that happens to share the name, never matches. A
-    Sieve filter is matched by name: its script is exactly what restore
-    does not restore, so a changed script must not make it unfindable.
+    Sieve filter is matched by name: its script may legitimately differ
+    (ProtonFusion's own is rewritten by every sync), and that must not make
+    it unfindable.
     """
     if f.is_sieve:
         return ("sieve", f.name)
@@ -38,57 +44,58 @@ def _by_identity(filters: List[ProtonMailFilter]) -> Dict[Tuple[str, str], List[
     return groups
 
 
+@dataclass
+class RestorePlan:
+    """What restoring a backup's filter states would change, decided before any click.
+
+    to_enable / to_disable pair each backed-up filter with the live row it
+    was matched to. The lists of strings carry a name and, for the ones
+    that cannot be restored, the reason.
+    """
+    to_enable: List[Pair] = field(default_factory=list)
+    to_disable: List[Pair] = field(default_factory=list)
+    already_correct: List[str] = field(default_factory=list)
+    skipped: List[str] = field(default_factory=list)      # archived/deprecated, not on ProtonMail
+    not_found: List[str] = field(default_factory=list)
+    ambiguous: List[str] = field(default_factory=list)
+    script_differs: List[str] = field(default_factory=list)  # Sieve filters whose script changed
+
+    @property
+    def unrestorable(self) -> List[str]:
+        """Every backed-up filter this plan cannot put back, with the reason."""
+        return self.not_found + self.ambiguous
+
+
 class RestoreEngine:
     """Restore filter state from a backup."""
 
     def __init__(self, sync: ProtonMailSync):
         self.sync = sync
 
-    async def restore_from_backup(self, backup: Backup, current_filters: List[ProtonMailFilter]) -> dict:
-        """Enable or disable each live filter to match its state in the backup.
+    @staticmethod
+    def plan(backup: Backup, current_filters: List[ProtonMailFilter]) -> RestorePlan:
+        """Match each backed-up filter to a live row and decide what to toggle.
 
-        Each backup filter is paired with the live filter that has the same
-        identity (see _identity), and the toggle is set on that live row by
-        position plus name (ProtonMailSync.set_row_enabled), so a duplicate
-        name never toggles the wrong row. Identical copies (same content)
-        are paired in row order when the backup and the account hold the
-        same number of them; any other mismatch in count is ambiguous and
-        nothing in that group is touched.
-
-        Returns a report dict of lists of filter names (errors and the
-        not-restored lists carry a reason): enabled, disabled,
-        already_correct, skipped (archived/deprecated, not on ProtonMail),
-        not_found, ambiguous, errors, and script_not_restored (Sieve filters
-        whose script differs from the backup; their toggle is still set).
+        Pairs by _identity. Identical copies (same content) pair in row
+        order when the backup and the account hold the same number of
+        them; any other mismatch in count is ambiguous and nothing in that
+        group is touched, as is a Sieve name shared by several filters.
         """
-        report = {
-            "enabled": [],
-            "disabled": [],
-            "skipped": [],
-            "not_found": [],
-            "ambiguous": [],
-            "already_correct": [],
-            "errors": [],
-            "script_not_restored": [],
-        }
-
+        plan = RestorePlan()
         eligible = []
         for f in backup.filters:
             # Archived/deprecated filters are not on ProtonMail
             if f.status in (FilterStatus.ARCHIVED, FilterStatus.DEPRECATED):
-                report["skipped"].append(f.name)
+                plan.skipped.append(f.name)
             else:
                 eligible.append(f)
 
         current_groups = _by_identity(current_filters)
-        pairs: List[Tuple[ProtonMailFilter, ProtonMailFilter]] = []
         for key, backed_up in _by_identity(eligible).items():
             live = current_groups.get(key, [])
             if not live:
-                reason = "not in the account, or changed since the backup"
                 for f in backed_up:
-                    report["not_found"].append(f"{f.name}: {reason}")
-                    logger.warning("Filter '%s' %s", f.name, reason)
+                    plan.not_found.append(f"{f.name}: not in the account, or changed since the backup")
                 continue
             # A Sieve filter is matched by name alone, so pairing several by
             # order would be a guess; identical wizard filters are
@@ -99,32 +106,64 @@ class RestoreEngine:
                     "same identity; cannot tell which is which"
                 )
                 for f in backed_up:
-                    report["ambiguous"].append(f"{f.name}: {reason}")
-                    logger.warning("Filter '%s': %s", f.name, reason)
+                    plan.ambiguous.append(f"{f.name}: {reason}")
                 continue
-            pairs.extend(zip(backed_up, live))
-
-        for backed_up, live in pairs:
-            name = backed_up.name
-            if backed_up.is_sieve and backed_up.content_hash != live.content_hash:
-                report["script_not_restored"].append(name)
-            if backed_up.enabled == live.enabled:
-                report["already_correct"].append(name)
-                continue
-            try:
-                if await self.sync.set_row_enabled(live.priority, live.name, backed_up.enabled):
-                    report["enabled" if backed_up.enabled else "disabled"].append(name)
+            for backed, current in zip(backed_up, live):
+                if backed.is_sieve and backed.content_hash != current.content_hash:
+                    plan.script_differs.append(backed.name)
+                if backed.enabled == current.enabled:
+                    plan.already_correct.append(backed.name)
+                elif backed.enabled:
+                    plan.to_enable.append((backed, current))
                 else:
-                    verb = "enable" if backed_up.enabled else "disable"
-                    report["errors"].append(f"{name}: failed to {verb} (row {live.priority} not found unambiguously)")
-            except Exception as e:
-                report["errors"].append(f"{name}: {e}")
-                logger.error("Error restoring filter '%s': %s", name, e)
+                    plan.to_disable.append((backed, current))
+        return plan
 
+    async def apply(self, pairs: List[Pair], enabled: bool) -> Tuple[List[str], List[str]]:
+        """Set each matched live row to `enabled`, by row position confirmed by name.
+
+        Uses ProtonMailSync.set_row_enabled, so a shared name never toggles
+        the wrong row. Carries on past a failure. Returns (names done,
+        error lines naming each failure).
+        """
+        done, errors = [], []
+        verb = "enable" if enabled else "disable"
+        for backed, live in pairs:
+            try:
+                if await self.sync.set_row_enabled(live.priority, live.name, enabled):
+                    done.append(backed.name)
+                else:
+                    errors.append(f"{backed.name}: failed to {verb} (row {live.priority} not found unambiguously)")
+            except Exception as e:
+                errors.append(f"{backed.name}: failed to {verb}: {e}")
+                logger.error("Error restoring filter '%s': %s", backed.name, e)
+        return done, errors
+
+    async def restore_from_backup(self, backup: Backup, current_filters: List[ProtonMailFilter]) -> dict:
+        """Plan, then enable before disabling, and return a report dict.
+
+        Enabling first means a failure part-way leaves extra filters on,
+        never a rule switched off. Report keys (lists): enabled, disabled,
+        already_correct, skipped, not_found, ambiguous, errors,
+        script_not_restored.
+        """
+        plan = self.plan(backup, current_filters)
+        enabled, enable_errors = await self.apply(plan.to_enable, True)
+        disabled, disable_errors = await self.apply(plan.to_disable, False)
+        report = {
+            "enabled": enabled,
+            "disabled": disabled,
+            "skipped": plan.skipped,
+            "not_found": plan.not_found,
+            "ambiguous": plan.ambiguous,
+            "already_correct": plan.already_correct,
+            "errors": enable_errors + disable_errors,
+            "script_not_restored": plan.script_differs,
+        }
         logger.info(
             "Restore complete: %d enabled, %d disabled, %d not found, %d ambiguous, "
             "%d already correct, %d errors",
-            len(report["enabled"]), len(report["disabled"]), len(report["not_found"]),
-            len(report["ambiguous"]), len(report["already_correct"]), len(report["errors"]),
+            len(enabled), len(disabled), len(plan.not_found), len(plan.ambiguous),
+            len(plan.already_correct), len(report["errors"]),
         )
         return report

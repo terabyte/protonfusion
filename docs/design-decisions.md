@@ -12,7 +12,7 @@ The downside is fragility -- ProtonMail can change their UI at any time and brea
 
 Every design choice prioritizes reversibility:
 
-- **Disable, don't delete.** When syncing, old UI filters are disabled rather than deleted. This means you can always re-enable them manually or via the `restore` command, which toggles UI filters only and leaves the Sieve script as it is (the pre-sync script is kept in the snapshot's `backup.json` as `sieve_script`, to paste back by hand). See [Which Filters Sync Disables](#which-filters-sync-disables).
+- **Disable, don't delete.** When syncing, old UI filters are disabled rather than deleted. This means you can always re-enable them manually or via the `restore` command, which also puts back the ProtonFusion script captured in that backup (see [Restore Is a Full Rollback](#restore-is-a-full-rollback)). See [Which Filters Sync Disables](#which-filters-sync-disables).
 - **Snapshot-based operations.** Every action references a snapshot. You never modify filter data in place -- you create a new snapshot directory.
 - **Section markers in Sieve.** Generated Sieve rules are wrapped in `# === BEGIN/END ProtonFusion ===` markers. User-authored Sieve rules outside these markers are preserved during merge. This allows ProtonFusion to coexist with hand-written Sieve rules.
 - **Refuse rather than drop.** `sync` compares the live ProtonFusion section with the new one and refuses, before disabling or uploading anything, if any rule would disappear. See [Refusing to Drop Live Rules](#refusing-to-drop-live-rules).
@@ -161,3 +161,12 @@ document.querySelector('.CodeMirror').CodeMirror.setValue(script)
 ```
 
 This properly triggers change events and enables the Save button.
+
+## Restore Is a Full Rollback
+
+`restore --backup <snapshot>` puts back both halves of a sync: the UI filters' on/off states and the `ProtonFusion Consolidated` script (`backup.json`'s `sieve_script`). It previews, asks, and saves a safety backup of the current state first (not made `latest`, since after the restore it no longer describes the account), so the restore can itself be undone.
+
+The order is chosen so a failure part-way never leaves mail unfiltered: enable the filters the backup has on, then replace the script, then disable the filters the backup has off. Until the last step every rule from both the current and the restored state is active, so the worst a failure leaves is a rule applied twice. It stops at the first failed enable or a failed upload (an upload that raises is reported as leaving the script in an unknown state) and reports what was done.
+
+Filters are matched by content hash and toggled by row position confirmed by name, as `sync` does; a Sieve filter is matched by name, since its script is exactly what may differ. If the backup holds no script while the account has one, restore refuses unless `--allow-empty-script`, which disables the ProtonFusion filter rather than uploading an empty script.
+
