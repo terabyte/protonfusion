@@ -140,20 +140,40 @@ def incomplete_in_script(
     source_filters: Iterable[ProtonMailFilter],
     script_fact_set: AbstractSet[Fact],
     manifest_hashes: AbstractSet[str] = frozenset(),
+    excluded_hashes: AbstractSet[str] = frozenset(),
+    trusted: Optional[Iterable[ProtonMailFilter]] = None,
 ) -> List[ProtonMailFilter]:
-    """The incomplete filters (backup or archive) whose rule is in the script being uploaded.
+    """The incomplete filters (backup or archive) whose rule the script being uploaded draws on.
 
-    A filter's rule counts as in the script when its generated facts are,
-    or when a manifest that describes this script lists its content_hash
-    (which catches a rule the current generator would no longer produce).
+    `manifest_hashes` and `excluded_hashes` come from a manifest that
+    describes this script: the filters consolidate put in it (including
+    any it put in under --allow-incomplete), and the incomplete ones it
+    left out. A listed filter always counts, which catches a rule the
+    current generator would no longer produce. A left-out one never does:
+    consolidate did not use what was read of it, so a matching rule in the
+    script came from somewhere else. Any other incomplete filter counts
+    when taking it out would change the script's facts
+    (adds_rules_to_script): if a complete filter (`trusted`, by default the
+    complete filters among `source_filters`) generates the same rules,
+    the script holds them on that filter's account.
     Each filter is listed once, however many times it appears.
     """
+    source_filters = list(source_filters)
+    if trusted is None:
+        trusted = [f for f in source_filters if not incompleteness_reasons(f)]
+    justified = justified_facts(trusted, script_fact_set)
     found: List[ProtonMailFilter] = []
     seen: Set[str] = set()
     for f in source_filters:
         if f.content_hash in seen or not incompleteness_reasons(f):
             continue
-        if f.content_hash in manifest_hashes or rules_in_script(f, script_fact_set):
+        if f.content_hash in manifest_hashes:
+            in_script = True
+        elif f.content_hash in excluded_hashes:
+            in_script = False
+        else:
+            in_script = adds_rules_to_script(f, script_fact_set, justified)
+        if in_script:
             seen.add(f.content_hash)
             found.append(f)
     return found

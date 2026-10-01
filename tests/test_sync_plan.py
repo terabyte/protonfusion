@@ -146,3 +146,39 @@ def test_incomplete_in_script_by_facts_or_manifest_hash_listed_once():
         [in_script, in_script, by_hash, elsewhere, complete], facts, {by_hash.content_hash},
     )
     assert found == [in_script, by_hash]
+
+
+class TestIncompleteExemptions:
+    """V6: an incomplete filter blocks sync only if the script's rules depend on it."""
+
+    INCOMPLETE = _wizard("a@x.com").model_copy(update={"name": "same rule, half read", "scrape_issues": ["x"]})
+    COMPLETE = _wizard("a@x.com")
+
+    def test_left_out_per_manifest_is_exempt(self):
+        facts = filter_facts(self.COMPLETE)
+        found = incomplete_in_script(
+            [self.COMPLETE, self.INCOMPLETE], facts, {self.COMPLETE.content_hash}, {self.INCOMPLETE.content_hash},
+        )
+        assert found == []
+
+    def test_listed_in_manifest_always_counts(self):
+        """Put in under --allow-incomplete: listed even though a complete filter has the rule."""
+        facts = filter_facts(self.COMPLETE)
+        found = incomplete_in_script(
+            [self.COMPLETE, self.INCOMPLETE], facts, {self.COMPLETE.content_hash, self.INCOMPLETE.content_hash},
+        )
+        assert found == [self.INCOMPLETE]
+
+    def test_no_manifest_rule_accounted_for_by_complete_filter(self):
+        facts = filter_facts(self.COMPLETE)
+        assert incomplete_in_script([self.COMPLETE, self.INCOMPLETE], facts) == []
+
+    def test_no_manifest_rule_only_from_incomplete_filter_counts(self):
+        facts = filter_facts(self.INCOMPLETE)
+        assert incomplete_in_script([self.INCOMPLETE], facts) == [self.INCOMPLETE]
+
+    def test_complete_filter_outside_script_does_not_account(self):
+        """A complete filter whose rules are not all in the script vouches for nothing."""
+        facts = filter_facts(self.INCOMPLETE)
+        found = incomplete_in_script([self.INCOMPLETE], facts, trusted=[_wizard("z@x.com")])
+        assert found == [self.INCOMPLETE]

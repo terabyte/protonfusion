@@ -1287,8 +1287,8 @@ def _refuse_incomplete_sources(incomplete: List[ProtonMailFilter], allow_incompl
     if not incomplete:
         return
     console.print(
-        f"[bold red]This script holds rules from {len(incomplete)} filter(s) that were not read in "
-        "full; their rules may be wider or narrower than the real filters, or missing labels:"
+        f"[bold red]This script holds rules taken from {len(incomplete)} filter(s) not fully read when "
+        "backed up. Their rules may be wider or narrower than the real filters, or missing labels:"
     )
     for f in incomplete:
         console.print(f"  [red]- {escape(f.name)}")
@@ -1299,7 +1299,8 @@ def _refuse_incomplete_sources(incomplete: List[ProtonMailFilter], allow_incompl
         return
     console.print(
         "[bold red]Sync refused. No filters were disabled and nothing was uploaded.[/]\n"
-        "[yellow]Run 'backup' and 'consolidate' again, or pass --allow-incomplete."
+        "[yellow]Fix the cause and run 'backup' again, then 'consolidate' (which leaves such filters "
+        "out of the script), or pass --allow-incomplete."
     )
     raise typer.Exit(1)
 
@@ -1353,7 +1354,8 @@ def sync(
     Also refuses if the script holds rules from filters in the backup or
     archive that were not read in full (scrape issues, or no raw evidence
     because they were backed up before format 1.1), unless --allow-incomplete
-    is given.
+    is given. A filter the manifest says consolidate left out is exempt, as
+    is one whose rules a fully read filter also generates.
     It also refuses a backup that predates the strict parser (format before
     1.3, which may hold misread operators), and a script holding rules from
     archive entries taken from such a backup, unless --allow-old-snapshot
@@ -1405,12 +1407,19 @@ def sync(
     # Refused the same way when the script draws on one.
     old_entries = unverified_old_entries(archive_entries, bkup)
     old_entry_filter_ids = {id(e.filter) for e in old_entries}
-    old_in_script = old_entries_in_script(
-        old_entries,
-        [f for f in reference if id(f) not in old_entry_filter_ids and not incompleteness_reasons(f)],
-        _uploaded_facts(sieve_script),
-        set(manifest.get("filter_hashes", [])) if from_manifest else set(),
-    )
+    # Complete filters not from an old archive entry: a rule one of them
+    # generates is in the script on its account
+    trusted = [f for f in reference if id(f) not in old_entry_filter_ids and not incompleteness_reasons(f)]
+    script_facts_uploaded = _uploaded_facts(sieve_script)
+    # What a manifest describing this script says went into it, and which
+    # incomplete filters consolidate left out of it
+    in_script_hashes: set = set()
+    left_out_hashes: set = set()
+    if from_manifest:
+        in_script_hashes = set(manifest.get("filter_hashes", []))
+        in_script_hashes |= {d.get("content_hash") for d in manifest.get("incomplete_included", [])}
+        left_out_hashes = {d.get("content_hash") for d in manifest.get("incomplete_excluded", [])}
+    old_in_script = old_entries_in_script(old_entries, trusted, script_facts_uploaded, in_script_hashes)
     if old_in_script:
         _warn_old_archive_entries(old_in_script, left_out=False)
         if allow_old_snapshot:
@@ -1425,11 +1434,12 @@ def sync(
     # A rule taken from a filter the scraper could not fully read (or one
     # backed up before format 1.1, which may be missing its labels) may be
     # wider or narrower than the real filter. Checked against the script
-    # itself, from the backup and archive, so it holds for any script.
+    # itself, from the backup and archive, so it holds for any script; a
+    # filter consolidate left out of this script (per its manifest) is
+    # exempt, so sync agrees with what consolidate reported.
     _refuse_incomplete_sources(
         incomplete_in_script(
-            reference, _uploaded_facts(sieve_script),
-            set(manifest.get("filter_hashes", [])) if from_manifest else set(),
+            reference, script_facts_uploaded, in_script_hashes, left_out_hashes, trusted=trusted,
         ),
         allow_incomplete,
     )

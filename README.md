@@ -74,7 +74,9 @@ auto-reply, a row it cannot parse, an unknown condition operator),
 saving. Pass `--allow-incomplete` to save anyway; those filters are flagged in
 `backup.json`, `consolidate` leaves them out of the script (listing them and
 recording them in `manifest.json`; `--allow-incomplete` includes them as read,
-with a warning) and `cleanup` will not delete them.
+with a warning), `sync` refuses a script that holds their rules (`--allow-incomplete`
+to override; one `consolidate` left out does not count, nor does a rule a fully
+read filter also generates) and `cleanup` will not delete them.
 
 ### 5. Analyze consolidation opportunities
 

@@ -1086,3 +1086,42 @@ def test_misread_rule_from_old_snapshot_does_not_survive_rebackup(cli_snapshots_
     result = runner.invoke(app, ["sync"])
     uploads = [c[1] for c in FakeSync.calls if c[0] == "upload"]
     assert not any('"receipt"' in u for u in uploads), result.output
+
+
+class TestLeftOutIncompleteFilterDoesNotBlockSync:
+    """V6: an incomplete filter consolidate left out of the script does not block
+    sync because what was read of it equals a complete filter's rule."""
+
+    @pytest.fixture
+    def account(self, cli_snapshots_dir, fake_sync):
+        complete = _filter("a@x.com", folder="News")
+        half_read = ProtonMailFilter(**{
+            **complete.model_dump(), "name": "News from a, no receipts",
+            "scrape_issues": ["condition 2: unknown operator 'does not contain'"],
+        })
+        BackupManager(cli_snapshots_dir).create_backup([complete, half_read])
+        FakeScraper.filters = [complete, half_read]
+        return cli_snapshots_dir
+
+    def test_sync_proceeds_with_manifest(self, account, fake_sync):
+        result = runner.invoke(app, ["consolidate"])
+        assert "Left out of the script: 1" in result.output
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 0, result.output
+        assert "not fully read when backed up" not in result.output
+        assert any(c[0] == "upload" for c in fake_sync.calls)
+        # Left enabled, as consolidate said
+        assert ("disable", "News from a, no receipts") not in fake_sync.calls
+
+    def test_sync_proceeds_without_manifest(self, account, fake_sync, tmp_path):
+        path = tmp_path / "s.sieve"
+        path.write_text(_section_for([_filter("a@x.com", folder="News")]))
+        result = runner.invoke(app, ["sync", "--sieve", str(path)])
+        assert result.exit_code == 0, result.output
+
+    def test_sync_still_refuses_when_included(self, account, fake_sync):
+        assert runner.invoke(app, ["consolidate", "--allow-incomplete"]).exit_code == 0
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        assert "not fully read when backed up" in result.output
+        assert "- News from a, no receipts" in result.output
