@@ -173,13 +173,13 @@ A GitHub Actions workflow runs unit + integration tests on every push and pull r
 | `snapshot set-status` | Change a filter's lifecycle status (enabled/disabled/archived/deprecated) |
 | `snapshot remove` | Remove a filter from the archive |
 
-All commands that interact with ProtonMail accept these flags:
+All commands that interact with ProtonMail accept `--state` and `--credentials-file`; most also accept the others:
 
 - `--state PATH` - Saved session file from `login` (default: `$PROTONFUSION_STORAGE_STATE`, else `~/.config/protonfusion/storage_state.json`). Used whenever it exists.
-- `--headless` - Run browser without a visible window
-- `--credentials-file .credentials` - Use stored credentials instead of manual login
-- `--manual-login` - Force manual login even if credentials file exists
-- `--workers N` / `-w N` - Number of parallel browser tabs for scraping (default: 5, max: 10). Use `-w 1` for sequential scraping.
+- `--credentials-file .credentials` - Use stored credentials instead of manual login (`login` uses it only to pre-fill the form)
+- `--headless` - Run browser without a visible window (all except `login`, which always shows the browser)
+- `--workers N` / `-w N` - Number of parallel browser tabs for scraping (default: 5, max: 10). Use `-w 1` for sequential scraping. Accepted by `backup`, `show`, `diff`, `restore` and `cleanup`.
+- `--manual-login` - Force manual login even if credentials file exists. Accepted by `backup` and `show` only.
 
 ### Examples
 
