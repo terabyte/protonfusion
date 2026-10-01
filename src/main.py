@@ -203,16 +203,14 @@ def backup(
             # as though it were whole: consolidate would build Sieve without
             # the missing parts, and cleanup would then delete the only
             # complete copy. Refuse unless the user explicitly accepts it.
+            # A filter that could not be parsed at all is here too, as a
+            # flagged stub (parse_scraped_filters never drops one).
             incomplete = [f for f in filters if not f.is_complete]
-            unparsed = len(raw_filters) - len(filters)
-            if incomplete or unparsed:
-                if incomplete:
-                    _print_incomplete(
-                        incomplete,
-                        f"{len(incomplete)} filter(s) could not be fully read:",
-                    )
-                if unparsed:
-                    console.print(f"[bold red]{unparsed} scraped filter(s) could not be parsed (see log above).")
+            if incomplete:
+                _print_incomplete(
+                    incomplete,
+                    f"{len(incomplete)} filter(s) could not be fully read:",
+                )
                 if not allow_incomplete:
                     console.print(
                         "[bold red]Backup NOT saved.[/] Their actions or conditions may be incomplete, "
@@ -1431,14 +1429,18 @@ def cleanup(
                 live_facts = script_facts(live_script)
         except SieveParseError as e:
             console.print(f"[red]Could not parse the live ProtonFusion section: {escape(str(e))}")
-        uncovered = [f for f in disabled if not filter_facts(f) <= live_facts]
+        # A filter that was not fully read (including an unparseable stub,
+        # which has no rules at all) cannot be shown covered: its parsed
+        # rules are only part of it, and an empty set is trivially a subset.
+        uncovered = [f for f in disabled if not f.is_complete or not filter_facts(f) <= live_facts]
         if uncovered:
             console.print(
                 f"\n[bold red]{len(uncovered)} disabled filters have rules that are NOT in the "
                 "live ProtonFusion Sieve section:"
             )
             for f in uncovered:
-                console.print(f"  [red]- {escape(f.name)}")
+                note = "" if f.is_complete else " (not fully read, so its rules cannot be checked)"
+                console.print(f"  [red]- {escape(f.name)}{note}")
             if include_uncovered:
                 console.print("[yellow]--include-uncovered given: they will be deleted too.")
             else:

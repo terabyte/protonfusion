@@ -139,6 +139,36 @@ class TestBackupGuard:
         assert data["filters"][0]["scrape_issues"] == ["label row unreadable"]
 
 
+def _unparseable_filter(name="Broken", enabled=True):
+    """A scraped dict parse_filter raises on (a condition entry that is not a dict)."""
+    raw = _raw_filter(name, enabled=enabled)
+    raw["conditions"] = [None]
+    return raw
+
+
+class TestUnparseableFilter:
+    """A filter that cannot be parsed is kept as a flagged stub, never dropped (P16)."""
+
+    def test_unparseable_filter_refuses(self, cli_snapshots_dir, fake_scraper):
+        fake_scraper.raw_filters = [_raw_filter("Good"), _unparseable_filter("Broken")]
+        result = runner.invoke(app, ["backup", "--headless"])
+        assert result.exit_code == 1
+        assert "- Broken" in result.output
+        assert "could not be parsed" in result.output
+        assert "Backup NOT saved" in result.output
+        assert not (cli_snapshots_dir / "latest").exists()
+
+    def test_allow_incomplete_keeps_flagged_stub(self, cli_snapshots_dir, fake_scraper):
+        fake_scraper.raw_filters = [_raw_filter("Good"), _unparseable_filter("Broken")]
+        result = runner.invoke(app, ["backup", "--headless", "--allow-incomplete"])
+        assert result.exit_code == 0, result.output
+        data = json.loads((cli_snapshots_dir / "latest" / "backup.json").read_text())
+        assert [f["name"] for f in data["filters"]] == ["Good", "Broken"]
+        stub = data["filters"][1]
+        assert any("could not be parsed" in i for i in stub["scrape_issues"])
+        assert stub["raw"]["conditions_text"] == "the sender"
+
+
 class FakeSync:
     """Stands in for ProtonMailSync; records which filters were deleted."""
     deleted: list = []
@@ -262,4 +292,14 @@ class TestCleanupGuard:
         result = runner.invoke(app, ["cleanup", "--headless", "--dry-run"])
         assert result.exit_code == 1
         assert "0 would be" in result.output
+        assert fake_sync.deleted == []
+
+    def test_unparseable_stub_never_counts_as_covered(self, cli_snapshots_dir, fake_scraper, fake_sync):
+        """A stub has no rules, so "all its rules are live" is vacuously true; it must
+        still be held back, even with --allow-incomplete."""
+        _backup(cli_snapshots_dir, [_unparseable_filter("Broken", enabled=False)])
+        fake_scraper.raw_filters = [_unparseable_filter("Broken", enabled=False)]
+        result = runner.invoke(app, ["cleanup", "--headless", "--allow-incomplete"], input="y\n")
+        assert result.exit_code == 1, result.output
+        assert "not fully read" in result.output
         assert fake_sync.deleted == []
