@@ -17,7 +17,17 @@ class BackupMetadata(BaseModel):
 # 1.1: filters carry raw scrape evidence (ProtonMailFilter.raw) and
 #      scrape_issues. 1.0 backups still load; see BackupManager checksums.
 # 1.2: filters carry is_sieve (Edit opened the Sieve editor, not the wizard).
-BACKUP_FORMAT_VERSION = "1.2"
+# 1.3: no new fields. Written only by versions whose parser matches scraped
+#      values exactly; earlier ones misread some operators (see
+#      STRICT_PARSER_FORMAT_VERSION).
+BACKUP_FORMAT_VERSION = "1.3"
+
+# The first format written by a strict parser. Older ProtonFusion matched
+# scraped strings by substring and fell back to defaults, so "is not" was
+# stored as "is", "does not contain" as "contains", and "begins with" or
+# "ends with" as "contains". A backup older than this may hold such
+# misread conditions, which nothing in the file can reveal.
+STRICT_PARSER_FORMAT_VERSION = "1.3"
 
 
 class Backup(BaseModel):

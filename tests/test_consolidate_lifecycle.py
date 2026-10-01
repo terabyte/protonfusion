@@ -192,3 +192,57 @@ class TestTrackedByContentHash:
         runner.invoke(app, ["consolidate"])
         archive = BackupManager(snapshots_dir).load_archive(snapshots_dir / "latest")
         assert len(archive) == 1
+
+
+class TestOldSnapshot:
+    """D4: backups from before the strict parser may hold misread operators."""
+
+    @staticmethod
+    def _set_version(snapshots_dir, version):
+        """Rewrite backup.json's format version (the checksum does not cover it
+        for formats with these fields, so the file still verifies)."""
+        path = snapshots_dir / "latest" / "backup.json"
+        data = json.loads(path.read_text())
+        data["version"] = version
+        path.write_text(json.dumps(data))
+
+    @pytest.fixture
+    def old_snapshot(self, snapshots_dir):
+        BackupManager(snapshots_dir).create_backup([_filter("Work", [SENDER_A], [LABEL_WORK])])
+        self._set_version(snapshots_dir, "1.2")
+        return snapshots_dir
+
+    def test_consolidate_warns(self, old_snapshot):
+        result = runner.invoke(app, ["consolidate"])
+        assert result.exit_code == 0, result.output
+        assert "Old Snapshot" in result.output
+        assert '"is not" was stored as "is"' in result.output
+        assert "Run 'backup' again" in result.output
+
+    def test_current_snapshot_not_warned(self, snapshots_dir):
+        BackupManager(snapshots_dir).create_backup([_filter("Work", [SENDER_A], [LABEL_WORK])])
+        result = runner.invoke(app, ["consolidate"])
+        assert result.exit_code == 0, result.output
+        assert "Old Snapshot" not in result.output
+
+    @pytest.mark.parametrize("args", [[], ["--dry-run"]])
+    def test_sync_refuses(self, old_snapshot, args):
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        result = runner.invoke(app, ["sync", *args])
+        assert result.exit_code == 1
+        assert "Sync refused" in result.output
+        assert "--allow-old-snapshot" in result.output
+
+    def test_sync_override_proceeds(self, old_snapshot):
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        result = runner.invoke(app, ["sync", "--dry-run", "--allow-old-snapshot"])
+        assert result.exit_code == 0, result.output
+        assert "--allow-old-snapshot given" in result.output
+        assert "DRY RUN" in result.output
+
+    def test_format_1_0_is_old(self):
+        from src.backup.backup_manager import predates_strict_parser
+        from src.models.backup_models import Backup, BACKUP_FORMAT_VERSION
+        assert predates_strict_parser(Backup(version="1.0"))
+        assert predates_strict_parser(Backup(version="garbage"))
+        assert not predates_strict_parser(Backup(version=BACKUP_FORMAT_VERSION))

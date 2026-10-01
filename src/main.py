@@ -23,7 +23,9 @@ from src.utils.config import (
 )
 from src.models.filter_models import ProtonMailFilter, FilterStatus
 from src.models.backup_models import Backup, ArchiveEntry
-from src.backup.backup_manager import BackupManager, BackupIntegrityError, unverified_for_deletion
+from src.backup.backup_manager import (
+    BackupManager, BackupIntegrityError, predates_strict_parser, unverified_for_deletion,
+)
 from src.backup.diff_engine import DiffEngine
 from src.backup.sync_plan import DisablePlan, carried_hashes, plan_disable
 from src.utils.private_files import write_private_file
@@ -89,6 +91,27 @@ def _without_evidence(filters: List[ProtonMailFilter]) -> List[ProtonMailFilter]
     incomplete. Carried-forward filters were never scraped and are exempt.
     """
     return [f for f in filters if f.raw is None and not is_carried(f)]
+
+
+def _warn_if_old_snapshot(bkup: Backup, backup_id: str) -> bool:
+    """Print a prominent warning if the backup predates the strict parser.
+
+    Returns True when it does. Nothing in an old backup shows which
+    conditions were misread, so the only fix is a fresh `backup`.
+    """
+    if not predates_strict_parser(bkup):
+        return False
+    console.print(Panel(
+        f"[bold red]Backup '{escape(backup_id)}' is format {escape(bkup.version)}, written by an older "
+        "ProtonFusion that misread some operators:[/]\n"
+        '  "is not" was stored as "is", "does not contain" as "contains", and "begins with" '
+        'or "ends with" as "contains".\n'
+        "A script built from it can match different (often more) mail than your filters do, and "
+        "nothing in the file shows which conditions were misread.\n\n"
+        "[bold]Run 'backup' again, then 'consolidate', before syncing.[/]",
+        title="Old Snapshot", border_style="red",
+    ))
+    return True
 
 
 def _get_credentials(credentials_file: str, manual_login: bool):
@@ -570,6 +593,7 @@ def consolidate(
     manager = BackupManager()
     bkup = manager.load_backup(backup_id)
     snapshot_dir = manager.snapshot_dir_for(backup_id)
+    _warn_if_old_snapshot(bkup, backup_id)
 
     # Build exclude set from CLI args + loaded args
     exclude_names: set[str] = set(exclude) if exclude else set()
@@ -1113,6 +1137,10 @@ def sync(
         False, "--allow-incomplete",
         help="Upload even if the script was built from filters with no raw evidence (pre-1.1 backups)",
     ),
+    allow_old_snapshot: bool = typer.Option(
+        False, "--allow-old-snapshot",
+        help="Sync from a backup written before the strict parser (format < 1.3), which may hold misread operators",
+    ),
     workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
 ):
     """Upload Sieve script and disable the UI filters it replaces (reversible).
@@ -1126,7 +1154,9 @@ def sync(
     Refuses (exit 1, nothing changed) if the new ProtonFusion section would drop
     any rule present in the live section, unless --allow-rule-removal is given.
     Also refuses if 'consolidate' built the script from filters with no raw
-    evidence (backups made before format 1.1), unless --allow-incomplete is given.
+    evidence (backups made before format 1.1), unless --allow-incomplete is given,
+    and if the backup predates the strict parser (format before 1.3, which
+    may hold misread operators), unless --allow-old-snapshot is given.
     """
     from src.scraper.protonmail_scraper import ProtonMailScraper
     from src.scraper.protonmail_sync import ProtonMailSync
@@ -1150,6 +1180,16 @@ def sync(
     sieve_script = sieve_path.read_text()
     creds = _get_credentials(credentials_file, False)
     bkup = manager.load_backup(backup_id)
+
+    if _warn_if_old_snapshot(bkup, backup_id):
+        if allow_old_snapshot:
+            console.print("[yellow]--allow-old-snapshot given: proceeding anyway.")
+        else:
+            console.print(
+                "[bold red]Sync refused. No filters were disabled and nothing was uploaded.[/]\n"
+                "[yellow]Run 'backup' and 'consolidate' again, or pass --allow-old-snapshot."
+            )
+            raise typer.Exit(1)
 
     # A script built from pre-1.1 filters may be missing their labels. The
     # manifest only describes the snapshot's own script, so it is checked

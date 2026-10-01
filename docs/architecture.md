@@ -237,7 +237,7 @@ snapshots/
 
 Contains the full Pydantic-serialized `Backup` object: metadata (filter counts, account email, tool version), the list of `ProtonMailFilter` objects, the existing Sieve script (captured from the account at backup time), and a SHA-256 checksum for integrity verification.
 
-`version` is `1.2`: each filter carries `raw`, `scrape_issues` (added in 1.1) and `is_sieve` (added in 1.2). Older backups still load, and their checksum is verified without the fields their format lacked. For a backup without `is_sieve`, a filter with a captured `raw.sieve_text` is read as a Sieve filter.
+`version` is `1.3`: each filter carries `raw`, `scrape_issues` (added in 1.1) and `is_sieve` (added in 1.2); 1.3 adds no fields and marks a backup written by the strict parser (older ones may hold misread operators, so `consolidate` warns about them and `sync` refuses them without `--allow-old-snapshot`). Older backups still load, and their checksum is verified without the fields their format lacked. For a backup without `is_sieve`, a filter with a captured `raw.sieve_text` is read as a Sieve filter.
 
 `cleanup` deletes a disabled filter only if the latest snapshot's `backup.json` or `archive.json` holds a copy with the same `content_hash`, no `scrape_issues`, and non-null `raw` (see `unverified_for_deletion` in `backup_manager.py`). Override with `--allow-incomplete`.
 

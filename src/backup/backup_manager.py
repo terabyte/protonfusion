@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Tuple
 
 from src.models.backup_models import (
     Backup, BackupMetadata, Archive, ArchiveEntry, BACKUP_FORMAT_VERSION,
+    STRICT_PARSER_FORMAT_VERSION,
 )
 from src.models.filter_models import ProtonMailFilter
 from src.utils.config import SNAPSHOTS_DIR, TOOL_VERSION
@@ -27,6 +28,24 @@ FIELDS_ADDED_AFTER = {
     "1.0": EVIDENCE_FIELDS | {"is_sieve"},
     "1.1": {"is_sieve"},
 }
+
+
+def _version_tuple(version: str) -> Tuple[int, ...]:
+    """"1.2" -> (1, 2). Anything unparsable reads as (0,), i.e. oldest."""
+    try:
+        return tuple(int(part) for part in version.split("."))
+    except (AttributeError, ValueError):
+        return (0,)
+
+
+def predates_strict_parser(backup: Backup) -> bool:
+    """True if the backup was written before the parser matched values exactly.
+
+    Such a backup may hold conditions whose operator was misread (see
+    STRICT_PARSER_FORMAT_VERSION), so building a script from it can widen
+    or invert rules.
+    """
+    return _version_tuple(backup.version) < _version_tuple(STRICT_PARSER_FORMAT_VERSION)
 
 
 def compute_checksum(filters: List[ProtonMailFilter], sieve_script: str, version: str) -> str:

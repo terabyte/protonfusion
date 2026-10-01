@@ -290,7 +290,7 @@ class TestBackupManager:
             data = json.load(f)
 
         assert "version" in data
-        assert data["version"] == "1.2"
+        assert data["version"] == "1.3"
 
     def test_backup_contains_timestamp(self, temp_snapshots_dir, sample_filters_list):
         """Test that saved backup contains timestamp."""
@@ -591,7 +591,7 @@ class TestBackupFormatVersions:
         )
         manager.create_backup([f])
         data = json.loads((manager.snapshot_dir_for("latest") / "backup.json").read_text())
-        assert data["version"] == "1.2"
+        assert data["version"] == "1.3"
         assert data["filters"][0]["raw"]["actions_text"] == "Label as\nWork"
         assert data["filters"][0]["scrape_issues"] == ["label row unreadable"]
 
