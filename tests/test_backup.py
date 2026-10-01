@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from src.backup.backup_manager import BackupManager, compute_checksum
+from src.backup.backup_manager import BackupManager, compute_checksum, unverified_for_deletion
 from src.models.backup_models import Backup, BackupMetadata, ArchiveEntry, Archive
 from src.models.filter_models import (
     ProtonMailFilter, FilterCondition, FilterAction, FilterStatus,
@@ -597,3 +597,42 @@ class TestBackupFormatVersions:
         with_evidence = ProtonMailFilter(name="X", raw=ScrapeEvidence(actions_text="a"))
         assert compute_checksum([plain], "", "1.0") == compute_checksum([with_evidence], "", "1.0")
         assert compute_checksum([plain], "", "1.1") != compute_checksum([with_evidence], "", "1.1")
+
+
+class TestUnverifiedForDeletion:
+    """Unit tests for the cleanup safety rule."""
+
+    def _f(self, name="F", raw=True, issues=None, label="Work"):
+        return ProtonMailFilter(
+            name=name,
+            actions=[FilterAction(type=ActionType.LABEL, parameters={"label": label})],
+            raw=ScrapeEvidence(actions_text="Label as") if raw else None,
+            scrape_issues=issues or [],
+        )
+
+    def test_complete_copy_is_verified(self):
+        assert unverified_for_deletion([self._f()], [self._f()]) == []
+
+    def test_one_good_copy_among_several_suffices(self):
+        copies = [self._f(raw=False), self._f()]
+        assert unverified_for_deletion([self._f()], copies) == []
+
+    def test_incomplete_live_scrape(self):
+        [(f, reason)] = unverified_for_deletion([self._f(issues=["boom"])], [self._f()])
+        assert "boom" in reason
+
+    def test_no_copy(self):
+        [(f, reason)] = unverified_for_deletion([self._f()], [])
+        assert "no backup copy" in reason
+
+    def test_copy_differs(self):
+        [(f, reason)] = unverified_for_deletion([self._f()], [self._f(label="Other")])
+        assert "differs" in reason
+
+    def test_copy_without_evidence(self):
+        [(f, reason)] = unverified_for_deletion([self._f()], [self._f(raw=False)])
+        assert "no raw evidence" in reason
+
+    def test_incomplete_copy(self):
+        [(f, reason)] = unverified_for_deletion([self._f()], [self._f(issues=["label row unreadable"])])
+        assert "label row unreadable" in reason

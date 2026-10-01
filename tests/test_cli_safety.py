@@ -113,3 +113,106 @@ class TestBackupGuard:
         data = json.loads((cli_snapshots_dir / "latest" / "backup.json").read_text())
         assert data["filters"][0]["scrape_issues"] == ["label row unreadable"]
 
+
+class FakeSync:
+    """Stands in for ProtonMailSync; records which filters were deleted."""
+    deleted: list = []
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def initialize(self):
+        pass
+
+    async def login(self):
+        pass
+
+    async def navigate_to_filters(self):
+        pass
+
+    async def delete_filter(self, name):
+        FakeSync.deleted.append(name)
+        return True
+
+    async def close(self):
+        pass
+
+
+@pytest.fixture
+def fake_sync(monkeypatch):
+    import src.scraper.protonmail_sync
+    monkeypatch.setattr(src.scraper.protonmail_sync, "ProtonMailSync", FakeSync)
+    FakeSync.deleted = []
+    return FakeSync
+
+
+def _backup(snapshots_dir, raw_filters):
+    """Write a snapshot holding the given scraped filters."""
+    from src.parser.filter_parser import parse_scraped_filters
+    BackupManager(snapshots_dir).create_backup(parse_scraped_filters(raw_filters))
+
+
+class TestCleanupGuard:
+    """`cleanup` must not delete a filter without a complete backup copy."""
+
+    def test_deletes_verified_filter(self, cli_snapshots_dir, fake_scraper, fake_sync):
+        _backup(cli_snapshots_dir, [_raw_filter("Old", enabled=False)])
+        fake_scraper.raw_filters = [_raw_filter("Old", enabled=False)]
+        result = runner.invoke(app, ["cleanup", "--headless"], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert fake_sync.deleted == ["Old"]
+
+    def test_refuses_incomplete_backup_copy(self, cli_snapshots_dir, fake_scraper, fake_sync):
+        _backup(cli_snapshots_dir, [
+            _raw_filter("Safe", enabled=False),
+            _raw_filter("Partial", enabled=False, issues=["label row unreadable"]),
+        ])
+        fake_scraper.raw_filters = [
+            _raw_filter("Safe", enabled=False),
+            _raw_filter("Partial", enabled=False),
+        ]
+        result = runner.invoke(app, ["cleanup", "--headless"], input="y\n")
+        assert result.exit_code == 1
+        assert "Refusing to delete 1" in result.output
+        assert "Partial" in result.output
+        assert "label row unreadable" in result.output
+        assert fake_sync.deleted == ["Safe"]
+
+    def test_refuses_backup_without_raw_evidence(self, cli_snapshots_dir, fake_scraper, fake_sync):
+        """A pre-1.1 backup holds no evidence; it is exactly the kind that lost labels."""
+        _backup(cli_snapshots_dir, [_raw_filter("Legacy", enabled=False, raw=False)])
+        fake_scraper.raw_filters = [_raw_filter("Legacy", enabled=False)]
+        result = runner.invoke(app, ["cleanup", "--headless"], input="y\n")
+        assert result.exit_code == 1
+        assert "no raw evidence" in result.output
+        assert fake_sync.deleted == []
+
+    def test_refuses_when_backup_differs_from_live(self, cli_snapshots_dir, fake_scraper, fake_sync):
+        """An old backup that recorded no label does not cover a live filter that has one."""
+        _backup(cli_snapshots_dir, [_raw_filter("Labelled", enabled=False, actions=[])])
+        fake_scraper.raw_filters = [_raw_filter("Labelled", enabled=False)]
+        result = runner.invoke(app, ["cleanup", "--headless"], input="y\n")
+        assert result.exit_code == 1
+        assert "differs from the live filter" in result.output
+        assert fake_sync.deleted == []
+
+    def test_refuses_without_any_snapshot(self, cli_snapshots_dir, fake_scraper, fake_sync):
+        fake_scraper.raw_filters = [_raw_filter("Orphan", enabled=False)]
+        result = runner.invoke(app, ["cleanup", "--headless"], input="y\n")
+        assert result.exit_code == 1
+        assert "no backup copy" in result.output
+        assert fake_sync.deleted == []
+
+    def test_allow_incomplete_overrides(self, cli_snapshots_dir, fake_scraper, fake_sync):
+        _backup(cli_snapshots_dir, [_raw_filter("Partial", enabled=False, issues=["x"])])
+        fake_scraper.raw_filters = [_raw_filter("Partial", enabled=False)]
+        result = runner.invoke(app, ["cleanup", "--headless", "--allow-incomplete"], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert fake_sync.deleted == ["Partial"]
+
+    def test_dry_run_reports_refusal(self, cli_snapshots_dir, fake_scraper, fake_sync):
+        fake_scraper.raw_filters = [_raw_filter("Orphan", enabled=False)]
+        result = runner.invoke(app, ["cleanup", "--headless", "--dry-run"])
+        assert result.exit_code == 1
+        assert "0 would be" in result.output
+        assert fake_sync.deleted == []

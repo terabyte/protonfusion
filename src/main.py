@@ -21,7 +21,7 @@ from src.utils.config import (
 )
 from src.models.filter_models import ProtonMailFilter, FilterStatus
 from src.models.backup_models import Backup, ArchiveEntry
-from src.backup.backup_manager import BackupManager
+from src.backup.backup_manager import BackupManager, unverified_for_deletion
 from src.backup.diff_engine import DiffEngine
 from src.parser.filter_parser import parse_scraped_filters
 from src.consolidator.consolidation_engine import ConsolidationEngine
@@ -853,10 +853,16 @@ def cleanup(
     credentials_file: str = typer.Option("", "--credentials-file", help="Credentials file"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview what will be deleted"),
     workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
+    allow_incomplete: bool = typer.Option(
+        False, "--allow-incomplete",
+        help="Also delete disabled filters whose backup copy is missing, incomplete, or lacks raw evidence",
+    ),
 ):
     """Delete all disabled filters (with confirmation).
 
     Auto-archives disabled filters before deletion to preserve them for future consolidation.
+    Refuses (exit 1) to delete any filter without a complete backup copy in the
+    latest snapshot, unless --allow-incomplete is given.
     """
     from src.scraper.protonmail_scraper import ProtonMailScraper
     from src.scraper.protonmail_sync import ProtonMailSync
@@ -881,6 +887,18 @@ def cleanup(
         if not disabled:
             console.print("[green]No disabled filters to clean up.")
             return
+
+        # Deletion is the one irreversible step, so each filter needs a
+        # backup copy known to be whole. Checked against the snapshot as it
+        # was before the auto-archive below adds the live scrape to it.
+        backed_up: List[ProtonMailFilter] = []
+        try:
+            backed_up = list(manager.load_backup("latest").filters)
+            backed_up += [e.filter for e in manager.load_archive(manager.snapshot_dir_for("latest"))]
+        except FileNotFoundError:
+            pass  # No snapshot: every filter is unverified
+        unverified = unverified_for_deletion(disabled, backed_up)
+        unverified_ids = {id(f) for f, _ in unverified}
 
         # Auto-archive any disabled filters missing from the archive
         try:
@@ -908,15 +926,48 @@ def cleanup(
 
         console.print(f"\n[bold yellow]Found {len(disabled)} disabled filters:")
         for f in disabled:
-            console.print(f"  [yellow]- {f.name}")
+            console.print(f"  [yellow]- {escape(f.name)}")
+
+        refused = []
+        if unverified:
+            if allow_incomplete:
+                console.print(
+                    f"\n[bold yellow]--allow-incomplete given: deleting {len(unverified)} filter(s) "
+                    "without a verified backup copy:"
+                )
+            else:
+                refused = unverified
+                console.print(
+                    f"\n[bold red]Refusing to delete {len(unverified)} filter(s) without a verified "
+                    "backup copy (deleting them could lose actions the backup does not hold):"
+                )
+            for f, reason in unverified:
+                console.print(f"  [red]- {escape(f.name)}[/]: {escape(reason)}")
+            if refused:
+                console.print("[yellow]Re-run 'backup', or pass --allow-incomplete to delete them anyway.")
+
+        # delete_filter() works by name, so a verified filter sharing a name
+        # with a refused one is held back too, or the wrong one could go.
+        refused_names = {f.name for f, _ in refused}
+        to_delete = [
+            f for f in disabled
+            if not (refused and id(f) in unverified_ids) and f.name not in refused_names
+        ]
 
         if dry_run:
-            console.print("\n[bold yellow]DRY RUN - No filters will be deleted.")
+            console.print(f"\n[bold yellow]DRY RUN - No filters will be deleted ({len(to_delete)} would be).")
+            if refused:
+                raise typer.Exit(1)
             return
 
-        confirm = typer.confirm(f"\nDelete {len(disabled)} disabled filters? This cannot be undone!")
+        if not to_delete:
+            raise typer.Exit(1)
+
+        confirm = typer.confirm(f"\nDelete {len(to_delete)} disabled filters? This cannot be undone!")
         if not confirm:
             console.print("[yellow]Cleanup cancelled.")
+            if refused:
+                raise typer.Exit(1)
             return
 
         sync_client = ProtonMailSync(headless=headless, credentials=creds)
@@ -926,14 +977,18 @@ def cleanup(
             await sync_client.navigate_to_filters()
 
             deleted_count = 0
-            for f in disabled:
+            for f in to_delete:
                 if await sync_client.delete_filter(f.name):
                     deleted_count += 1
-                    console.print(f"  [red]Deleted: {f.name}")
+                    console.print(f"  [red]Deleted: {escape(f.name)}")
 
-            console.print(f"\n[green]Deleted {deleted_count}/{len(disabled)} filters")
+            console.print(f"\n[green]Deleted {deleted_count}/{len(to_delete)} filters")
         finally:
             await sync_client.close()
+
+        if refused:
+            console.print(f"[bold red]{len(refused)} filter(s) were not deleted (see above).")
+            raise typer.Exit(1)
 
     asyncio.run(_run())
 
