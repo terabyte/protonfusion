@@ -43,14 +43,23 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
-### 2. See what you've got (read-only)
+### 2. Sign in once
 
 ```bash
-# Opens a browser, reads your filters, and displays them - no changes made
+# Opens a visible browser; sign in (CAPTCHA, 2FA) and the session is saved
+python -m src.main login
+```
+
+Proton puts a Human Verification CAPTCHA in front of automated logins, so sign in by hand once. The session is saved to `~/.config/protonfusion/storage_state.json` (owner-only, it holds live auth cookies) and every other command reuses it, headless included, until Proton expires it. Then run `login` again.
+
+### 3. See what you've got (read-only)
+
+```bash
+# Reads your filters and displays them - no changes made
 python -m src.main show
 ```
 
-### 3. Back up your filters
+### 4. Back up your filters
 
 ```bash
 # Same as show, but saves to a timestamped snapshot directory
@@ -59,20 +68,20 @@ python -m src.main backup
 
 Each backup creates a snapshot at `snapshots/<timestamp>/backup.json`.
 
-### 4. Analyze consolidation opportunities
+### 5. Analyze consolidation opportunities
 
 ```bash
 python -m src.main analyze --backup latest
 ```
 
-### 5. Generate consolidated Sieve script
+### 6. Generate consolidated Sieve script
 
 ```bash
 # Writes consolidated.sieve + manifest.json into the snapshot directory
 python -m src.main consolidate --backup latest
 ```
 
-### 6. Review and upload
+### 7. Review and upload
 
 Review the generated Sieve script in the snapshot dir, then:
 
@@ -140,6 +149,7 @@ A GitHub Actions workflow runs unit + integration tests on every push and pull r
 
 | Command | Description |
 |---------|-------------|
+| `login` | Sign in by hand in a visible browser and save the session for the other commands |
 | `show` | Read and display your current filters (read-only, no changes) |
 | `show-backup` | Display filters from a backup file (offline, no login) |
 | `backup` | Scrape current filters and save to a timestamped backup |
@@ -157,6 +167,7 @@ A GitHub Actions workflow runs unit + integration tests on every push and pull r
 
 All commands that interact with ProtonMail accept these flags:
 
+- `--state PATH` - Saved session file from `login` (default: `$PROTONFUSION_STORAGE_STATE`, else `~/.config/protonfusion/storage_state.json`). Used whenever it exists.
 - `--headless` - Run browser without a visible window
 - `--credentials-file .credentials` - Use stored credentials instead of manual login
 - `--manual-login` - Force manual login even if credentials file exists
@@ -165,7 +176,13 @@ All commands that interact with ProtonMail accept these flags:
 ### Examples
 
 ```bash
-# Automated backup (5 parallel tabs by default)
+# Sign in by hand once (pre-fill the form from .credentials, wait up to 15 min)
+python -m src.main login --credentials-file .credentials --timeout 900
+
+# Headless backup reusing the saved session (5 parallel tabs by default)
+python -m src.main backup --headless
+
+# Automated backup with credentials (Proton may block this with a CAPTCHA)
 python -m src.main backup --headless --credentials-file .credentials
 
 # Faster scraping with 10 parallel tabs
@@ -297,7 +314,7 @@ Only scraping (read-only) is parallelized. Sync operations (disabling filters, u
 
 ProtonMail occasionally updates their web UI, which can break the Playwright selectors. When this happens:
 
-1. Open ProtonMail settings manually: Settings gear -> All settings -> Filters
+1. Open the filters page manually: `https://account.proton.me/u/<slot>/mail/filters` (or Settings gear -> All settings -> Filters)
 2. Use browser dev tools to inspect the new element structure
 3. Update the selectors in `src/scraper/selectors.py`
 4. Run the E2E smoke tests: `pytest -m e2e --credentials-file .credentials -v`
@@ -306,7 +323,9 @@ All UI selectors are centralized in `selectors.py` to make this straightforward.
 
 ## Troubleshooting
 
-**"Login failed"** - Check that your `.credentials` file has the right format (`Username: ...` / `Password: ...`). If your account has 2FA, use `--manual-login` instead.
+**"The saved session ... has expired"** - Proton ended the saved session. Run `python -m src.main login` again.
+
+**"Login failed"** - Check that your `.credentials` file has the right format (`Username: ...` / `Password: ...`). If Proton shows Human Verification (CAPTCHA) or your account has 2FA, use `python -m src.main login` to sign in by hand and save a session.
 
 **"Playwright browser not found"** - Run `playwright install chromium`.
 

@@ -1,5 +1,16 @@
 # Plan: Single-Session Commands & Session Persistence
 
+## Status (2026-09-30)
+
+- **Part 1 (single-session `cleanup`/`restore`)**: not done. Both commands still open two browsers, but the second reuses the saved session the first one refreshed, so with a saved session neither needs a second human login.
+- **Part 2 (session persistence)**: done, in a different shape than planned below. Proton now puts a Human Verification CAPTCHA in front of automated logins, so the session is always created by a human:
+  - `login` opens a visible browser (optionally pre-filled from `--credentials-file`), waits up to `--timeout` seconds for CAPTCHA/2FA, and saves the storage state (0700 dir, 0600 file) to `--state`, default `~/.config/protonfusion/storage_state.json`, not `.protonfusion/session.json`.
+  - Every browser command takes `--state` (also `$PROTONFUSION_STORAGE_STATE`) and uses a saved session whenever the file exists. There is no opt-in `--reuse-session` flag and no `clear-session` command; delete the file to clear it.
+  - A reused session is written back on close, since Proton can rotate tokens.
+  - An expired session in a headless run raises a "run `login`" error rather than falling into a CAPTCHA timeout; headed runs warn and fall back to logging in in the window.
+  - The saved file also records the account's session slot (`/u/<slot>/`), and all URLs are built from the detected slot.
+- Related fixes on the same branch: direct navigation to `account.proton.me/u/<slot>/mail/filters` (menu clicks as fallback) and best-effort dismissal of first-run onboarding modals.
+
 ## Context
 
 Two UX issues with browser session management:

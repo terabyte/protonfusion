@@ -6,7 +6,8 @@ from pathlib import Path
 from src.utils.config import (
     load_credentials, Credentials,
     SNAPSHOTS_DIR, TOOL_VERSION,
-    PROTONMAIL_LOGIN_URL, PROTONMAIL_SETTINGS_FILTERS_URL,
+    PROTONMAIL_LOGIN_URL, MAIL_HOST, ACCOUNT_HOST, FILTERS_PATH,
+    proton_url, slot_from_url,
 )
 
 
@@ -138,9 +139,7 @@ class TestConstants:
     def test_protonmail_urls(self):
         """Test that ProtonMail URLs are defined."""
         assert PROTONMAIL_LOGIN_URL.startswith("https://")
-        assert PROTONMAIL_SETTINGS_FILTERS_URL.startswith("https://")
         assert "proton" in PROTONMAIL_LOGIN_URL.lower()
-        assert "proton" in PROTONMAIL_SETTINGS_FILTERS_URL.lower()
 
     def test_timeout_values(self):
         """Test that timeout values are imported."""
@@ -192,3 +191,67 @@ class TestPathResolution:
         # Only check if env var isn't overriding
         if not os.environ.get("PROTONFUSION_DATA_DIR"):
             assert SNAPSHOTS_DIR.parent == PROJECT_ROOT or PROJECT_ROOT in SNAPSHOTS_DIR.parents
+
+
+class TestProtonUrls:
+    """Slot-aware URL building and slot detection."""
+
+    def test_proton_url_default_slot(self):
+        assert proton_url(MAIL_HOST, "inbox") == "https://mail.proton.me/u/0/inbox"
+
+    def test_proton_url_other_slot(self):
+        assert proton_url(ACCOUNT_HOST, FILTERS_PATH, 1) == "https://account.proton.me/u/1/mail/filters"
+
+    def test_proton_url_strips_leading_slash(self):
+        assert proton_url(MAIL_HOST, "/inbox", 2) == "https://mail.proton.me/u/2/inbox"
+
+    @pytest.mark.parametrize("url,slot", [
+        ("https://mail.proton.me/u/1/inbox", 1),
+        ("https://mail.proton.me/u/0/inbox#x", 0),
+        ("https://account.proton.me/u/3/mail/filters", 3),
+        ("https://mail.proton.me/u/12", 12),
+    ])
+    def test_slot_from_url(self, url, slot):
+        assert slot_from_url(url) == slot
+
+    @pytest.mark.parametrize("url", [
+        "",
+        "about:blank",
+        "https://account.proton.me/login",
+        "https://account.proton.me/apps",
+        "https://mail.proton.me/inbox",
+        "https://example.com/u/1/inbox",
+        "https://mail.proton.me/u/x/inbox",
+    ])
+    def test_slot_from_url_none(self, url):
+        assert slot_from_url(url) is None
+
+
+class TestStorageStatePath:
+    """--state beats $PROTONFUSION_STORAGE_STATE beats the XDG default."""
+
+    def test_cli_value_wins(self, monkeypatch, tmp_path):
+        from src.utils.config import resolve_storage_state_path
+        monkeypatch.setenv("PROTONFUSION_STORAGE_STATE", str(tmp_path / "env.json"))
+        assert resolve_storage_state_path(str(tmp_path / "cli.json")) == tmp_path / "cli.json"
+
+    def test_env_used_without_cli(self, monkeypatch, tmp_path):
+        from src.utils.config import resolve_storage_state_path
+        monkeypatch.setenv("PROTONFUSION_STORAGE_STATE", str(tmp_path / "env.json"))
+        assert resolve_storage_state_path(None) == tmp_path / "env.json"
+
+    def test_default_under_xdg_config(self, monkeypatch, tmp_path):
+        from src.utils.config import resolve_storage_state_path
+        monkeypatch.delenv("PROTONFUSION_STORAGE_STATE", raising=False)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        assert resolve_storage_state_path("") == tmp_path / "protonfusion" / "storage_state.json"
+
+    def test_default_without_xdg(self, monkeypatch):
+        from src.utils.config import resolve_storage_state_path
+        monkeypatch.delenv("PROTONFUSION_STORAGE_STATE", raising=False)
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        assert resolve_storage_state_path() == Path.home() / ".config" / "protonfusion" / "storage_state.json"
+
+    def test_tilde_expanded(self, monkeypatch):
+        from src.utils.config import resolve_storage_state_path
+        assert resolve_storage_state_path("~/s.json") == Path.home() / "s.json"

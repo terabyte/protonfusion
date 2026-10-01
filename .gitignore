@@ -7,6 +7,8 @@ snapshots/
 *.pem
 *.key
 .test-acct-recovery-phrase
+# Saved browser session (live auth cookies)
+storage_state*.json
 
 # Python
 __pycache__/
