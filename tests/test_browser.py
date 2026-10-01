@@ -9,7 +9,7 @@ import json
 import pytest
 
 from src.scraper import selectors
-from src.scraper.browser import ProtonMailBrowser, SessionExpiredError
+from src.scraper.browser import ProtonMailBrowser, SessionExpiredError, SieveReadError
 
 
 class FakePage:
@@ -344,3 +344,113 @@ class TestLoggedUrls:
             await browser._assert_filter_page_structure()
         assert "SECRET" not in str(excinfo.value)
         assert "https://account.proton.me/u/0/mail/filters" in str(excinfo.value)
+
+
+class FakeElement:
+    """A row, cell or button: an aria-label, inner text and child elements."""
+
+    def __init__(self, aria=None, text="", children=None, on_click=None):
+        self.aria = aria
+        self.text = text
+        self.children = children or {}
+        self.on_click = on_click
+
+    async def query_selector(self, selector):
+        found = self.children.get(selector)
+        return found[0] if isinstance(found, list) else found
+
+    async def query_selector_all(self, selector):
+        found = self.children.get(selector, [])
+        return found if isinstance(found, list) else [found]
+
+    async def get_attribute(self, name):
+        return self.aria
+
+    async def inner_text(self):
+        return self.text
+
+    async def click(self):
+        if self.on_click:
+            self.on_click()
+
+
+class SievePage(FakePage):
+    """A filters page holding one Sieve filter row whose Edit opens the editor."""
+
+    def __init__(self, script="", rows=True, editor_opens=True, evaluate_error=None):
+        super().__init__("https://account.proton.me/u/0/mail/filters")
+        self.script = script
+        self.evaluate_error = evaluate_error
+        self.editor_opens = editor_opens
+        edit = FakeElement(aria="Edit filter ProtonFusion Consolidated", on_click=self._open)
+        row = FakeElement(children={selectors.FILTER_EDIT_BUTTON: edit})
+        self.section = FakeElement(children={selectors.FILTER_TABLE_ROWS: [row] if rows else []})
+
+    def _open(self):
+        if self.editor_opens:
+            self.present.add(selectors.SIEVE_EDITOR_CM)
+
+    async def query_selector(self, selector):
+        if selector == selectors.CUSTOM_FILTERS_SECTION:
+            return self.section
+        return None
+
+    async def wait_for_timeout(self, ms):
+        pass
+
+    async def evaluate(self, js):
+        if self.evaluate_error:
+            raise self.evaluate_error
+        return self.script
+
+
+def sieve_browser(page) -> ProtonMailBrowser:
+    browser = ProtonMailBrowser(headless=True)
+    browser.page = page
+    return browser
+
+
+class TestReadSieveScript:
+    """"" only for a genuinely absent or empty script; a failed read raises."""
+
+    @pytest.mark.asyncio
+    async def test_reads_script(self):
+        browser = sieve_browser(SievePage(script="  keep;\n"))
+        assert await browser.read_sieve_script("ProtonFusion Consolidated") == "keep;"
+
+    @pytest.mark.asyncio
+    async def test_empty_script_is_empty(self):
+        browser = sieve_browser(SievePage(script=""))
+        assert await browser.read_sieve_script("ProtonFusion Consolidated") == ""
+
+    @pytest.mark.asyncio
+    async def test_no_such_filter_is_empty(self):
+        browser = sieve_browser(SievePage(rows=False))
+        assert await browser.read_sieve_script("ProtonFusion Consolidated") == ""
+
+    @pytest.mark.asyncio
+    async def test_missing_filter_list_raises(self):
+        browser = sieve_browser(FakePage())
+        with pytest.raises(SieveReadError, match="Custom filters"):
+            await browser.read_sieve_script("ProtonFusion Consolidated")
+
+    @pytest.mark.asyncio
+    async def test_editor_that_never_opens_raises(self):
+        browser = sieve_browser(SievePage(script="keep;", editor_opens=False))
+        with pytest.raises(SieveReadError, match="editor"):
+            await browser.read_sieve_script("ProtonFusion Consolidated")
+
+    @pytest.mark.asyncio
+    async def test_editor_without_codemirror_instance_raises(self):
+        browser = sieve_browser(SievePage(script=None))
+        with pytest.raises(SieveReadError, match="CodeMirror"):
+            await browser.read_sieve_script("ProtonFusion Consolidated")
+
+    @pytest.mark.asyncio
+    async def test_any_other_error_raises_without_url_secrets(self):
+        error = TimeoutError('Timeout exceeded, navigated to "https://account.proton.me/x#sk=SECRET"')
+        browser = sieve_browser(SievePage(evaluate_error=error))
+        with pytest.raises(SieveReadError) as excinfo:
+            await browser.read_sieve_script("ProtonFusion Consolidated")
+        assert "SECRET" not in str(excinfo.value)
+        assert "Timeout exceeded" in str(excinfo.value)

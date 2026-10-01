@@ -50,6 +50,14 @@ class SessionExpiredError(RuntimeError):
     """No usable saved session, and logging in here would need a human."""
 
 
+class SieveReadError(RuntimeError):
+    """The live Sieve script could not be read.
+
+    Distinct from there being no script (read_sieve_script returns "" for
+    that): a failed read must never be treated as an empty script.
+    """
+
+
 class ProtonMailBrowser:
     """Base class for ProtonMail browser automation.
 
@@ -491,16 +499,19 @@ class ProtonMailBrowser:
 
         If filter_name is provided, looks for that named filter and opens it.
         Otherwise, opens the "Add sieve filter" modal to read the default content.
-        Returns the script text, or empty string if not found.
+
+        Returns the script text. "" means there genuinely is no script: no
+        filter by that name in the Custom filters list, or an empty one.
+        Raises SieveReadError when the read itself failed (list or editor not
+        found, timeout, any other error): callers must refuse rather than
+        treat that as "no script", or a sync would overwrite everything
+        outside the ProtonFusion section and a backup would record nothing.
         """
         page = self.page
 
         try:
-            opened = False
-
             if filter_name:
-                opened = await self._open_sieve_filter_by_name(filter_name)
-                if not opened:
+                if not await self._open_sieve_filter_by_name(filter_name):
                     logger.info("Sieve filter '%s' not found", filter_name)
                     return ""
             else:
@@ -509,13 +520,9 @@ class ProtonMailBrowser:
                 if add_btn and await add_btn.is_visible():
                     await add_btn.click()
                     await page.wait_for_timeout(ALL_SETTINGS_LOAD_MS)
-                    opened = True
                 else:
                     logger.info("No sieve filter to read (Add button not available)")
                     return ""
-
-            if not opened:
-                return ""
 
             # Wait for CodeMirror to initialize
             try:
@@ -523,14 +530,15 @@ class ProtonMailBrowser:
                     selectors.SIEVE_EDITOR_CM, timeout=ELEMENT_TIMEOUT_MS,
                 )
             except Exception:
-                logger.warning("CodeMirror editor not found in Sieve modal")
-                return ""
+                raise SieveReadError("the Sieve editor did not open")
 
-            # Read content via CodeMirror 5 API
+            # Read content via CodeMirror 5 API; null means no editor instance.
             content = await page.evaluate(
                 "() => { const cm = document.querySelector('.CodeMirror'); "
-                "return cm && cm.CodeMirror ? cm.CodeMirror.getValue() : ''; }"
+                "return cm && cm.CodeMirror ? cm.CodeMirror.getValue() : null; }"
             )
+            if content is None:
+                raise SieveReadError("the Sieve editor has no CodeMirror instance to read")
 
             # Close the modal without saving
             close_btn = await page.query_selector(
@@ -540,7 +548,7 @@ class ProtonMailBrowser:
                 await close_btn.click()
                 await page.wait_for_timeout(MODAL_TRANSITION_MS)
 
-            script = (content or "").strip()
+            script = content.strip()
             logger.info(
                 "Read Sieve script: %d chars, %d lines",
                 len(script),
@@ -548,21 +556,26 @@ class ProtonMailBrowser:
             )
             return script
 
-        except Exception as e:
+        except SieveReadError as e:
             logger.error("Failed to read Sieve script: %s", e)
-            return ""
+            raise
+        except Exception as e:
+            reason = loggable_text(str(e))
+            logger.error("Failed to read Sieve script: %s", reason)
+            raise SieveReadError(reason) from e
 
     async def _open_sieve_filter_by_name(self, name: str) -> bool:
         """Find a filter by name in the list and click its Edit button.
 
-        Returns True if the filter was found and the edit modal was opened.
-        Scoped to the Custom filters section only.
+        Returns True if the filter was found and the edit modal was opened,
+        False if no filter in the Custom filters list has that name. Raises
+        SieveReadError if the list is missing or the filter is listed but
+        could not be opened, since neither means the filter is absent.
         """
         page = self.page
         section = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
         if not section:
-            logger.warning("Custom filters section not found")
-            return False
+            raise SieveReadError("the Custom filters section was not found")
         rows = await section.query_selector_all(selectors.FILTER_TABLE_ROWS)
 
         for row in rows:
@@ -583,10 +596,11 @@ class ProtonMailBrowser:
                     edit_btn = await row.query_selector(
                         f'{selectors.FILTER_EDIT_BUTTON}, {selectors.FILTER_EDIT_BUTTON_ALT}'
                     )
-                    if edit_btn:
-                        await edit_btn.click()
-                        await page.wait_for_timeout(ALL_SETTINGS_LOAD_MS)
-                        return True
+                    if not edit_btn:
+                        raise SieveReadError(f"filter '{name}' is listed but has no Edit button")
+                    await edit_btn.click()
+                    await page.wait_for_timeout(ALL_SETTINGS_LOAD_MS)
+                    return True
 
         return False
 

@@ -34,6 +34,7 @@ def _raw_filter(name, enabled=True, issues=None, raw=True, actions=None):
 class FakeScraper:
     """Stands in for ProtonMailScraper; returns FakeScraper.raw_filters."""
     raw_filters: list = []
+    read_error = None  # set to a SieveReadError to make the live read fail
 
     def __init__(self, *args, **kwargs):
         self.account_email = "test@proton.me"
@@ -57,6 +58,8 @@ class FakeScraper:
         (the sync-safety guard); these tests exercise the backup-completeness
         guard, so the coverage guard is satisfied here.
         """
+        if FakeScraper.read_error:
+            raise FakeScraper.read_error
         from src.parser.filter_parser import parse_scraped_filters
         from src.consolidator.consolidation_engine import ConsolidationEngine
         from src.generator.sieve_generator import SieveGenerator
@@ -91,6 +94,7 @@ def cli_snapshots_dir(tmp_path, monkeypatch):
 def fake_scraper(monkeypatch):
     monkeypatch.setattr(src.scraper.protonmail_scraper, "ProtonMailScraper", FakeScraper)
     FakeScraper.raw_filters = []
+    FakeScraper.read_error = None
     return FakeScraper
 
 
@@ -115,6 +119,16 @@ class TestBackupGuard:
         assert "Has Autoreply" in result.output
         assert "filter-modal:autoreply-row" in result.output
         assert "Backup NOT saved" in result.output
+        assert not (cli_snapshots_dir / "latest").exists()
+
+    def test_failed_sieve_read_saves_nothing(self, cli_snapshots_dir, fake_scraper):
+        from src.scraper.browser import SieveReadError
+        fake_scraper.raw_filters = [_raw_filter("Good")]
+        fake_scraper.read_error = SieveReadError("the Sieve editor did not open")
+        result = runner.invoke(app, ["backup", "--headless", "--allow-incomplete"])
+        assert result.exit_code == 1
+        assert "Could not read the live Sieve script" in result.output
+        assert "the Sieve editor did not open" in result.output
         assert not (cli_snapshots_dir / "latest").exists()
 
     def test_allow_incomplete_saves_flagged(self, cli_snapshots_dir, fake_scraper):

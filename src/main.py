@@ -77,13 +77,26 @@ DEFAULT_LOGIN_TIMEOUT_S = 600
 
 
 def _run_browser_command(coro):
-    """asyncio.run a browser command, turning a dead/missing session into a clean exit."""
-    from src.scraper.browser import SessionExpiredError
+    """asyncio.run a browser command, turning expected failures into a clean exit 1.
+
+    A dead or missing session, and a live Sieve script that could not be read.
+    Every command reads the live script before it changes or saves anything,
+    so a failed read stops the run with the account and snapshots untouched,
+    rather than being taken for "no script".
+    """
+    from src.scraper.browser import SessionExpiredError, SieveReadError
 
     try:
         return asyncio.run(coro)
     except SessionExpiredError as e:
         console.print(f"[red]{e}")
+        raise typer.Exit(1)
+    except SieveReadError as e:
+        console.print(
+            f"[bold red]Could not read the live Sieve script ({escape(str(e))}).[/] "
+            "Refusing to continue: treating it as empty could lose the rules in it. "
+            "Nothing was changed or saved; try again."
+        )
         raise typer.Exit(1)
 
 
@@ -144,7 +157,8 @@ def backup(
     """Scrape current filters and save to a timestamped snapshot.
 
     Fails (exit 1, nothing saved) if any filter could not be fully read,
-    unless --allow-incomplete is given.
+    unless --allow-incomplete is given, and always if the live Sieve script
+    could not be read.
     """
     from src.scraper.protonmail_scraper import ProtonMailScraper
 
@@ -197,6 +211,9 @@ def backup(
                     raise typer.Exit(1)
                 console.print("[yellow]--allow-incomplete given: saving with these filters flagged.")
 
+            # Raises SieveReadError on a failed read (not "" as for no
+            # script), which _run_browser_command turns into exit 1 before
+            # anything is saved.
             with console.status("[bold green]Reading existing Sieve script..."):
                 sieve_script = await scraper.read_sieve_script(
                     filter_name=SIEVE_FILTER_NAME,
