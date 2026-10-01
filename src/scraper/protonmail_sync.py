@@ -1,6 +1,7 @@
 """Playwright automation for sync/restore operations on ProtonMail."""
 
 import logging
+import re
 from typing import Dict, List, Optional, Sequence
 
 from src.scraper import selectors
@@ -27,13 +28,38 @@ COMPARATOR_LABELS = {
     "matches": "matches",
 }
 
-# Maps our model action types to ProtonMail "Move to" folder labels
+# The wizard's "Move to" dropdown label for each system folder, keyed the
+# way an action records it (see SYSTEM_FOLDER_ACTIONS): Trash and Archive
+# by action type, Spam and Inbox by their move_to folder, Proton's Sieve name.
 MOVE_TO_LABELS = {
-    "delete": "Trash",
+    "trash": "Trash",
     "archive": "Archive",
     "spam": "Spam",
     "inbox": "Inbox - Default",
 }
+
+# A "/" not preceded by a backslash: the separator in a folder path.
+_FOLDER_SEPARATOR = re.compile(r"(?<!\\)/")
+
+
+def move_to_dropdown_label(action: Dict) -> Optional[str]:
+    r"""The "Move to" dropdown entry that applies `action`, or None for other actions.
+
+    `action` is shaped like a FilterAction: {"type": ..., "parameters": {...}}.
+    A move_to folder is stored as an escaped path ("Work/Misc\/Others");
+    the dropdown lists each folder under its own name, so this returns the
+    last segment with its "\/" unescaped ("Misc/Others").
+    """
+    action_type = action.get("type", "")
+    if action_type in MOVE_TO_LABELS:
+        return MOVE_TO_LABELS[action_type]
+    if action_type != "move_to":
+        return None
+    folder = (action.get("parameters") or {}).get("folder", "inbox")
+    if folder in MOVE_TO_LABELS:
+        return MOVE_TO_LABELS[folder]
+    return _FOLDER_SEPARATOR.split(folder)[-1].replace("\\/", "/")
+
 
 logger = logging.getLogger(__name__)
 
@@ -239,7 +265,8 @@ class ProtonMailSync(ProtonMailBrowser):
         Args:
             name: Filter name
             conditions: List of dicts with keys: type, comparator, value
-            actions: List of dicts with keys: type, value (optional)
+            actions: List of dicts shaped like FilterAction: type (an
+                ActionType value) and, for move_to, parameters["folder"]
             logic: "and" or "or" for condition matching
 
         Returns:
@@ -323,25 +350,21 @@ class ProtonMailSync(ProtonMailBrowser):
             for action in actions:
                 action_type = action.get("type", "")
 
-                if action_type in ("delete", "archive", "move_to", "spam"):
-                    folder_name = MOVE_TO_LABELS.get(action_type)
-                    if action_type == "move_to":
-                        folder_name = action.get("value", "Inbox - Default")
-
-                    if folder_name:
-                        folder_select = await page.query_selector(
-                            f'{selectors.FOLDER_SELECT}, '
-                            f'button.select[aria-label="{folder_name}"]'
+                folder_name = move_to_dropdown_label(action)
+                if folder_name:
+                    folder_select = await page.query_selector(
+                        f'{selectors.FOLDER_SELECT}, '
+                        f'button.select[aria-label="{folder_name}"]'
+                    )
+                    if folder_select:
+                        await folder_select.click()
+                        await page.wait_for_timeout(DROPDOWN_MS)
+                        opt = await page.query_selector(
+                            f'{selectors.DROPDOWN_ITEM}:has-text("{folder_name}")'
                         )
-                        if folder_select:
-                            await folder_select.click()
+                        if opt:
+                            await opt.click()
                             await page.wait_for_timeout(DROPDOWN_MS)
-                            opt = await page.query_selector(
-                                f'{selectors.DROPDOWN_ITEM}:has-text("{folder_name}")'
-                            )
-                            if opt:
-                                await opt.click()
-                                await page.wait_for_timeout(DROPDOWN_MS)
 
                 elif action_type == "mark_read":
                     await self._toggle_mark_checkbox(selectors.MARK_READ_LABEL, selectors.MARK_READ_CHECKBOX)

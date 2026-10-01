@@ -59,7 +59,7 @@ async def create_test_filter():
     ok = await sync.create_filter(
         name='E2E Delete spam-offers',
         conditions=[{'type': 'sender', 'comparator': 'contains', 'value': 'spam-offers@junk.com'}],
-        actions=[{'type': 'delete'}],
+        actions=[{'type': 'trash'}],
     )
     assert ok, 'Failed to create test filter'
     print('  Created: E2E Delete spam-offers')
@@ -236,10 +236,10 @@ assert c.operator.value == 'contains', f'Condition operator wrong: {c.operator.v
 assert 'spam-offers@junk.com' in c.value, f'Condition value wrong: {c.value!r}'
 print(f'  condition: {c.type.value} {c.operator.value} {c.value!r} OK')
 
-# Actions: exactly 1 delete action
+# Actions: exactly 1 Trash action
 assert len(f.actions) >= 1, f'Expected at least 1 action, got {len(f.actions)}'
 a = f.actions[0]
-assert a.type.value == 'delete', f'Action type wrong: {a.type.value!r}'
+assert a.type.value == 'trash', f'Action type wrong: {a.type.value!r}'
 print(f'  action: {a.type.value} OK')
 
 print('  All scraped fields verified!')
@@ -301,7 +301,7 @@ print(f'  Lines: {len(sieve.splitlines())}')
 
 # Verify the Sieve script contains the actual scraped data, not just structure
 assert 'if ' in sieve, 'Sieve script missing if statement'
-assert 'discard;' in sieve, 'Sieve script missing discard action for delete filter'
+assert 'fileinto \"trash\";' in sieve, 'Sieve script missing the Trash move for the Trash filter'
 assert 'spam-offers@junk.com' in sieve, 'Sieve script missing condition value - scraper likely returned empty values'
 assert 'From' in sieve, 'Sieve script missing From header for sender condition'
 print('  Sieve content: condition values and actions present')
