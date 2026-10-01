@@ -1373,7 +1373,7 @@ def sync(
             merged = backed_up_merge
             console.print(f"\n[cyan]Existing Sieve script in backup: {len(bkup.sieve_script)} chars")
             if SECTION_BEGIN not in bkup.sieve_script:
-                console.print("[yellow]User rules detected — will be preserved outside ProtonFusion section")
+                console.print("[yellow]User rules detected: they will be preserved outside the ProtonFusion section")
             if len(merged) < 3000:
                 console.print(Panel(merged, title="Merged Script Preview", border_style="cyan"))
             else:
