@@ -1596,9 +1596,10 @@ def sync(
 
         # Nothing to upload when the live script already is the merged one:
         # Proton keeps Save disabled for an unchanged script, so upload_sieve
-        # would report a failure. The script's filter must still be on before
-        # the UI filters go off, so it is located now (refusing if it cannot
-        # be) and switched on in place of the upload if needed.
+        # would report a failure. The script's filter must still end up on,
+        # as an upload leaves it, so it is located now (refusing if it cannot
+        # be) and, after the UI filters are disabled, switched on in place of
+        # the upload if needed.
         unchanged = bool(existing_script) and normalize_script(merged_script) == normalize_script(existing_script)
         live_pf = None
         if unchanged:
