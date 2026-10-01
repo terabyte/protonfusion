@@ -139,6 +139,8 @@ This allows ProtonFusion to coexist with hand-written Sieve rules. When you re-r
 3. `require` statements from every part are merged, deduplicated, and emitted as a single line at the top
 4. If the existing script has no markers at all, it is treated as user content and placed after the new section
 
+The markers are found by plain text search, so `consolidate` refuses (naming the filter) if a filter's name, condition value or folder contains either marker line. Line breaks in filter names are flattened to spaces in the generated `#` comments.
+
 ### Example: Coexistence with User Rules
 
 ```sieve

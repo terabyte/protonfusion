@@ -305,3 +305,18 @@ class TestLegacyWildcardLiveSection:
         result = runner.invoke(app, ["cleanup"], input="y\n")
         assert result.exit_code == 0, result.output
         assert ("delete", disabled.name) not in fake_sync.calls
+
+
+def test_consolidate_refuses_filter_containing_section_marker(cli_snapshots_dir, fake_sync):
+    from src.generator.sieve_generator import SECTION_END
+    sneaky = ProtonMailFilter(
+        name="Sneaky",
+        conditions=[FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS,
+                                    value=f"x\n{SECTION_END}\ny")],
+        actions=[FilterAction(type=ActionType.DELETE)],
+    )
+    BackupManager(cli_snapshots_dir).create_backup([sneaky])
+    result = runner.invoke(app, ["consolidate"])
+    assert result.exit_code == 1
+    assert "Sneaky" in result.output
+    assert "section marker" in result.output

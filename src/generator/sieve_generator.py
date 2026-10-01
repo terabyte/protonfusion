@@ -26,6 +26,10 @@ EXTENSION_MAP = {
 }
 
 
+class SieveGenerationError(ValueError):
+    """Raised when a filter cannot be written into the ProtonFusion section safely."""
+
+
 # Characters with special meaning in a :matches pattern (RFC 5228 section
 # 2.7.1): "*" and "?" are wildcards and backslash escapes the next character.
 _MATCH_SPECIAL = ("\\", "*", "?")
@@ -75,6 +79,9 @@ class SieveGenerator:
         """Generate a complete Sieve script from consolidated filters."""
         lines = []
 
+        for f in filters:
+            self._check_no_section_markers(f)
+
         # Collect required extensions
         extensions = self._collect_extensions(filters)
 
@@ -99,12 +106,13 @@ class SieveGenerator:
             # Add comment with source filter info
             if f.source_filters:
                 if f.filter_count > 1:
-                    lines.append(f"# {f.name}")
-                    lines.append(f"# Source filters: {', '.join(f.source_filters[:5])}")
+                    lines.append(f"# {self._comment_text(f.name)}")
+                    sources = ", ".join(f.source_filters[:5])
+                    lines.append(f"# Source filters: {self._comment_text(sources)}")
                     if len(f.source_filters) > 5:
                         lines.append(f"#   ... and {len(f.source_filters) - 5} more")
                 else:
-                    lines.append(f"# {f.source_filters[0]}")
+                    lines.append(f"# {self._comment_text(f.source_filters[0])}")
 
             # Generate the rule
             condition_str = self._generate_conditions(f)
@@ -128,6 +136,38 @@ class SieveGenerator:
         script = "\n".join(lines)
         logger.info("Generated Sieve script: %d lines, %d rules", len(lines), len(filters))
         return script
+
+    @staticmethod
+    def _check_no_section_markers(f: ConsolidatedFilter) -> None:
+        """Refuse a filter whose text contains a ProtonFusion section marker.
+
+        merge_with_existing and extract_section find the section with a plain
+        substring search, so a marker inside a value, folder or filter name
+        would end (or start) the section early on the next sync and corrupt
+        the merge. Only the user's own filter text can do this, so a clear
+        refusal is enough.
+        """
+        texts = [f.name, *f.source_filters]
+        for group in f.condition_groups:
+            texts.extend(cond.value for cond in group.conditions)
+        for action in f.actions:
+            texts.extend(str(v) for v in action.parameters.values())
+        for text in texts:
+            for marker in (SECTION_BEGIN, SECTION_END):
+                if marker in text:
+                    # A consolidated rule's name is synthetic; name the UI filters too
+                    origin = f.name if f.source_filters in ([], [f.name]) else (
+                        f"{f.name} (from {', '.join(f.source_filters)})")
+                    raise SieveGenerationError(
+                        f"Filter {origin!r} contains the ProtonFusion section marker "
+                        f"{marker!r}, which would corrupt the Sieve section on the next "
+                        "sync. Rename or edit that filter in ProtonMail and back up again."
+                    )
+
+    @staticmethod
+    def _comment_text(text: str) -> str:
+        """Flatten line breaks so a filter name cannot escape its # comment line."""
+        return " ".join(text.splitlines())
 
     def _collect_extensions(self, filters: List[ConsolidatedFilter]) -> Set[str]:
         """Determine which Sieve extensions are needed."""

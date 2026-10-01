@@ -3,7 +3,7 @@
 import pytest
 
 from src.generator.sieve_generator import (
-    SieveGenerator, EXTENSION_MAP, SECTION_BEGIN, SECTION_END,
+    SieveGenerator, SieveGenerationError, EXTENSION_MAP, SECTION_BEGIN, SECTION_END,
 )
 from src.models.filter_models import (
     ConsolidatedFilter, ConditionGroup, FilterCondition, FilterAction,
@@ -993,3 +993,51 @@ class TestWildcardOperators:
     def test_matches_value_is_the_users_pattern(self):
         script = SieveGenerator().generate([_single_condition(Operator.MATCHES, "*@spam.?om")])
         assert 'address :matches "From" "*@spam.?om"' in script
+
+
+class TestSectionMarkersInFilterText:
+    """Marker text in a filter would end the section early on the next sync."""
+
+    @pytest.mark.parametrize("marker", [SECTION_BEGIN, SECTION_END])
+    def test_marker_in_condition_value_is_rejected(self, marker):
+        cf = _single_condition(Operator.CONTAINS, f"before\n{marker}\nafter", ctype=ConditionType.SUBJECT)
+        cf.name = "Sneaky subject"
+        with pytest.raises(SieveGenerationError, match="Sneaky subject"):
+            SieveGenerator().generate([cf])
+
+    def test_marker_mid_line_is_rejected(self):
+        """The section find is a substring search, so a newline is not needed."""
+        cf = _single_condition(Operator.IS, f"x {SECTION_END} y")
+        with pytest.raises(SieveGenerationError):
+            SieveGenerator().generate([cf])
+
+    def test_marker_in_folder_is_rejected(self):
+        cf = ConsolidatedFilter(
+            name="Folder",
+            condition_groups=[],
+            actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": SECTION_END})],
+        )
+        with pytest.raises(SieveGenerationError):
+            SieveGenerator().generate([cf])
+
+    def test_marker_in_source_filter_name_names_the_sources(self):
+        cf = _single_condition(Operator.IS, "a")
+        cf.name = "Consolidated"
+        cf.source_filters = ["ok", SECTION_BEGIN]
+        cf.filter_count = 2
+        with pytest.raises(SieveGenerationError, match="from ok"):
+            SieveGenerator().generate([cf])
+
+    def test_newline_in_filter_name_stays_in_the_comment(self):
+        cf = _single_condition(Operator.IS, "a")
+        cf.source_filters = ["line one\nif true { discard; }"]
+        script = SieveGenerator().generate([cf])
+        assert "# line one if true { discard; }" in script
+        assert "\nif true" not in script
+
+    def test_generated_script_round_trips_through_merge(self):
+        """Ordinary values still produce a section that extracts cleanly."""
+        cf = _single_condition(Operator.CONTAINS, "=== BEGIN something else ===")
+        merged = SieveGenerator.merge_with_existing(SieveGenerator().generate([cf]), "")
+        assert merged.count(SECTION_BEGIN) == 1
+        assert merged.count(SECTION_END) == 1
