@@ -45,7 +45,8 @@ Sieve extensions are declared via `require` statements at the top of the script.
 |-----------|-------------|
 | `fileinto` | move_to, label, or archive actions |
 | `imap4flags` | mark_read or star actions |
-| `regex` | conditions using the "matches" operator |
+
+`:matches` (used for the "matches", "begins with" and "ends with" operators) is a base match type (RFC 5228 section 2.7.1) and needs no `require`. The `regex` extension is only for the separate `:regex` match type, which ProtonFusion never generates.
 
 ## Condition Mapping
 

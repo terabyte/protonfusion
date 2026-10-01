@@ -196,7 +196,7 @@ Each strategy is a function with the signature `List[ConsolidatedFilter] → Lis
 
 The generator converts `ConsolidatedFilter` objects into RFC 5228 Sieve scripts. Key behaviors:
 
-- **Extension collection**: Scans all filters for required Sieve extensions (fileinto, imap4flags, regex) and generates the appropriate `require` statement.
+- **Extension collection**: Scans all filters for required Sieve extensions (fileinto, imap4flags) and generates the appropriate `require` statement.
 - **Pipe-delimited arrays**: Values like `"alice|bob"` expand to Sieve arrays `["alice", "bob"]`.
 - **Section markers**: Generated rules are wrapped in `# === BEGIN ProtonFusion ===` / `# === END ProtonFusion ===` markers.
 - **Merging**: When uploading to an account that already has a Sieve script, content outside the markers is preserved in place (above the section stays above, below stays below). Require statements are deduplicated.
