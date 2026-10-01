@@ -5,6 +5,7 @@ import difflib
 import json
 import logging
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -1161,7 +1162,8 @@ def cleanup(
     A disabled filter is only deleted if every one of its conditions and actions
     is present in the live ProtonFusion section, so deleting it never removes
     the last copy of a rule (e.g. after a refused or failed sync). Sieve filters
-    (including the ProtonFusion one) are never deleted. Auto-archives
+    (including the ProtonFusion one) are never deleted, and neither is any filter
+    whose name another filter shares, since deletion works by name. Auto-archives
     disabled filters before deletion to preserve them for future consolidation.
     Also refuses (exit 1) to delete any filter without a complete backup copy in the
     latest snapshot, unless --allow-incomplete is given.
@@ -1286,13 +1288,22 @@ def cleanup(
             if refused:
                 console.print("[yellow]Re-run 'backup', or pass --allow-incomplete to delete them anyway.")
 
-        # delete_filter() works by name, so a verified filter sharing a name
-        # with a refused one is held back too, or the wrong one could go.
-        refused_names = {f.name for f, _ in refused}
-        to_delete = [
-            f for f in disabled
-            if not (refused and id(f) in unverified_ids) and f.name not in refused_names
-        ]
+        to_delete = [f for f in disabled if not (refused and id(f) in unverified_ids)]
+
+        # delete_filter() finds its row by name, so a filter whose name any
+        # other scraped filter shares (enabled or disabled, covered or not,
+        # Sieve or wizard) is held back: the wrong one could go.
+        name_counts = Counter(f.name for f in filters)
+        same_name = [f for f in to_delete if name_counts[f.name] > 1]
+        if same_name:
+            console.print(
+                f"\n[bold red]Keeping {len(same_name)} filter(s) whose name is shared with another "
+                "filter (deletion works by name, so the wrong one could go):"
+            )
+            for f in same_name:
+                console.print(f"  [red]- {escape(f.name)}")
+            console.print("[yellow]Rename them in ProtonMail so each name is unique, then re-run.")
+            to_delete = [f for f in to_delete if name_counts[f.name] == 1]
 
         if dry_run:
             console.print(f"\n[bold yellow]DRY RUN - No filters will be deleted ({len(to_delete)} would be).")

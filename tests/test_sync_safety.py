@@ -322,3 +322,44 @@ class TestSieveFiltersLeftAlone:
         assert SIEVE_FILTER_NAME not in script
         archived = [e.filter.name for e in manager.load_archive(manager.snapshot_dir_for("latest"))]
         assert SIEVE_FILTER_NAME not in archived
+
+
+class TestCleanupHoldsBackSharedNames:
+    """delete_filter() works by name, so a name shared by any two scraped filters is never deleted."""
+
+    @staticmethod
+    def _named(f: ProtonMailFilter, name: str) -> ProtonMailFilter:
+        return f.model_copy(update={"name": name})
+
+    def test_covered_and_uncovered_with_same_name(self, cli_snapshots_dir, fake_sync, fake_scraper):
+        covered = self._named(_filter("in-sieve@x.com", enabled=False), "News")
+        uncovered = self._named(_filter("nowhere@x.com", enabled=False), "News")
+        other = _filter("other@x.com", enabled=False)
+        fake_scraper.filters = [covered, uncovered, other]
+        fake_sync.live_script = _section_for([covered, other])
+        BackupManager(cli_snapshots_dir).create_backup([covered, uncovered, other])
+
+        result = runner.invoke(app, ["cleanup"], input="y\n")
+        assert ("delete", "News") not in fake_sync.calls
+        assert ("delete", other.name) in fake_sync.calls
+        assert "name is shared" in result.output
+
+    def test_disabled_and_enabled_with_same_name(self, cli_snapshots_dir, fake_sync, fake_scraper):
+        disabled = self._named(_filter("old@x.com", enabled=False), "News")
+        enabled = self._named(_filter("live@x.com", enabled=True), "News")
+        fake_scraper.filters = [disabled, enabled]
+        fake_sync.live_script = _section_for([disabled])
+        BackupManager(cli_snapshots_dir).create_backup([disabled, enabled])
+
+        result = runner.invoke(app, ["cleanup"], input="y\n")
+        assert fake_sync.calls == []
+        assert "name is shared" in result.output
+
+    def test_include_uncovered_does_not_override(self, cli_snapshots_dir, fake_sync, fake_scraper):
+        a = self._named(_filter("a@x.com", enabled=False), "News")
+        b = self._named(_filter("b@x.com", enabled=False), "News")
+        fake_scraper.filters = [a, b]
+        BackupManager(cli_snapshots_dir).create_backup([a, b])
+
+        runner.invoke(app, ["cleanup", "--include-uncovered", "--allow-incomplete"], input="y\n")
+        assert fake_sync.calls == []

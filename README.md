@@ -249,6 +249,7 @@ ProtonFusion is designed to be non-destructive:
 - **Checksums**: Backups include SHA256 checksums to detect corruption.
 - **Incomplete reads are loud**: A filter the scraper cannot fully read stops `backup` (override: `--allow-incomplete`). Each backed-up filter also keeps the wizard's raw text, so a field the parser missed can still be recovered.
 - **Cleanup needs a verified copy**: `cleanup` only deletes a disabled filter if the latest snapshot holds an identical, complete copy with raw text. Others are listed and kept (override: `--allow-incomplete`). Backups made before format 1.1 have no raw text, so run `backup` again after upgrading.
+- **Shared names are never deleted**: deletion works by name, so `cleanup` keeps any filter whose name another filter (enabled or not) also uses, and only ever deletes a disabled filter in the Custom filters list.
 - **Sieve filters are left alone**: `consolidate` skips filters written in Sieve (including ProtonFusion's own), and `cleanup` never deletes them.
 - **Restore**: One command to roll back to any previous backup.
 
