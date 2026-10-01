@@ -195,3 +195,66 @@ def test_dropped_listing_escapes_rich_markup(cli_snapshots_dir, fake_sync):
     assert result.exit_code == 1
     assert '"[spam]"' in result.output
 
+
+class FakeScraper(FakeSync):
+    """Stand-in for ProtonMailScraper; returns already-parsed filters."""
+
+    filters: list = []
+
+    async def scrape_all_filters(self, workers=1):
+        return list(type(self).filters)
+
+
+@pytest.fixture
+def fake_scraper(monkeypatch, fake_sync):
+    import src.main
+    import src.scraper.protonmail_scraper
+    FakeScraper.filters = []
+    monkeypatch.setattr(src.scraper.protonmail_scraper, "ProtonMailScraper", FakeScraper)
+    monkeypatch.setattr(src.main, "parse_scraped_filters", lambda raw: raw)
+    return FakeScraper
+
+
+class TestCleanupOnlyDeletesCoveredFilters:
+
+    def test_uncovered_disabled_filter_is_kept(self, cli_snapshots_dir, fake_sync, fake_scraper):
+        covered = _filter("in-sieve@x.com", enabled=False)
+        orphan = _filter("nowhere@x.com", enabled=False)
+        fake_scraper.filters = [covered, orphan]
+        fake_sync.live_script = _section_for([covered])
+        BackupManager(cli_snapshots_dir).create_backup([covered, orphan])
+
+        result = runner.invoke(app, ["cleanup"], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert ("delete", covered.name) in fake_sync.calls
+        assert ("delete", orphan.name) not in fake_sync.calls
+        assert "NOT in the live" in result.output
+
+    def test_no_live_section_deletes_nothing(self, cli_snapshots_dir, fake_sync, fake_scraper):
+        fake_scraper.filters = [_filter("a@x.com", enabled=False)]
+        fake_sync.live_script = ""
+        BackupManager(cli_snapshots_dir).create_backup(fake_scraper.filters)
+
+        result = runner.invoke(app, ["cleanup"], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert fake_sync.calls == []
+        assert "Nothing safe to delete" in result.output
+
+    def test_include_uncovered_overrides(self, cli_snapshots_dir, fake_sync, fake_scraper):
+        orphan = _filter("nowhere@x.com", enabled=False)
+        fake_scraper.filters = [orphan]
+        fake_sync.live_script = ""
+        BackupManager(cli_snapshots_dir).create_backup([orphan])
+
+        result = runner.invoke(app, ["cleanup", "--include-uncovered"], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert ("delete", orphan.name) in fake_sync.calls
+
+    def test_after_refused_sync_cleanup_deletes_nothing(self, shrunk_account, fake_sync, fake_scraper):
+        """The sync refusal leaves the old section live; filters only it lacks survive cleanup."""
+        assert runner.invoke(app, ["sync"]).exit_code == 1
+        new_filter = _filter("brand-new@x.com", enabled=False)
+        fake_scraper.filters = [new_filter]
+        result = runner.invoke(app, ["cleanup"], input="y\n")
+        assert result.exit_code == 0
+        assert fake_sync.calls == []

@@ -29,7 +29,7 @@ python -m pytest tests/test_sieve_generator.py::test_generate_basic_rule -v
 | `test_consolidator.py` | All three consolidation strategies, the engine pipeline, and status-based filter selection |
 | `test_sieve_generator.py` | Sieve script generation, extension collection, merging with existing scripts |
 | `test_sieve_rules.py` | Structural Sieve section parsing and live-vs-new rule comparison |
-| `test_sync_safety.py` | `sync` refusal and dry-run/show-diff surfacing (ProtonMail client faked) |
+| `test_sync_safety.py` | `sync` refusal, dry-run/show-diff surfacing, and `cleanup` coverage guard (ProtonMail clients faked) |
 | `test_carry_forward.py` | Rebuilding live Sieve rules as archived filters, `consolidate --keep-live-rules` |
 | `test_diff.py` | Filter comparison (added, removed, modified, state_changed, unchanged), status-aware diffing |
 | `test_snapshot.py` | Snapshot CLI commands: view, set-status, remove (using Typer CliRunner) |

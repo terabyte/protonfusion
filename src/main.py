@@ -26,7 +26,7 @@ from src.backup.diff_engine import DiffEngine
 from src.parser.filter_parser import parse_scraped_filters
 from src.consolidator.consolidation_engine import ConsolidationEngine
 from src.generator.sieve_generator import SieveGenerator, SECTION_BEGIN
-from src.generator.sieve_rules import SieveParseError, compare_sections, extract_section
+from src.generator.sieve_rules import SieveParseError, compare_sections, extract_section, script_facts
 from src.consolidator.carry_forward import facts_to_filters, filter_facts
 
 SIEVE_FILTER_NAME = "ProtonFusion Consolidated"
@@ -1027,10 +1027,17 @@ def cleanup(
     credentials_file: str = typer.Option("", "--credentials-file", help="Credentials file"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview what will be deleted"),
     workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
+    include_uncovered: bool = typer.Option(
+        False, "--include-uncovered",
+        help="Also delete disabled filters whose rules are NOT in the live ProtonFusion Sieve section",
+    ),
 ):
-    """Delete all disabled filters (with confirmation).
+    """Delete disabled filters whose rules are already in the live Sieve script (with confirmation).
 
-    Auto-archives disabled filters before deletion to preserve them for future consolidation.
+    A disabled filter is only deleted if every one of its conditions and actions
+    is present in the live ProtonFusion section, so deleting it never removes
+    the last copy of a rule (e.g. after a refused or failed sync). Auto-archives
+    disabled filters before deletion to preserve them for future consolidation.
     """
     from src.scraper.protonmail_scraper import ProtonMailScraper
     from src.scraper.protonmail_sync import ProtonMailSync
@@ -1047,6 +1054,7 @@ def cleanup(
             await scraper.navigate_to_filters()
             raw_filters = await scraper.scrape_all_filters(workers=_workers)
             filters = parse_scraped_filters(raw_filters)
+            live_script = await scraper.read_sieve_script(filter_name=SIEVE_FILTER_NAME)
         finally:
             await scraper.close()
 
@@ -1055,6 +1063,36 @@ def cleanup(
         if not disabled:
             console.print("[green]No disabled filters to clean up.")
             return
+
+        # Only filters whose rules are all in the live section are safe to delete.
+        live_facts = set()
+        live_section = extract_section(live_script or "")
+        if live_section is None:
+            console.print("[yellow]No ProtonFusion section found in the live Sieve script.")
+        else:
+            try:
+                live_facts = script_facts(live_script)
+            except SieveParseError as e:
+                console.print(f"[red]Could not parse the live ProtonFusion section: {escape(str(e))}")
+        uncovered = [f for f in disabled if not filter_facts(f) <= live_facts]
+        if uncovered:
+            console.print(
+                f"\n[bold red]{len(uncovered)} disabled filters have rules that are NOT in the "
+                "live ProtonFusion Sieve section:"
+            )
+            for f in uncovered:
+                console.print(f"  [red]- {escape(f.name)}")
+            if include_uncovered:
+                console.print("[yellow]--include-uncovered given: they will be deleted too.")
+            else:
+                console.print(
+                    "[yellow]Keeping them: deleting would lose their rules. Run 'sync' first, "
+                    "or pass --include-uncovered to delete them anyway."
+                )
+                disabled = [f for f in disabled if f not in uncovered]
+                if not disabled:
+                    console.print("[green]Nothing safe to delete.")
+                    return
 
         # Auto-archive any disabled filters missing from the archive
         try:

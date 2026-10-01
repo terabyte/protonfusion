@@ -185,7 +185,7 @@ The generator converts `ConsolidatedFilter` objects into RFC 5228 Sieve scripts.
 - **Pipe-delimited arrays**: Values like `"alice|bob"` expand to Sieve arrays `["alice", "bob"]`.
 - **Section markers**: Generated rules are wrapped in `# === BEGIN ProtonFusion ===` / `# === END ProtonFusion ===` markers.
 - **Merging**: When uploading to an account that already has a Sieve script, content outside the markers is preserved in place (above the section stays above, below stays below). Require statements are deduplicated.
-- **Rule preservation**: `sieve_rules.py` parses a section into condition/action pairs. `sync` refuses if the new section drops a pair present in the live one. See [sieve-reference.md](sieve-reference.md#rule-preservation).
+- **Rule preservation**: `sieve_rules.py` parses a section into condition/action pairs. `sync` refuses if the new section drops a pair present in the live one, and `cleanup` only deletes disabled filters whose pairs are all live. See [sieve-reference.md](sieve-reference.md#rule-preservation).
 
 ### Sieve Mapping
 
