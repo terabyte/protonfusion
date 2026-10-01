@@ -1,4 +1,6 @@
 import hashlib
+import json
+import logging
 from enum import Enum
 from typing import List, Optional
 from pydantic import BaseModel, Field, model_validator
@@ -66,6 +68,30 @@ class ScrapeEvidence(BaseModel):
     sieve_text: str = ""       # Set instead of the above when Edit opened the Sieve editor
 
 
+logger = logging.getLogger(__name__)
+
+# The fields of a condition or action entry that must hold one of these enum
+# values. Anything else has no defined meaning, so it is never guessed at.
+_CONDITION_ENUM_FIELDS = (("type", "condition type", ConditionType), ("operator", "operator", Operator))
+_ACTION_ENUM_FIELDS = (("type", "action type", ActionType),)
+
+
+def unknown_value_problem(entry: dict, enum_fields) -> Optional[str]:
+    """Describe the first missing or unknown enum value in a condition/action dict.
+
+    Returns None when every field in enum_fields holds a valid value.
+    """
+    for key, label, enum_cls in enum_fields:
+        value = entry.get(key)
+        if value is None:
+            return f"missing {label}"
+        if isinstance(value, enum_cls):
+            continue
+        if value not in {member.value for member in enum_cls}:
+            return f"unknown {label} {value!r}"
+    return None
+
+
 class ProtonMailFilter(BaseModel):
     name: str
     enabled: bool = True
@@ -90,6 +116,49 @@ class ProtonMailFilter(BaseModel):
     def is_complete(self) -> bool:
         """True if the scraper reported no unparsed or unreadable fields."""
         return not self.scrape_issues
+
+    @model_validator(mode='before')
+    @classmethod
+    def quarantine_unknown_values(cls, data):
+        """Flag, rather than guess or reject, entries with no defined meaning.
+
+        A condition or action whose type/operator is missing or not one the
+        model knows (a hand-edited backup, a parser that let one through) is
+        dropped and recorded in scrape_issues, entry included, so the filter
+        is incomplete: consolidate leaves it out and cleanup will not delete
+        it. Guessing a value could widen a rule; rejecting would stop a
+        whole backup loading over one filter. An unknown logic value is
+        treated the same way; a missing one stays AND, as for backups made
+        before the field existed.
+        """
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        issues = []
+        for key, kind, enum_fields in (
+            ("conditions", "condition", _CONDITION_ENUM_FIELDS),
+            ("actions", "action", _ACTION_ENUM_FIELDS),
+        ):
+            entries = data.get(key)
+            if not isinstance(entries, list):
+                continue
+            kept = []
+            for index, entry in enumerate(entries, 1):
+                problem = unknown_value_problem(entry, enum_fields) if isinstance(entry, dict) else None
+                if problem:
+                    issues.append(f"{kind} {index}: {problem}; dropped {json.dumps(entry, default=str)}")
+                else:
+                    kept.append(entry)
+            data[key] = kept
+        logic = data.get("logic")
+        if logic is not None and not isinstance(logic, LogicType) and logic not in {m.value for m in LogicType}:
+            issues.append(f"unknown logic {logic!r}; read as 'and'")
+            data["logic"] = LogicType.AND
+        if issues:
+            for issue in issues:
+                logger.warning("Filter '%s' incomplete: %s", data.get("name", "?"), issue)
+            data["scrape_issues"] = list(data.get("scrape_issues") or []) + issues
+        return data
 
     @model_validator(mode='before')
     @classmethod
