@@ -21,7 +21,7 @@ from typing import AbstractSet, Iterable, List, Optional, Set
 from src.consolidator.carry_forward import filter_facts, is_carried
 from src.generator.sieve_rules import Fact
 from src.models.backup_models import ArchiveEntry
-from src.models.filter_models import ProtonMailFilter
+from src.models.filter_models import FilterStatus, ProtonMailFilter
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +134,41 @@ def incompleteness_reasons(f: ProtonMailFilter) -> List[str]:
     if f.raw is None and not is_carried(f):
         reasons.append("no raw evidence (backed up before format 1.1)")
     return reasons
+
+
+def trusted_sources(
+    reference: Iterable[ProtonMailFilter],
+    archive_entries: Iterable[ArchiveEntry],
+    untrusted_ids: AbstractSet[int],
+    from_manifest: bool,
+) -> List[ProtonMailFilter]:
+    """The backup and archive filters whose rules may justify a script fact.
+
+    A trusted filter that generates a rule vouches for it, so an incomplete
+    or unverified filter with the same rule is not blamed for it
+    (justified_facts). Excluded: filters in `untrusted_ids` (by id(), the
+    unverified old archive entries) and incomplete ones.
+
+    Without a manifest describing the script, nothing says which filters
+    went into it, so only filters a default consolidate would use may
+    vouch: a switched-off (DISABLED) or DEPRECATED filter, or one whose
+    archive entry marks it deprecated, is not one. Otherwise a disabled
+    copy of a rule would hide that the script took it from a suspect
+    filter. With a manifest, the filters it lists are known to be in the
+    script whatever their status, so status is not checked.
+    """
+    reference = list(reference)
+    trusted = [f for f in reference if id(f) not in untrusted_ids and not incompleteness_reasons(f)]
+    if from_manifest:
+        return trusted
+    deprecated = {
+        e.filter.content_hash for e in archive_entries if e.filter.status == FilterStatus.DEPRECATED
+    }
+    return [
+        f for f in trusted
+        if f.status not in (FilterStatus.DISABLED, FilterStatus.DEPRECATED)
+        and f.content_hash not in deprecated
+    ]
 
 
 def incomplete_in_script(

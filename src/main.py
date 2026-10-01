@@ -25,12 +25,14 @@ from src.utils.config import (
 from src.models.filter_models import ProtonMailFilter, FilterStatus
 from src.models.backup_models import Backup, ArchiveEntry, BACKUP_FORMAT_VERSION
 from src.backup.backup_manager import (
-    BackupManager, BackupIntegrityError, predates_strict_parser, unverified_for_deletion,
-    unverified_old_entries,
+    BackupManager, BackupIntegrityError, format_predates_strict_parser, predates_strict_parser,
+    unverified_for_deletion, classify_old_entries, strict_confirmations, suspect_matches,
+    OLD_BACKUP_ENTRY, CARRIED_COPY_ENTRY, UNSTAMPED_CARRIED_ENTRY,
 )
 from src.backup.diff_engine import DiffEngine
 from src.backup.sync_plan import (
     DisablePlan, carried_hashes, check_disable_candidates, incomplete_in_script, old_entries_in_script,
+    trusted_sources,
     incompleteness_reasons, plan_disable,
 )
 from src.utils.private_files import write_private_file
@@ -129,35 +131,100 @@ def _warn_if_old_snapshot(bkup: Backup, backup_id: str) -> bool:
     return True
 
 
-def _warn_old_archive_entries(entries: List[ArchiveEntry], left_out: bool) -> None:
-    """Print a prominent warning naming archive entries from pre-1.3 backups.
+def _describe_rule(f: ProtonMailFilter) -> str:
+    """One line for a filter's conditions and actions, e.g. 'sender starts_with news -> move_to(News)'."""
+    conditions = f" {f.logic.value.upper()} ".join(
+        f"{c.type.value} {c.operator.value} {c.display_value}" for c in f.conditions
+    ) or "no conditions"
+    actions = ", ".join(
+        f"{a.type.value}({', '.join(str(v) for v in a.parameters.values())})" if a.parameters else a.type.value
+        for a in f.actions
+    ) or "no actions"
+    return f"{conditions} -> {actions}"
 
-    These are unverified_old_entries: archived from a backup older than
-    format 1.3 (or by a version that did not record the format), and not
-    confirmed by a filter with the same content in the current backup.
-    `left_out` says whether this consolidation left them out of the script
-    (consolidate) or the script holds them (sync).
+
+def _strict_rereads(entry: ArchiveEntry, bkup: Backup) -> List[ProtonMailFilter]:
+    """Fully read filters in a strict `bkup` with the entry's name but different content.
+
+    The fresh scrape found a filter by that name and read it differently,
+    so it is probably what the old parser misread.
     """
-    if not entries:
+    if predates_strict_parser(bkup):
+        return []
+    return [
+        f for f in bkup.filters
+        if f.name == entry.filter.name and f.content_hash != entry.filter.content_hash
+        and f.is_complete and not f.is_sieve
+    ]
+
+
+def _warn_old_archive_entries(
+    classified: List[tuple], bkup: Backup, left_out: bool,
+) -> None:
+    """Print a prominent warning naming the unverified archive entries.
+
+    `classified` holds (entry, kind) pairs from classify_old_entries.
+    `left_out` says whether this consolidation left them out of the script
+    (consolidate) or the script holds them (sync). Each kind gets its own
+    explanation and remedy. Where the current backup reads an old entry's
+    filter differently, that read is named as the probable correct version.
+    """
+    if not classified:
         return
-    names = "\n".join(f"  - {escape(e.filter.name)} (from snapshot {escape(e.source_snapshot or '?')})" for e in entries)
     where = (
         "They are left out of this script."
         if left_out else
         "This script holds their rules."
     )
-    console.print(Panel(
-        f"[bold red]archive.json holds {len(entries)} archived filter(s) taken from a backup older than "
-        "format 1.3, or by a version that did not record the format. That backup may have been written "
-        "by a ProtonFusion that misread some operators:[/]\n"
-        + MISREAD_OPERATORS_NOTE +
-        f"{names}\n\n"
-        f"[bold]{where}[/] A filter still in your account comes back from a fresh 'backup': once the "
-        "current backup holds a filter with the same content, its archive copy is used again. A rule whose UI filter "
-        "is gone is still in the live ProtonFusion section: 'consolidate --keep-live-rules' keeps "
-        "it from there. 'snapshot remove <name>' drops an archive copy for good.",
-        title="Old Archive Entries", border_style="red",
-    ))
+    old = [e for e, kind in classified if kind == OLD_BACKUP_ENTRY]
+    copies = [e for e, kind in classified if kind == CARRIED_COPY_ENTRY]
+    unstamped = [e for e, kind in classified if kind == UNSTAMPED_CARRIED_ENTRY]
+    parts = [f"[bold red]archive.json holds {len(classified)} archived filter(s) that nothing has confirmed. "
+             f"{where}[/]"]
+    if old:
+        lines = []
+        for e in old:
+            lines.append(f"  - {escape(e.filter.name)} (from snapshot {escape(e.source_snapshot or '?')})")
+            for f in _strict_rereads(e, bkup):
+                state = "switched off" if not f.enabled else "switched on"
+                lines.append(
+                    f"      The current backup reads a filter of this name differently ({state}): "
+                    f"{escape(_describe_rule(f))}. That fresh, strict read is probably the correct version."
+                )
+        parts.append(
+            "\n[bold]Taken from a backup older than format 1.3, or by a version that did not record the "
+            "format.[/] That backup may have been written by a ProtonFusion that misread some operators:\n"
+            + MISREAD_OPERATORS_NOTE + "\n".join(lines) + "\n"
+            "A fresh 'backup' confirms one of these only if it reads a filter with exactly the same content; "
+            "a filter it reads differently, or no longer finds, never confirms it. Where the current backup "
+            "reads the filter differently (shown above), use that version: switch it on in Proton if it is "
+            "off and run 'backup' again, then mark the old entry deprecated with "
+            "'snapshot set-status \"<name>\" deprecated' so its rule stays out. A rule whose filter is gone "
+            "is confirmed only by recreating the filter in Proton and running 'backup'. "
+            "'consolidate --keep-live-rules' does not confirm them: a live rule matching one is carried "
+            "forward but kept out of the script with it."
+        )
+    if copies:
+        names = "\n".join(f"  - {escape(e.filter.name)}" for e in copies)
+        parts.append(
+            "\n[bold]Carried forward from the live ProtonFusion section, but the rule matches an old entry "
+            "nothing has confirmed.[/] The live rule was generated from that entry's filter, so it may be the "
+            f"misread rule:\n{names}\n"
+            "Each is used again once the old entry it matches is confirmed. If that never happens, "
+            "'snapshot remove <name>' drops it; 'sync' then needs --allow-rule-removal to take the live rule out."
+        )
+    if unstamped:
+        names = "\n".join(f"  - {escape(e.filter.name)}" for e in unstamped)
+        parts.append(
+            "\n[bold]Carried forward from the live ProtonFusion section by an earlier build, which did not "
+            "record a format.[/] No backup can confirm these, since they are not filters in your account; one "
+            "is confirmed when its rule is in the live section captured in the backup, unchanged. These are "
+            f"not:\n{names}\n"
+            "If a rule is still wanted, recreate it as a filter in Proton and run 'backup'. "
+            "'consolidate --keep-live-rules' carries forward again whatever the live section still holds."
+        )
+    parts.append("'snapshot remove <name>' drops an archive copy for good.")
+    console.print(Panel("\n".join(parts), title="Old Archive Entries", border_style="red"))
 
 
 def _get_credentials(credentials_file: str, manual_login: bool):
@@ -657,11 +724,9 @@ def consolidate(
     # pre-1.3 backup may hold misread rules, like an old backup itself, so
     # they are left out unless the current backup confirms them.
     archive_entries = manager.load_archive(snapshot_dir)
-    old_entries = unverified_old_entries(archive_entries, bkup)
+    classified_old = classify_old_entries(archive_entries, bkup)
+    old_entries = [e for e, _ in classified_old]
     old_entry_ids = {id(e) for e in old_entries}
-    _warn_old_archive_entries(
-        [e for e in old_entries if e.filter.status == FilterStatus.ARCHIVED], left_out=True,
-    )
     archived_filters = [
         e.filter for e in archive_entries
         if e.filter.status == FilterStatus.ARCHIVED and id(e) not in old_entry_ids
@@ -755,27 +820,58 @@ def consolidate(
             # rebuilt from the live script, replaces it.
             known_hashes = {e.filter.content_hash for e in archive_entries if id(e) not in old_entry_ids}
             now_ts = datetime.now(timezone.utc).isoformat()
+            # An unverified carried entry whose every rule is carried again
+            # is replaced by the new copies. Matched by rules, not by name or
+            # hash: the snapshot label in a carried filter's name changes its
+            # hash on every run. A new copy inherits a replaced copy's
+            # suspicion through suspect_matches (classified_old still holds it).
+            recarried = set()
+            for f in carried:
+                recarried |= filter_facts(f)
+            replaced = [
+                e for e in archive_entries
+                if id(e) in old_entry_ids and is_carried(e.filter)
+                and e.filter.status == FilterStatus.ARCHIVED and filter_facts(e.filter) <= recarried
+            ]
+            if replaced:
+                replaced_ids = {id(e) for e in replaced}
+                archive_entries = [e for e in archive_entries if id(e) not in replaced_ids]
+            held_back = 0
             for f in carried:
                 if f.content_hash in known_hashes:
                     continue
-                archive_entries = [
-                    e for e in archive_entries
-                    if not (id(e) in old_entry_ids and e.filter.content_hash == f.content_hash)
-                ]
+                # A live rule matching an unconfirmed old entry may be that
+                # entry's misread rule: copying it from Sieve confirms
+                # nothing, so the copy is recorded as such and stays out.
+                matches = suspect_matches(f, classified_old)
                 # Rebuilt from Sieve by this version, not by an old parser
                 archive_entries.append(ArchiveEntry(
                     filter=f, archived_at=now_ts, source_snapshot=snapshot_dir.name,
-                    source_format=BACKUP_FORMAT_VERSION,
+                    source_format=BACKUP_FORMAT_VERSION, matches_unverified=matches,
                 ))
-                archived_filters.append(f)
                 carried_count += 1
+                if matches:
+                    held_back += 1
+                else:
+                    archived_filters.append(f)
 
-            if carried_count:
+            if carried_count > held_back:
                 consolidated, report, sieve_script = _consolidate()
             console.print(
                 f"[cyan]Carried forward {len(to_carry) - len(unconvertible)} condition/action pairs "
                 f"from the live Sieve section as {carried_count} archived filters"
             )
+            if replaced:
+                console.print(
+                    f"[cyan]Replaced {len(replaced)} unverified carried-forward archive entr"
+                    f"{'y' if len(replaced) == 1 else 'ies'} whose rules were carried again: "
+                    + ", ".join(escape(e.filter.name) for e in replaced)
+                )
+            if held_back:
+                console.print(
+                    f"[yellow]{held_back} of them copy a live rule matching an old archive entry nothing "
+                    "has confirmed, so they stay out of the script (see Old Archive Entries)."
+                )
             if len(to_carry) != len(comparison.dropped):
                 console.print(
                     f"[cyan]Not carried forward (deprecated or --exclude'd on purpose): "
@@ -800,6 +896,19 @@ def consolidate(
                 "Run 'sync --dry-run' for the full list.",
                 title="Live Rules Would Be Dropped", border_style="red",
             ))
+
+    # After carry-forward, so the copies it held back are listed too
+    classified_old = classify_old_entries(archive_entries, bkup)
+    _warn_old_archive_entries(
+        [(e, kind) for e, kind in classified_old if e.filter.status == FilterStatus.ARCHIVED],
+        bkup, left_out=True,
+    )
+    # A carried copy found only by sharing a rule with an old entry (one an
+    # earlier build stamped) records that entry, so removing the old entry
+    # does not make the copy trusted. Written with the archive below.
+    for e, kind in classified_old:
+        if kind == CARRIED_COPY_ENTRY:
+            e.matches_unverified = sorted(set(e.matches_unverified) | set(suspect_matches(e.filter, classified_old)))
 
     if report.incomplete_excluded:
         _print_incomplete(
@@ -881,6 +990,22 @@ def consolidate(
                 source_snapshot=snapshot_dir.name,
                 source_format=bkup.version,
             ))
+    # An old entry this backup's strict read confirms is stamped, so it stays
+    # confirmed once its filter leaves the account and no later backup can
+    # confirm it again (cleanup does the same for the filters it deletes).
+    confirmed_hashes = strict_confirmations(bkup)
+    for e in archive_entries:
+        if (not is_carried(e.filter) and format_predates_strict_parser(e.source_format)
+                and e.filter.content_hash in confirmed_hashes):
+            e.source_format = bkup.version
+    # An unstamped carried entry found unchanged in the live section is
+    # stamped: it is written back with its values list, so it is not split
+    # again on load, and it stays confirmed after the live section changes.
+    still_unverified = {id(e) for e, _ in classified_old}
+    for e in archive_entries:
+        if (is_carried(e.filter) and format_predates_strict_parser(e.source_format)
+                and id(e) not in still_unverified):
+            e.source_format = BACKUP_FORMAT_VERSION
     manager.write_archive(snapshot_dir, archive_entries)
 
     # Save consolidation_args.json
@@ -1419,11 +1544,14 @@ def sync(
     # Archive entries from a pre-1.3 backup may hold misread rules, the same
     # hazard as an old backup, and archive.json survives a fresh backup.
     # Refused the same way when the script draws on one.
-    old_entries = unverified_old_entries(archive_entries, bkup)
+    classified_old = classify_old_entries(archive_entries, bkup)
+    old_entries = [e for e, _ in classified_old]
+    old_kinds = {id(e): kind for e, kind in classified_old}
     old_entry_filter_ids = {id(e.filter) for e in old_entries}
-    # Complete filters not from an old archive entry: a rule one of them
-    # generates is in the script on its account
-    trusted = [f for f in reference if id(f) not in old_entry_filter_ids and not incompleteness_reasons(f)]
+    # Complete filters not from an old archive entry (and, with no manifest,
+    # ones consolidate would use): a rule one of them generates is in the
+    # script on its account
+    trusted = trusted_sources(reference, archive_entries, old_entry_filter_ids, from_manifest)
     script_facts_uploaded = _uploaded_facts(sieve_script)
     # What a manifest describing this script says went into it, and which
     # incomplete filters consolidate left out of it
@@ -1435,7 +1563,7 @@ def sync(
         left_out_hashes = {d.get("content_hash") for d in manifest.get("incomplete_excluded", [])}
     old_in_script = old_entries_in_script(old_entries, trusted, script_facts_uploaded, in_script_hashes)
     if old_in_script:
-        _warn_old_archive_entries(old_in_script, left_out=False)
+        _warn_old_archive_entries([(e, old_kinds[id(e)]) for e in old_in_script], bkup, left_out=False)
         if allow_old_snapshot:
             console.print("[yellow]--allow-old-snapshot given: proceeding anyway.")
         else:
@@ -2569,7 +2697,13 @@ def _archive_before_deletion(
     (id in uncovered_ids) is archived as DEPRECATED: its rules are not
     live, and it was disabled, so consolidating it would switch on a rule
     the user had switched off. It stays recoverable with
-    'snapshot set-status'. A hash already in the archive is left as it is.
+    'snapshot set-status'. A hash already in the archive is not added again.
+
+    An existing entry from a pre-1.3 backup (unverified_old_entries) with
+    the hash of a fully read filter being deleted is stamped with the
+    current format: this version's strict scrape just read exactly that
+    rule. Once the filter is gone nothing else could confirm it, and the
+    next consolidate would leave its rule out.
     """
     try:
         latest_dir = manager.snapshot_dir_for("latest")
@@ -2579,8 +2713,15 @@ def _archive_before_deletion(
     archive_hashes = {e.filter.content_hash for e in archive_entries}
     now_ts = datetime.now(timezone.utc).isoformat()
     added = {FilterStatus.ARCHIVED: 0, FilterStatus.DEPRECATED: 0}
+    confirmed = 0
     for f in to_delete:
         if f.content_hash in archive_hashes:
+            if f.is_complete and f.raw is not None:
+                for e in archive_entries:
+                    if (e.filter.content_hash == f.content_hash and not is_carried(e.filter)
+                            and format_predates_strict_parser(e.source_format)):
+                        e.source_format = BACKUP_FORMAT_VERSION
+                        confirmed += 1
             continue
         archive_hashes.add(f.content_hash)
         status = FilterStatus.DEPRECATED if id(f) in uncovered_ids else FilterStatus.ARCHIVED
@@ -2593,8 +2734,14 @@ def _archive_before_deletion(
             source_format=BACKUP_FORMAT_VERSION,
         ))
         added[status] += 1
-    if any(added.values()):
+    if any(added.values()) or confirmed:
         manager.write_archive(latest_dir, archive_entries)
+    if confirmed:
+        console.print(
+            f"[cyan]Confirmed {confirmed} archive entr{'y' if confirmed == 1 else 'ies'} from a backup "
+            "older than format 1.3: the filter being deleted was just read with the same content."
+        )
+    if any(added.values()):
         console.print(
             f"[cyan]Archived before deletion: {added[FilterStatus.ARCHIVED]} (rules live), "
             f"{added[FilterStatus.DEPRECATED]} deprecated (rules not live, kept for the record)"

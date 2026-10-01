@@ -619,6 +619,50 @@ class TestSyncRefusesIncompleteSources:
         assert "- Filter partial@x.com" in result.output
 
 
+    @pytest.mark.parametrize("twin_state", ["disabled", "deprecated"])
+    def test_switched_off_twin_does_not_vouch_without_manifest(
+        self, cli_snapshots_dir, fake_sync, tmp_path, twin_state,
+    ):
+        """Hardening: with no manifest, a complete filter consolidate would not use
+        (switched off, or deprecated in the archive) must not vouch for the
+        incomplete filter's rule. Nothing says the script took the rule from it."""
+        from src.models.backup_models import ArchiveEntry
+        from src.models.filter_models import FilterStatus
+        good, partial = _filter("good@x.com"), _filter("partial@x.com")
+        twin = partial.model_copy(update={"name": "Twin of partial"})
+        if twin_state == "disabled":
+            twin = twin.model_copy(update={"enabled": False, "status": FilterStatus.DISABLED})
+        manager = BackupManager(cli_snapshots_dir)
+        manager.create_backup([good, partial.model_copy(update={"scrape_issues": [self.ISSUE]}), twin])
+        if twin_state == "deprecated":
+            snapshot_dir = manager.snapshot_dir_for("latest")
+            manager.write_archive(snapshot_dir, [ArchiveEntry(
+                filter=twin.model_copy(update={"status": FilterStatus.DEPRECATED, "enabled": False}),
+                source_snapshot=snapshot_dir.name, source_format="1.3",
+            )])
+        FakeScraper.filters = [good]
+        path = tmp_path / "s.sieve"
+        path.write_text(_section_for([good, partial]))
+        result = runner.invoke(app, ["sync", "--dry-run", "--sieve", str(path)])
+        assert result.exit_code == 1, result.output
+        assert "- Filter partial@x.com" in result.output
+
+    def test_enabled_twin_still_vouches_without_manifest(self, cli_snapshots_dir, fake_sync, tmp_path):
+        """The rule is in the script on a filter consolidate would use, so the
+        incomplete one is not blamed for it."""
+        good, partial = _filter("good@x.com"), _filter("partial@x.com")
+        twin = partial.model_copy(update={"name": "Twin of partial"})
+        BackupManager(cli_snapshots_dir).create_backup([
+            good, partial.model_copy(update={"scrape_issues": [self.ISSUE]}), twin,
+        ])
+        FakeScraper.filters = [good]
+        path = tmp_path / "s.sieve"
+        path.write_text(_section_for([good, partial]))
+        result = runner.invoke(app, ["sync", "--dry-run", "--sieve", str(path)])
+        assert result.exit_code == 0, result.output
+        assert "not fully read when backed up" not in result.output
+
+
 class TestSyncRefusesUnparsableMergedScript:
     """sync validates the merged script and refuses to upload one that does not parse."""
 

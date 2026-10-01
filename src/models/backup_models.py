@@ -50,8 +50,16 @@ class ArchiveEntry(BaseModel):
     # from Sieve (carry-forward) or scraped live (cleanup). None means
     # unknown: an entry written before this field existed, which is
     # treated as predating the strict parser (see
-    # backup_manager.entry_predates_strict_parser).
+    # backup_manager.format_predates_strict_parser and
+    # unverified_old_entries).
     source_format: Optional[str] = None
+    # For a filter carried forward from the live Sieve section: the
+    # content_hashes of the unconfirmed pre-1.3 entries whose rule it
+    # copied. The live section was generated from those entries' filters,
+    # so it may hold their misread rule; the copy stays unverified until
+    # each of them is confirmed (see backup_manager.classify_old_entries),
+    # even if the old entry is later removed.
+    matches_unverified: List[str] = Field(default_factory=list)
 
     @model_validator(mode='before')
     @classmethod
