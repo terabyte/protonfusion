@@ -6,6 +6,7 @@ from datetime import datetime
 from src.models.filter_models import (
     ProtonMailFilter, FilterCondition, FilterAction, ConsolidatedFilter,
     ConditionGroup, ConditionType, Operator, ActionType, LogicType, FilterStatus,
+    ScrapeEvidence,
 )
 from src.models.backup_models import Backup, BackupMetadata, ArchiveEntry, Archive
 
@@ -551,3 +552,35 @@ class TestArchive:
         assert len(archive2.entries) == 2
         assert archive2.entries[0].filter.status == FilterStatus.ARCHIVED
         assert archive2.entries[1].filter.status == FilterStatus.DEPRECATED
+
+
+class TestScrapeEvidence:
+    """Test raw scrape evidence and completeness fields on ProtonMailFilter."""
+
+    def test_defaults_are_empty(self):
+        f = ProtonMailFilter(name="Old")
+        assert f.raw is None
+        assert f.scrape_issues == []
+        assert f.is_complete is True
+
+    def test_issues_make_filter_incomplete(self):
+        f = ProtonMailFilter(name="X", scrape_issues=["unknown action row"])
+        assert f.is_complete is False
+
+    def test_evidence_roundtrip(self):
+        f = ProtonMailFilter(
+            name="X",
+            raw=ScrapeEvidence(conditions_text="the sender", actions_text="Label as\nWork"),
+            scrape_issues=["boom"],
+        )
+        f2 = ProtonMailFilter.model_validate(f.model_dump())
+        assert f2.raw.actions_text == "Label as\nWork"
+        assert f2.scrape_issues == ["boom"]
+
+    def test_content_hash_ignores_evidence(self):
+        """Evidence records how a filter was read, not what it does."""
+        a = ProtonMailFilter(name="X")
+        b = ProtonMailFilter(
+            name="X", raw=ScrapeEvidence(actions_text="whatever"), scrape_issues=["x"],
+        )
+        assert a.content_hash == b.content_hash

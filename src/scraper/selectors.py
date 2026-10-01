@@ -67,6 +67,19 @@ FILTER_CONDITION_ROWS = '[data-testid*="filter-modal:condition"]'
 FILTER_ACTION_FOLDER_ROW = '[data-testid="filter-modal:folder-row"]'
 FILTER_ACTION_LABEL_ROW = '[data-testid="filter-modal:label-row"]'
 FILTER_ACTION_MARK_AS_ROW = '[data-testid="filter-modal:mark-as-row"]'
+# Every action row, used to spot rows the scraper does not understand
+FILTER_ACTION_ANY_ROW = '[data-testid^="filter-modal:"][data-testid$="-row"]'
+
+FILTER_ACTION_AUTO_REPLY_ROW = '[data-testid="filter-modal:auto-reply-row"]'
+
+# "Label as" row internals, from the live UI (2026-09-30). The row lists
+# every account label as one of these options; applied = checkbox ticked.
+FILTER_LABEL_OPTION = 'label.checkbox-container'
+FILTER_LABEL_OPTION_TEXT = '.label-stack-item-text'
+
+# Folder dropdown inside the folder row (id="move-to-select" in the live
+# UI). The row's first button is a collapse toggle, not this.
+FOLDER_SELECT_BUTTON = 'button.select'
 
 # Sieve editor modal - opened by "Add sieve filter" button or editing an existing sieve filter
 ADD_SIEVE_FILTER_BUTTON = 'button:has-text("Add sieve filter")'

@@ -6,13 +6,74 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
-from src.models.backup_models import Backup, BackupMetadata, Archive, ArchiveEntry
+from src.models.backup_models import (
+    Backup, BackupMetadata, Archive, ArchiveEntry, BACKUP_FORMAT_VERSION,
+)
 from src.models.filter_models import ProtonMailFilter
 from src.utils.config import SNAPSHOTS_DIR, TOOL_VERSION
 
 logger = logging.getLogger(__name__)
+
+# Filter fields added in backup format 1.1. A 1.0 backup's checksum was
+# computed before they existed, so they are left out when verifying one;
+# otherwise their defaults would change the hashed JSON and every old
+# backup would fail verification.
+EVIDENCE_FIELDS = {"raw", "scrape_issues"}
+
+
+def compute_checksum(filters: List[ProtonMailFilter], sieve_script: str, version: str) -> str:
+    """SHA-256 over the filters and Sieve script, in the layout of `version`."""
+    exclude = EVIDENCE_FIELDS if version == "1.0" else None
+    checksum_data = {
+        "filters": [f.model_dump(exclude=exclude) for f in filters],
+        "sieve_script": sieve_script,
+    }
+    checksum_json = json.dumps(checksum_data, sort_keys=True, default=str)
+    return "sha256:" + hashlib.sha256(checksum_json.encode()).hexdigest()
+
+
+def unverified_for_deletion(
+    live_filters: List[ProtonMailFilter], backed_up: List[ProtonMailFilter],
+) -> List[Tuple[ProtonMailFilter, str]]:
+    """Return the live filters that are not safe to delete, each with a reason.
+
+    Deleting a UI filter is only safe if a backup holds a copy that is
+    known to be whole: same content_hash as the live filter (so the backup
+    is of this exact filter), no scrape issues, and raw evidence to recover
+    from if the parser still missed something. The live scrape itself must
+    also be complete, or the hash match proves nothing.
+
+    `backed_up` is every copy available to check against, typically the
+    latest snapshot's backup.json filters plus its archive.json entries.
+    """
+    copies_by_hash: Dict[str, List[ProtonMailFilter]] = {}
+    names_backed_up = set()
+    for f in backed_up:
+        copies_by_hash.setdefault(f.content_hash, []).append(f)
+        names_backed_up.add(f.name)
+
+    unverified = []
+    for live in live_filters:
+        if not live.is_complete:
+            unverified.append((live, "live filter could not be fully read: " + "; ".join(live.scrape_issues)))
+            continue
+        copies = copies_by_hash.get(live.content_hash, [])
+        if any(c.is_complete and c.raw is not None for c in copies):
+            continue
+        if not copies:
+            if live.name in names_backed_up:
+                reason = "backup copy differs from the live filter (run 'backup' again)"
+            else:
+                reason = "no backup copy of this filter (run 'backup' first)"
+        elif all(c.raw is None for c in copies):
+            reason = "backup copy has no raw evidence (made before backup format 1.1); run 'backup' again"
+        else:
+            issues = sorted({i for c in copies for i in c.scrape_issues})
+            reason = "backup copy is incomplete: " + "; ".join(issues)
+        unverified.append((live, reason))
+    return unverified
 
 
 class BackupManager:
@@ -40,6 +101,7 @@ class BackupManager:
         )
 
         backup = Backup(
+            version=BACKUP_FORMAT_VERSION,
             timestamp=now,
             metadata=metadata,
             filters=filters,
@@ -47,12 +109,7 @@ class BackupManager:
         )
 
         # Calculate checksum (includes sieve_script for integrity)
-        checksum_data = {
-            "filters": [f.model_dump() for f in filters],
-            "sieve_script": sieve_script,
-        }
-        checksum_json = json.dumps(checksum_data, sort_keys=True, default=str)
-        backup.checksum = "sha256:" + hashlib.sha256(checksum_json.encode()).hexdigest()
+        backup.checksum = compute_checksum(filters, sieve_script, backup.version)
 
         # Create snapshot subdirectory
         dirname = now.strftime("%Y-%m-%d_%H-%M-%S")
@@ -136,12 +193,7 @@ class BackupManager:
             logger.warning("Backup has no checksum")
             return False
 
-        checksum_data = {
-            "filters": [f.model_dump() for f in backup.filters],
-            "sieve_script": backup.sieve_script,
-        }
-        checksum_json = json.dumps(checksum_data, sort_keys=True, default=str)
-        computed = "sha256:" + hashlib.sha256(checksum_json.encode()).hexdigest()
+        computed = compute_checksum(backup.filters, backup.sieve_script, backup.version)
 
         is_valid = computed == backup.checksum
         if not is_valid:

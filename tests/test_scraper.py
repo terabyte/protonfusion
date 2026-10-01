@@ -6,6 +6,7 @@ from src.scraper.protonmail_scraper import (
     _distribute_indices,
     ProtonMailScraper,
     BULLET_CHARS,
+    _parse_label_row,
 )
 
 
@@ -97,3 +98,47 @@ class TestResolveFolderPath:
     def test_no_match_returns_clean(self):
         scraper = self._make_scraper({"Other": "Other"})
         assert scraper._resolve_folder_path("Unknown") == "Unknown"
+
+
+class TestParseLabelRow:
+    """Tests for _parse_label_row, the pure half of the "Label as" reader.
+
+    The live row lists every account label as a checkbox; options are
+    (name, ticked) pairs and only ticked ones are applied.
+    """
+
+    ROW = "Label as\npf-test-label\nWork\nFinance\nCreate label"
+
+    def test_only_ticked_labels(self):
+        options = [("pf-test-label", False), ("Work", True), ("Finance", True)]
+        labels, issue = _parse_label_row(options, self.ROW)
+        assert labels == ["Work", "Finance"]
+        assert issue is None
+
+    def test_nothing_ticked_is_no_labels_not_an_issue(self):
+        options = [("pf-test-label", False), ("Work", False), ("Finance", False)]
+        assert _parse_label_row(options, self.ROW) == ([], None)
+
+    def test_account_with_no_labels(self):
+        assert _parse_label_row([], "Label as\nCreate label") == ([], None)
+
+    def test_label_name_with_comma(self):
+        labels, issue = _parse_label_row([("Smith, John", True)], "Label as\nSmith, John\nCreate label")
+        assert labels == ["Smith, John"]
+        assert issue is None
+
+    def test_inline_text_run_together(self):
+        """innerText joins inline elements with no separator."""
+        labels, issue = _parse_label_row([("Work", True)], "Label asWorkCreate label")
+        assert labels == ["Work"]
+        assert issue is None
+
+    def test_unnamed_option_is_an_issue(self):
+        labels, issue = _parse_label_row([("Work", False), ("", True)], "Label as\nWork")
+        assert "no readable name" in issue
+
+    def test_unexplained_text_is_an_issue(self):
+        """A layout change must not read as "no labels"."""
+        labels, issue = _parse_label_row([("Work", False)], "Label as\nWork\nApplied: Receipts\nCreate label")
+        assert labels == []
+        assert "Applied: Receipts" in issue

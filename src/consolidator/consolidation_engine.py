@@ -12,6 +12,11 @@ from src.consolidator.strategies.optimize_ordering import optimize_ordering
 logger = logging.getLogger(__name__)
 
 
+def _action_target(action) -> str:
+    """The folder or label an action points at, or "" if it has none."""
+    return action.parameters.get("folder") or action.parameters.get("label") or ""
+
+
 @dataclass
 class ConsolidationReport:
     """Report showing consolidation results."""
@@ -122,8 +127,8 @@ class ConsolidationEngine:
         for cf in consolidated:
             for action in cf.actions:
                 action_desc = action.type.value
-                if action.parameters.get("folder"):
-                    action_desc += f" ({action.parameters['folder']})"
+                if _action_target(action):
+                    action_desc += f" ({_action_target(action)})"
                 report.groups[action_desc] = report.groups.get(action_desc, 0) + cf.filter_count
 
         logger.info("Consolidation complete: %d -> %d filters (%.1f%% reduction)",
@@ -150,8 +155,8 @@ class ConsolidationEngine:
         for f in selected:
             for action in f.actions:
                 key = action.type.value
-                if action.parameters.get("folder"):
-                    key += f" -> {action.parameters['folder']}"
+                if _action_target(action):
+                    key += f" -> {_action_target(action)}"
                 action_counts[key] = action_counts.get(key, 0) + 1
 
         # Count by condition type

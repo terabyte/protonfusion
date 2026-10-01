@@ -13,6 +13,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
+from rich.markup import escape
 from rich import print as rprint
 from rich.markup import escape
 
@@ -21,7 +22,7 @@ from src.utils.config import (
 )
 from src.models.filter_models import ProtonMailFilter, FilterStatus
 from src.models.backup_models import Backup, ArchiveEntry
-from src.backup.backup_manager import BackupManager
+from src.backup.backup_manager import BackupManager, unverified_for_deletion
 from src.backup.diff_engine import DiffEngine
 from src.parser.filter_parser import parse_scraped_filters
 from src.consolidator.consolidation_engine import ConsolidationEngine
@@ -52,6 +53,15 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+
+def _print_incomplete(filters: List[ProtonMailFilter], heading: str):
+    """List filters the scraper could not fully read, with each reason."""
+    console.print(f"[bold red]{heading}")
+    for f in filters:
+        console.print(f"  [red]- {escape(f.name)}")
+        for issue in f.scrape_issues:
+            console.print(f"      {escape(issue)}")
 
 
 def _get_credentials(credentials_file: str, manual_login: bool):
@@ -126,8 +136,16 @@ def backup(
     manual_login: bool = typer.Option(False, "--manual-login", help="Force manual login"),
     output: str = typer.Option("", "--output", help="Custom output path for backup file"),
     workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
+    allow_incomplete: bool = typer.Option(
+        False, "--allow-incomplete",
+        help="Save the snapshot even if some filters could not be fully read (they are flagged in backup.json)",
+    ),
 ):
-    """Scrape current filters and save to a timestamped snapshot."""
+    """Scrape current filters and save to a timestamped snapshot.
+
+    Fails (exit 1, nothing saved) if any filter could not be fully read,
+    unless --allow-incomplete is given.
+    """
     from src.scraper.protonmail_scraper import ProtonMailScraper
 
     creds = _get_credentials(credentials_file, manual_login)
@@ -152,13 +170,37 @@ def backup(
             raw_filters = await scraper.scrape_all_filters(workers=workers)
             console.print(f"[green]Scraped {len(raw_filters)} filters")
 
+            # Parse filters
+            filters = parse_scraped_filters(raw_filters)
+
+            # A filter the scraper could not fully read must not be saved
+            # as though it were whole: consolidate would build Sieve without
+            # the missing parts, and cleanup would then delete the only
+            # complete copy. Refuse unless the user explicitly accepts it.
+            incomplete = [f for f in filters if not f.is_complete]
+            unparsed = len(raw_filters) - len(filters)
+            if incomplete or unparsed:
+                if incomplete:
+                    _print_incomplete(
+                        incomplete,
+                        f"{len(incomplete)} filter(s) could not be fully read:",
+                    )
+                if unparsed:
+                    console.print(f"[bold red]{unparsed} scraped filter(s) could not be parsed (see log above).")
+                if not allow_incomplete:
+                    console.print(
+                        "[bold red]Backup NOT saved.[/] Their actions or conditions may be incomplete, "
+                        "so a Sieve script built from them could silently drop behaviour.\n"
+                        "Re-run with --allow-incomplete to save anyway; the filters are flagged in "
+                        "backup.json and cleanup will refuse to delete them."
+                    )
+                    raise typer.Exit(1)
+                console.print("[yellow]--allow-incomplete given: saving with these filters flagged.")
+
             with console.status("[bold green]Reading existing Sieve script..."):
                 sieve_script = await scraper.read_sieve_script(
                     filter_name=SIEVE_FILTER_NAME,
                 )
-
-            # Parse filters
-            filters = parse_scraped_filters(raw_filters)
 
             # Create backup
             manager = BackupManager()
@@ -175,6 +217,8 @@ def backup(
                 f"Disabled: {bkup.metadata.disabled_count}",
                 f"Checksum: {bkup.checksum[:30]}...",
             ]
+            if incomplete:
+                backup_lines.append(f"[yellow]Incomplete (flagged): {len(incomplete)}[/]")
             if sieve_script:
                 backup_lines.append(f"\nSieve script captured: {len(sieve_script)} chars")
                 if SECTION_BEGIN not in sieve_script:
@@ -304,7 +348,8 @@ def _display_filters(filters: list, source: str = "ProtonMail account"):
                 action_parts.append(a.type.value)
         actions_str = ", ".join(action_parts) if action_parts else "[dim]none[/]"
 
-        table.add_row(str(i), f.name, status, conds_str, actions_str)
+        name_str = escape(f.name) if f.is_complete else f"{escape(f.name)} [red](incomplete)[/]"
+        table.add_row(str(i), name_str, status, conds_str, actions_str)
 
     console.print(table)
 
@@ -469,6 +514,14 @@ def consolidate(
             backup_filters.append(override.filter)
         else:
             backup_filters.append(f)
+
+    incomplete = [f for f in backup_filters + archived_filters if not f.is_complete and f.name not in exclude_names]
+    if incomplete:
+        _print_incomplete(
+            incomplete,
+            "Warning: these filters were not fully read when backed up; "
+            "the generated Sieve may be missing their unread parts:",
+        )
 
     if archived_filters:
         console.print(f"[cyan]Including {len(archived_filters)} archived filters from archive")
@@ -1096,6 +1149,10 @@ def cleanup(
         False, "--include-uncovered",
         help="Also delete disabled filters whose rules are NOT in the live ProtonFusion Sieve section",
     ),
+    allow_incomplete: bool = typer.Option(
+        False, "--allow-incomplete",
+        help="Also delete disabled filters whose backup copy is missing, incomplete, or lacks raw evidence",
+    ),
 ):
     """Delete disabled filters whose rules are already in the live Sieve script (with confirmation).
 
@@ -1103,6 +1160,8 @@ def cleanup(
     is present in the live ProtonFusion section, so deleting it never removes
     the last copy of a rule (e.g. after a refused or failed sync). Auto-archives
     disabled filters before deletion to preserve them for future consolidation.
+    Also refuses (exit 1) to delete any filter without a complete backup copy in the
+    latest snapshot, unless --allow-incomplete is given.
     """
     from src.scraper.protonmail_scraper import ProtonMailScraper
     from src.scraper.protonmail_sync import ProtonMailSync
@@ -1158,6 +1217,17 @@ def cleanup(
                 if not disabled:
                     console.print("[green]Nothing safe to delete.")
                     return
+        # Deletion is the one irreversible step, so each filter needs a
+        # backup copy known to be whole. Checked against the snapshot as it
+        # was before the auto-archive below adds the live scrape to it.
+        backed_up: List[ProtonMailFilter] = []
+        try:
+            backed_up = list(manager.load_backup("latest").filters)
+            backed_up += [e.filter for e in manager.load_archive(manager.snapshot_dir_for("latest"))]
+        except FileNotFoundError:
+            pass  # No snapshot: every filter is unverified
+        unverified = unverified_for_deletion(disabled, backed_up)
+        unverified_ids = {id(f) for f, _ in unverified}
 
         # Auto-archive any disabled filters missing from the archive
         try:
@@ -1185,15 +1255,48 @@ def cleanup(
 
         console.print(f"\n[bold yellow]Found {len(disabled)} disabled filters:")
         for f in disabled:
-            console.print(f"  [yellow]- {f.name}")
+            console.print(f"  [yellow]- {escape(f.name)}")
+
+        refused = []
+        if unverified:
+            if allow_incomplete:
+                console.print(
+                    f"\n[bold yellow]--allow-incomplete given: deleting {len(unverified)} filter(s) "
+                    "without a verified backup copy:"
+                )
+            else:
+                refused = unverified
+                console.print(
+                    f"\n[bold red]Refusing to delete {len(unverified)} filter(s) without a verified "
+                    "backup copy (deleting them could lose actions the backup does not hold):"
+                )
+            for f, reason in unverified:
+                console.print(f"  [red]- {escape(f.name)}[/]: {escape(reason)}")
+            if refused:
+                console.print("[yellow]Re-run 'backup', or pass --allow-incomplete to delete them anyway.")
+
+        # delete_filter() works by name, so a verified filter sharing a name
+        # with a refused one is held back too, or the wrong one could go.
+        refused_names = {f.name for f, _ in refused}
+        to_delete = [
+            f for f in disabled
+            if not (refused and id(f) in unverified_ids) and f.name not in refused_names
+        ]
 
         if dry_run:
-            console.print("\n[bold yellow]DRY RUN - No filters will be deleted.")
+            console.print(f"\n[bold yellow]DRY RUN - No filters will be deleted ({len(to_delete)} would be).")
+            if refused:
+                raise typer.Exit(1)
             return
 
-        confirm = typer.confirm(f"\nDelete {len(disabled)} disabled filters? This cannot be undone!")
+        if not to_delete:
+            raise typer.Exit(1)
+
+        confirm = typer.confirm(f"\nDelete {len(to_delete)} disabled filters? This cannot be undone!")
         if not confirm:
             console.print("[yellow]Cleanup cancelled.")
+            if refused:
+                raise typer.Exit(1)
             return
 
         sync_client = ProtonMailSync(headless=headless, credentials=creds, storage_state_path=state or None)
@@ -1203,14 +1306,18 @@ def cleanup(
             await sync_client.navigate_to_filters()
 
             deleted_count = 0
-            for f in disabled:
+            for f in to_delete:
                 if await sync_client.delete_filter(f.name):
                     deleted_count += 1
-                    console.print(f"  [red]Deleted: {f.name}")
+                    console.print(f"  [red]Deleted: {escape(f.name)}")
 
-            console.print(f"\n[green]Deleted {deleted_count}/{len(disabled)} filters")
+            console.print(f"\n[green]Deleted {deleted_count}/{len(to_delete)} filters")
         finally:
             await sync_client.close()
+
+        if refused:
+            console.print(f"[bold red]{len(refused)} filter(s) were not deleted (see above).")
+            raise typer.Exit(1)
 
     _run_browser_command(_run())
 

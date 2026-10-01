@@ -1122,3 +1122,81 @@ class TestStatusBasedSelection:
         )
         assert report.archived_count == 1
         assert report.excluded_count == 1
+
+
+class TestLabelActions:
+    """Labels must survive consolidation: filters whose label sets differ never merge."""
+
+    def _f(self, name, value, actions):
+        return ProtonMailFilter(
+            name=name,
+            conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value=value)],
+            actions=actions,
+        )
+
+    @staticmethod
+    def _move(folder):
+        return FilterAction(type=ActionType.MOVE_TO, parameters={"folder": folder})
+
+    @staticmethod
+    def _label(name):
+        return FilterAction(type=ActionType.LABEL, parameters={"label": name})
+
+    @staticmethod
+    def _labels_of(cf):
+        return sorted(a.parameters["label"] for a in cf.actions if a.type == ActionType.LABEL)
+
+    def test_same_folder_different_labels_not_merged(self):
+        result = group_by_action([
+            self._f("A", "a", [self._move("Work"), self._label("Red")]),
+            self._f("B", "b", [self._move("Work"), self._label("Blue")]),
+        ])
+        assert len(result) == 2
+        assert sorted(self._labels_of(cf)[0] for cf in result) == ["Blue", "Red"]
+
+    def test_label_subset_not_merged(self):
+        """A filter with labels {Red} must not absorb one with {Red, Blue}, or the reverse."""
+        result = group_by_action([
+            self._f("A", "a", [self._label("Red")]),
+            self._f("B", "b", [self._label("Red"), self._label("Blue")]),
+        ])
+        assert len(result) == 2
+        assert sorted(self._labels_of(cf) for cf in result) == [["Blue", "Red"], ["Red"]]
+
+    def test_labelled_and_unlabelled_not_merged(self):
+        result = group_by_action([
+            self._f("A", "a", [self._move("Work")]),
+            self._f("B", "b", [self._move("Work"), self._label("Red")]),
+        ])
+        assert len(result) == 2
+
+    def test_same_label_set_in_any_order_merges(self):
+        result = group_by_action([
+            self._f("A", "a", [self._label("Red"), self._label("Blue")]),
+            self._f("B", "b", [self._label("Blue"), self._label("Red")]),
+        ])
+        assert len(result) == 1
+        assert self._labels_of(result[0]) == ["Blue", "Red"]
+        assert result[0].filter_count == 2
+
+    def test_engine_keeps_every_label(self):
+        """Through all three strategies, each source filter's labels still apply."""
+        engine = ConsolidationEngine()
+        consolidated, report = engine.consolidate([
+            self._f("A", "a", [self._move("Work"), self._label("Red")]),
+            self._f("B", "b", [self._move("Work"), self._label("Red")]),
+            self._f("C", "c", [self._move("Work"), self._label("Blue")]),
+        ])
+        by_labels = {tuple(self._labels_of(cf)): cf for cf in consolidated}
+        assert set(by_labels) == {("Red",), ("Blue",)}
+        assert sorted(by_labels[("Red",)].source_filters) == ["A", "B"]
+        assert report.groups["label (Red)"] == 2
+        assert report.groups["label (Blue)"] == 1
+
+    def test_analyze_distinguishes_labels(self):
+        stats = ConsolidationEngine().analyze([
+            self._f("A", "a", [self._label("Red")]),
+            self._f("B", "b", [self._label("Blue")]),
+        ])
+        assert stats["action_distribution"] == {"label -> Red": 1, "label -> Blue": 1}
+        assert stats["consolidation_opportunities"] == {}

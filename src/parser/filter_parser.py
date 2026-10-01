@@ -114,6 +114,8 @@ def parse_filter(raw: dict) -> ProtonMailFilter:
         logic=logic,
         conditions=conditions,
         actions=actions,
+        raw=raw.get("raw"),
+        scrape_issues=list(raw.get("scrape_issues", [])),
     )
 
 
