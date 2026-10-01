@@ -581,6 +581,31 @@ class TestRestoreLeavesNoRuleInNeitherPlace:
         assert 'address from :is "old@x"' not in result.output
 
 
+    def test_legacy_form_in_the_backed_up_script_carries_the_live_rule(self, cli_env):
+        """W4: the backup's script was written by the old generator (`discard;` for Trash),
+        the live one has the corrected `fileinto "trash";`. Same rule, so no refusal."""
+        t = _filter("T", "t@x", enabled=False, priority=0, action=ActionType.TRASH)
+        live = _section_for([t])
+        assert 'fileinto "trash";' in live
+        legacy = live.replace('fileinto "trash";', "discard;")
+        BackupManager(cli_env).create_backup([t, _sieve(SIEVE_FILTER_NAME, legacy, priority=1)], sieve_script=legacy)
+        FakeBrowser.current = [t, _sieve(SIEVE_FILTER_NAME, live, priority=1)]
+        FakeBrowser.live_script = live
+        result = runner.invoke(app, ["restore", "--backup", "latest"], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert "filtered by nothing" not in result.output
+        assert FakeBrowser.calls == [("upload", legacy, SIEVE_FILTER_NAME)]
+
+    def test_legacy_form_still_needs_the_same_rule(self):
+        """W4: accepting legacy forms does not accept a different rule."""
+        from src.backup.restore_engine import uncovered_live_rules
+        t = _filter("T", "t@x", action=ActionType.TRASH)
+        live = _section_for([t])
+        other = _section_for([_filter("T", "other@x", action=ActionType.TRASH)]).replace('fileinto "trash";', "discard;")
+        assert len(uncovered_live_rules(live, other, [])) == 1
+        assert uncovered_live_rules(live, live.replace('fileinto "trash";', "discard;"), []) == []
+
+
 class TestRestoreFilterLimit:
     """V8: ProtonMail limits active filters, and ProtonFusion's own filter counts."""
 

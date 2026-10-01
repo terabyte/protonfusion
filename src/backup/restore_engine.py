@@ -13,7 +13,7 @@ from typing import Dict, Iterable, List, Tuple
 
 from src.backup.backup_manager import format_predates_strict_parser
 from src.consolidator.carry_forward import filter_facts
-from src.generator.sieve_rules import Fact, compare_sections, current_forms
+from src.generator.sieve_rules import Fact, compare_sections, current_forms, script_facts
 from src.models.backup_models import Backup
 from src.models.filter_models import ProtonMailFilter, FilterStatus, legacy_identity
 from src.scraper.protonmail_sync import ProtonMailSync
@@ -66,19 +66,29 @@ def uncovered_live_rules(
     one, the live one if it is unchanged, or "" if the filter ends off) or
     in a wizard filter that is on afterwards. A fact in neither is mail the
     restore leaves unfiltered: a filter `cleanup` deleted, or one edited
-    since the backup, so the restore cannot switch it back on. A legacy
-    form of a fact (old Trash action, wildcard-less begins-with) counts as
-    carried when its current form is.
+    since the backup, so the restore cannot switch it back on.
+
+    Legacy forms (the old `discard;` Trash action, a wildcard-less
+    begins-with) count in both directions. A live fact in a legacy form is
+    carried when a filter or the target script holds its current form, and,
+    since the target script is often the older one, a live fact in its
+    current form is carried when the target script holds a legacy form of
+    it. compare_sections only pairs a legacy live form with a current new
+    one, so the target side is expanded here.
 
     Raises SieveParseError if either script cannot be parsed.
     """
     dropped = compare_sections(live_script, script_active_after).dropped
+    in_target = set()
+    if script_active_after:
+        for fact in script_facts(script_active_after):
+            in_target |= current_forms(fact)
     carried = set()
     for f in filters_on_after:
         if f.is_sieve or not f.is_complete:
             continue
         carried |= filter_facts(f)
-    return [fact for fact in dropped if not (current_forms(fact) & carried)]
+    return [fact for fact in dropped if not (current_forms(fact) & (carried | in_target))]
 
 
 class RestoreEngine:
