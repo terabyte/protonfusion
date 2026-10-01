@@ -13,6 +13,7 @@ from src.models.backup_models import (
 )
 from src.models.filter_models import ProtonMailFilter
 from src.utils.config import SNAPSHOTS_DIR, TOOL_VERSION
+from src.utils.private_files import write_private_file
 
 logger = logging.getLogger(__name__)
 
@@ -111,15 +112,13 @@ class BackupManager:
         # Calculate checksum (includes sieve_script for integrity)
         backup.checksum = compute_checksum(filters, sieve_script, backup.version)
 
-        # Create snapshot subdirectory
+        # Save backup.json inside a new snapshot subdirectory. It holds the
+        # user's filter data, so like the session file it is owner-only (a
+        # snapshot dir this creates is 0700).
         dirname = now.strftime("%Y-%m-%d_%H-%M-%S")
         snapshot_dir = self.snapshots_dir / dirname
-        snapshot_dir.mkdir(parents=True, exist_ok=True)
-
-        # Save backup.json inside the snapshot dir
         filepath = snapshot_dir / "backup.json"
-        with open(filepath, "w") as f:
-            json.dump(backup.model_dump(), f, indent=2, default=str)
+        write_private_file(filepath, json.dumps(backup.model_dump(), indent=2, default=str))
 
         # Carry forward archive from previous snapshot before updating symlink
         self.carry_forward_archive(snapshot_dir)
@@ -217,7 +216,7 @@ class BackupManager:
         """Serialize archive entries to archive.json in the snapshot directory."""
         archive = Archive(entries=entries)
         archive_path = snapshot_dir / "archive.json"
-        archive_path.write_text(json.dumps(archive.model_dump(), indent=2, default=str))
+        write_private_file(archive_path, json.dumps(archive.model_dump(), indent=2, default=str))
         logger.info("Archive written: %s (%d entries)", archive_path, len(entries))
 
     def load_archive(self, snapshot_dir: Path) -> List[ArchiveEntry]:
@@ -263,7 +262,7 @@ class BackupManager:
             "synced_at": None,
         }
         manifest_path = snapshot_dir / "manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2))
+        write_private_file(manifest_path, json.dumps(manifest, indent=2))
         logger.info("Manifest written: %s (%d filters)", manifest_path, len(filters))
 
     def load_manifest(self, snapshot_dir: Path) -> Optional[dict]:
@@ -280,7 +279,7 @@ class BackupManager:
             return False
         manifest["synced_at"] = datetime.now(timezone.utc).isoformat()
         manifest_path = snapshot_dir / "manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2))
+        write_private_file(manifest_path, json.dumps(manifest, indent=2))
         logger.info("Manifest promoted (synced): %s", manifest_path)
         return True
 
