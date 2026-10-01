@@ -7,9 +7,9 @@ from typer.testing import CliRunner
 
 from src.main import app
 from src.backup.backup_manager import BackupManager
-from src.consolidator.carry_forward import CARRIED_PREFIX, facts_to_filters, label_targets
+from src.consolidator.carry_forward import CARRIED_PREFIX, facts_to_filters, filter_facts, label_targets
 from src.consolidator.consolidation_engine import ConsolidationEngine
-from src.generator.sieve_generator import SieveGenerator
+from src.generator.sieve_generator import SECTION_BEGIN, SECTION_END, SieveGenerator
 from src.generator.sieve_rules import compare_sections, script_facts
 from src.models.filter_models import (
     ProtonMailFilter, FilterCondition, FilterAction, FilterStatus,
@@ -79,7 +79,7 @@ class TestFactsToFilters:
         facts = _generated_facts([_filter(f"s{i}") for i in range(50)])
         filters, _ = facts_to_filters(facts)
         assert len(filters) == 1
-        assert filters[0].conditions[0].value.count("|") == 49
+        assert len(filters[0].conditions[0].values) == 50
 
     def test_fileinto_is_move_to_without_label_info(self):
         """The Sieve cannot tell a label from a folder, so the default is MOVE_TO."""
@@ -250,7 +250,7 @@ class TestWildcardOperatorsCarryForward:
         ("*", Operator.MATCHES, "*"),
     ])
     def test_pattern_maps_to_operator(self, pattern, operator, value):
-        sieve = f'if address :matches "From" "{pattern}" {{ discard; }}'
+        sieve = f'if address :matches "From" "{pattern}" {{ fileinto "trash"; }}'
         (f,), unconvertible = facts_to_filters(script_facts(sieve))
         assert unconvertible == []
         (cond,) = f.conditions
@@ -271,3 +271,139 @@ class TestWildcardOperatorsCarryForward:
         assert unconvertible == []
         assert {c.operator for f in carried for c in f.conditions} == {Operator.STARTS_WITH, Operator.ENDS_WITH}
         assert _generated_facts(carried) == facts
+
+
+class TestLegacyTrashCarryForward:
+    """A live `discard;` (the old Move to Trash) is carried forward as a Trash move."""
+
+    def test_discard_carried_as_trash(self):
+        live = script_facts('if address :is "From" "a@x.com" { discard; }')
+        (f,), unconvertible = facts_to_filters(live)
+        assert unconvertible == []
+        assert [a.type for a in f.actions] == [ActionType.TRASH]
+        script = SieveGenerator().generate(ConsolidationEngine().consolidate([f], include_disabled=True)[0])
+        assert 'fileinto "trash";' in script
+        assert "discard" not in script
+        # The live section and the carried rule pair up as a correction
+        live_script = f'{SECTION_BEGIN}\nif address :is "From" "a@x.com" {{ discard; }}\n{SECTION_END}\n'
+        result = compare_sections(live_script, script)
+        assert result.is_safe
+        assert len(result.folder_fixes) == 1
+
+    def test_fileinto_trash_is_trash_action(self):
+        (f,), _ = facts_to_filters(script_facts('if address :is "From" "a" { fileinto "trash"; }'))
+        assert [a.type for a in f.actions] == [ActionType.TRASH]
+
+    def test_unconvertible_discard_fact_returned_as_given(self):
+        facts = script_facts('if not exists "X-Foo" { discard; }')
+        filters, unconvertible = facts_to_filters(facts)
+        assert filters == []
+        assert set(unconvertible) == facts
+
+
+class TestFilterFactsOfUngeneratableFilter:
+    """filter_facts must not raise for a filter the generator refuses."""
+
+    def test_conditionless_filter_is_never_covered(self):
+        empty = ProtonMailFilter(name="lost its condition", actions=[FilterAction(type=ActionType.TRASH)])
+        facts = filter_facts(empty)
+        (fact,) = facts
+        assert "no conditions" in fact.describe()
+        live = script_facts(SieveGenerator.merge_with_existing(
+            SieveGenerator().generate(ConsolidationEngine().consolidate(
+                [_filter("a@x.com")], include_disabled=True)[0]), ""))
+        assert not facts <= live
+
+
+class TestAttachmentCarryForward:
+    """Only the generator's `exists "X-Attached"` maps back to an attachment condition."""
+
+    def test_exists_x_attached_round_trips(self):
+        facts = script_facts('if exists "X-Attached" { fileinto "Receipts"; }')
+        (f,), unconvertible = facts_to_filters(facts)
+        assert unconvertible == []
+        (cond,) = f.conditions
+        assert (cond.type, cond.operator) == (ConditionType.ATTACHMENTS, Operator.HAS)
+        assert _generated_facts([f]) == facts
+
+    @pytest.mark.parametrize("sieve", [
+        'if true { fileinto "trash"; }',
+        'fileinto "trash";',
+        'if allof (true, address :is "From" "a") { fileinto "trash"; }',
+    ])
+    def test_true_is_not_an_attachment_condition(self, sieve):
+        filters, unconvertible = facts_to_filters(script_facts(sieve))
+        assert filters == []
+        assert unconvertible
+
+
+class TestMultiValueCarryForward:
+    """Key lists round-trip as values lists; a literal with ", " stays literal."""
+
+    def test_literal_with_comma_round_trips(self):
+        facts = script_facts('if header :contains "Subject" "Invoice, Receipt" { fileinto "trash"; }')
+        (f,), unconvertible = facts_to_filters(facts)
+        assert unconvertible == []
+        assert f.conditions[0].keys == ["invoice, receipt"]
+        assert _generated_facts([f]) == facts
+
+    def test_key_with_pipe_round_trips(self):
+        facts = script_facts('if header :contains "Subject" ["a|b", "c"] { fileinto "trash"; }')
+        (f,), unconvertible = facts_to_filters(facts)
+        assert unconvertible == []
+        assert sorted(f.conditions[0].values) == ["a|b", "c"]
+        assert _generated_facts([f]) == facts
+
+
+@pytest.mark.parametrize("target", ["Archive", "archive"])
+def test_archive_any_case_carries_as_archive(target):
+    facts = script_facts(f'if address :is "From" "a" {{ fileinto "{target}"; }}')
+    (f,), unconvertible = facts_to_filters(facts)
+    assert unconvertible == []
+    assert [a.type for a in f.actions] == [ActionType.ARCHIVE]
+    assert _generated_facts([f]) == facts
+
+
+def test_live_archive_counts_as_covering_archive_filter():
+    """cleanup coverage: an old live "Archive" rule covers a current archive filter."""
+    f = ProtonMailFilter(
+        name="arch",
+        conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="a")],
+        actions=[FilterAction(type=ActionType.ARCHIVE)],
+    )
+    live = script_facts('if address :is "From" "a" { fileinto "Archive"; }')
+    assert filter_facts(f) <= live
+
+
+def test_escaped_slash_in_folder_round_trips():
+    """'Misc/Others' inside 'Work' survives carry-forward without double escaping."""
+    from src.models.filter_models import join_folder_path
+    folder = join_folder_path(["Work", "Misc/Others"])
+    f = ProtonMailFilter(
+        name="nested",
+        conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="a")],
+        actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": folder})],
+    )
+    facts = _generated_facts([f])
+    (carried,), unconvertible = facts_to_filters(facts)
+    assert unconvertible == []
+    assert carried.actions[0].parameters == {"folder": "Work/Misc\\/Others"}
+    assert _generated_facts([carried]) == facts
+
+
+def test_candidate_with_extra_facts_is_unconvertible(monkeypatch):
+    """A candidate whose regeneration yields MORE than its facts is refused.
+
+    Verification must be equality: a candidate that also produces some
+    other fact would add a rule nobody had, so a superset is not a match.
+    """
+    import src.consolidator.carry_forward as carry_forward
+
+    facts = script_facts('if address :is "From" "a" { fileinto "trash"; }')
+    extra = next(iter(script_facts('if address :is "From" "zzz" { fileinto "trash"; }')))
+    real_filter_facts = carry_forward.filter_facts
+    monkeypatch.setattr(carry_forward, "filter_facts", lambda f: real_filter_facts(f) | {extra})
+
+    filters, unconvertible = facts_to_filters(facts)
+    assert filters == []
+    assert set(unconvertible) == facts

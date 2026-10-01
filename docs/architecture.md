@@ -100,7 +100,7 @@ The key insight is the **ConditionGroup** abstraction. When multiple filters are
 |------|--------|
 | `ConditionType` | sender, recipient, subject, attachments, header |
 | `Operator` | contains, is, matches, starts_with, ends_with, has |
-| `ActionType` | move_to, label, mark_read, star, archive, delete |
+| `ActionType` | move_to, label, mark_read, star, archive, trash (old backups' `delete` is read as trash) |
 | `LogicType` | and, or |
 | `FilterStatus` | enabled, disabled, archived, deprecated |
 
@@ -186,7 +186,7 @@ This preserves exact behavioral equivalence.
 
 ### Strategy 3: Optimize Ordering (`optimize_ordering.py`)
 
-Rules are sorted by action priority (delete > archive > move > label > mark_read > star), with a secondary sort by filter count. This ensures the most impactful rules (like spam deletion) are evaluated first.
+Rules are sorted by action priority (trash > archive > move > label > mark_read > star), with a secondary sort by filter count.
 
 ### Adding New Strategies
 
@@ -196,8 +196,8 @@ Each strategy is a function with the signature `List[ConsolidatedFilter] → Lis
 
 The generator converts `ConsolidatedFilter` objects into RFC 5228 Sieve scripts. Key behaviors:
 
-- **Extension collection**: Scans all filters for required Sieve extensions (fileinto, imap4flags, regex) and generates the appropriate `require` statement.
-- **Pipe-delimited arrays**: Values like `"alice|bob"` expand to Sieve arrays `["alice", "bob"]`.
+- **Extension collection**: Scans all filters for required Sieve extensions (fileinto, imap4flags) and generates the appropriate `require` statement.
+- **Key lists**: A condition's `values` list (several wizard chips, or values merged by consolidation) becomes a Sieve array `["alice", "bob"]`. A single `value` is always one literal, even if it contains ", " or "|".
 - **Section markers**: Generated rules are wrapped in `# === BEGIN ProtonFusion ===` / `# === END ProtonFusion ===` markers.
 - **Merging**: When uploading to an account that already has a Sieve script, content outside the markers is preserved in place (above the section stays above, below stays below). Require statements are deduplicated.
 - **Rule preservation**: `sieve_rules.py` parses a section into condition/action pairs. `sync` refuses if the new section drops a pair present in the live one, and `cleanup` only deletes disabled filters whose pairs are all live. See [sieve-reference.md](sieve-reference.md#rule-preservation).
@@ -213,8 +213,8 @@ The generator converts `ConsolidatedFilter` objects into RFC 5228 Sieve scripts.
 | label "X" | `fileinto "X";` |
 | mark as read | `addflag "\\Seen";` |
 | star | `addflag "\\Flagged";` |
-| archive | `fileinto "Archive";` |
-| delete | `discard;` |
+| archive | `fileinto "archive";` (a live `"Archive"` compares equal) |
+| trash | `fileinto "trash";` (never `discard;`, which Proton documents as a permanent delete) |
 
 ## Snapshot System
 

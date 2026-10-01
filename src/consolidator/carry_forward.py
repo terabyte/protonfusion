@@ -13,6 +13,12 @@ Conversion is the inverse of SieveGenerator for the constructs it emits, and
 every converted filter is verified by regenerating it and checking that it
 yields exactly the facts it was built from. Anything that cannot be
 reproduced exactly is returned as unconvertible rather than approximated.
+
+One deliberate exception: a live action older versions generated for a
+system folder (see sieve_rules.LEGACY_ACTION_FIXES, chiefly `discard;` for
+"Move to Trash") is carried forward in its corrected form, and verified
+against that. The live section is ProtonFusion's own output, and the
+wizard choice behind it never meant a permanent delete.
 """
 
 from __future__ import annotations
@@ -21,17 +27,16 @@ from collections import defaultdict
 from typing import AbstractSet, Dict, Iterable, List, Optional, Set, Tuple
 
 from src.generator.sieve_generator import (
-    SieveGenerator, escape_match_literal, unescape_match_literal,
+    SieveGenerationError, SieveGenerator, escape_match_literal, unescape_match_literal,
 )
-from src.generator.sieve_rules import Atom, Fact, _tokenize, describe_atom, script_facts
+from src.generator.sieve_generator import ARCHIVE_FOLDER, ATTACHMENT_TEST, TRASH_FOLDER
+from src.generator.sieve_rules import (
+    Atom, Fact, _tokenize, correct_legacy_actions, describe_atom, script_facts,
+)
 from src.models.filter_models import (
-    ActionType, ConditionGroup, ConditionType, ConsolidatedFilter, FilterAction,
-    FilterCondition, FilterStatus, LogicType, Operator, ProtonMailFilter,
+    CARRIED_PREFIX, ActionType, ConditionGroup, ConditionType, ConsolidatedFilter,
+    FilterAction, FilterCondition, FilterStatus, LogicType, Operator, ProtonMailFilter,
 )
-
-# Name prefix for filters synthesized from live Sieve rules. Shows up in the
-# generated "# Source filters:" comments and in `snapshot view`.
-CARRIED_PREFIX = "Carried forward"  # no brackets: Rich would parse them as markup
 
 
 def is_carried(f: ProtonMailFilter) -> bool:
@@ -60,8 +65,10 @@ _HEADERS_TO_TYPE = {
 
 def _atom_to_condition(atom: Atom) -> Optional[FilterCondition]:
     """Map one test atom back to a FilterCondition, or None if not representable."""
-    if atom == ("true",):
-        # SieveGenerator emits a bare `true` test for attachment conditions
+    if atom == ("opaque", ATTACHMENT_TEST):
+        # The generator's "has attachment" test. A bare `true` (what older
+        # versions wrote for it, and what a top-level action parses to)
+        # matches every message, so it maps to no condition at all.
         return FilterCondition(type=ConditionType.ATTACHMENTS, operator=Operator.HAS, value="")
     if len(atom) != 6:
         return None
@@ -72,8 +79,7 @@ def _atom_to_condition(atom: Atom) -> Optional[FilterCondition]:
         return None
     if operator == Operator.MATCHES:
         operator, value = _matches_operator(value)
-    # The generator splits values on "|" and ", ", so such values cannot round-trip
-    if "|" in value or ", " in value or not value:
+    if not value:
         return None
     return FilterCondition(type=ctype, operator=operator, value=value)
 
@@ -109,12 +115,13 @@ def _action_text_to_action(text: str, label_names: AbstractSet[str] = frozenset(
     """
     tokens = _tokenize(text)
     words = [(t.kind, t.value) for t in tokens]
-    if words == [("ident", "discard"), (";", ";")]:
-        return FilterAction(type=ActionType.DELETE)
     if len(words) == 3 and words[0] == ("ident", "fileinto") and words[1][0] == "string" and words[2][0] == ";":
         folder = words[1][1]
-        if folder == "Archive":
+        if folder.lower() == ARCHIVE_FOLDER:
+            # Facts already hold the lowercase form; any case is the Archive folder
             return FilterAction(type=ActionType.ARCHIVE)
+        if folder == TRASH_FOLDER:
+            return FilterAction(type=ActionType.TRASH)
         if folder in label_names:
             return FilterAction(type=ActionType.LABEL, parameters={"label": folder})
         return FilterAction(type=ActionType.MOVE_TO, parameters={"folder": folder})
@@ -148,7 +155,13 @@ def _describe_actions(action_texts: Iterable[str]) -> str:
 
 
 def filter_facts(f: ProtonMailFilter) -> Set[Fact]:
-    """The Sieve facts one filter contributes when generated on its own."""
+    """The Sieve facts one filter contributes when generated on its own.
+
+    A filter the generator refuses (no conditions, for example) contributes
+    a single placeholder fact that no Sieve script can contain. So it is
+    never "covered" by a live section (cleanup keeps it) and suppresses no
+    real rule.
+    """
     cf = ConsolidatedFilter(
         name=f.name,
         condition_groups=[ConditionGroup(logic=f.logic, conditions=f.conditions)],
@@ -156,7 +169,10 @@ def filter_facts(f: ProtonMailFilter) -> Set[Fact]:
         source_filters=[f.name],
         filter_count=1,
     )
-    return script_facts(SieveGenerator().generate([cf]))
+    try:
+        return script_facts(SieveGenerator().generate([cf]))
+    except SieveGenerationError as e:
+        return {Fact(frozenset({("ungeneratable", f"cannot generate: {e}")}), frozenset())}
 
 
 def label_targets(filters: Iterable[ProtonMailFilter]) -> Set[str]:
@@ -188,15 +204,24 @@ def facts_to_filters(
     label_targets); their actions come back as LABEL instead of MOVE_TO.
 
     Single-atom facts sharing an action set, condition type and operator are
-    packed into one filter with a pipe-joined value (which the generator
-    expands to a Sieve key list). Multi-atom facts (from allof tests) each
+    packed into one filter whose condition has a values list (generated as
+    a Sieve key list). Multi-atom facts (from allof tests) each
     become their own AND filter.
+
+    A fact using an action older versions generated for a system folder
+    (`discard;` for Trash) is converted in its corrected form; see the
+    module docstring. Unconvertible facts are always returned as given.
 
     Returns (filters, unconvertible_facts).
     """
+    # corrected fact -> the given fact(s) it came from
+    originals: Dict[Fact, List[Fact]] = defaultdict(list)
     by_actions: Dict[frozenset, List[Fact]] = defaultdict(list)
-    for fact in facts:
-        by_actions[fact.actions].append(fact)
+    for given in facts:
+        fact = correct_legacy_actions(given)
+        if fact not in originals:
+            by_actions[fact.actions].append(fact)
+        originals[fact].append(given)
 
     filters: List[ProtonMailFilter] = []
     unconvertible: List[Fact] = []
@@ -204,7 +229,7 @@ def facts_to_filters(
     for action_texts, group in sorted(by_actions.items(), key=lambda kv: _describe_actions(kv[0])):
         actions = _actions_for(action_texts, label_names)
         if actions is None:
-            unconvertible.extend(group)
+            unconvertible.extend(g for fact in group for g in originals[fact])
             continue
         action_desc = _describe_actions(action_texts)
         prefix = f"{CARRIED_PREFIX} ({label}):" if label else f"{CARRIED_PREFIX}:"
@@ -216,7 +241,7 @@ def facts_to_filters(
         for fact in sorted(group, key=Fact.describe):
             conditions = [_atom_to_condition(a) for a in sorted(fact.conditions)]
             if not conditions or any(c is None for c in conditions):
-                unconvertible.append(fact)
+                unconvertible.extend(originals[fact])
                 continue
             if len(conditions) == 1 and conditions[0].type != ConditionType.ATTACHMENTS:
                 packed[(conditions[0].type, conditions[0].operator)].append((conditions[0].value, fact))
@@ -238,7 +263,7 @@ def facts_to_filters(
                 ProtonMailFilter(
                     name=f"{prefix} {ctype.value} {operator.value} -> {action_desc}",
                     logic=LogicType.AND,
-                    conditions=[FilterCondition(type=ctype, operator=operator, value="|".join(values))],
+                    conditions=[FilterCondition(type=ctype, operator=operator, values=values)],
                     actions=actions,
                 ),
                 {fact for _, fact in entries},
@@ -251,6 +276,8 @@ def facts_to_filters(
                     "status": FilterStatus.ARCHIVED, "enabled": False,
                 }))
             else:
-                unconvertible.extend(sorted(expected, key=Fact.describe))
+                unconvertible.extend(
+                    g for fact in sorted(expected, key=Fact.describe) for g in originals[fact]
+                )
 
     return filters, unconvertible

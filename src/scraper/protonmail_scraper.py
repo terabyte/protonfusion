@@ -1,12 +1,16 @@
 """Playwright automation for scraping ProtonMail filters."""
 
 import asyncio
+import copy
 import logging
 import re
 from typing import Dict, List, Optional, Tuple
 
 from playwright.async_api import Page
 
+from src.models.filter_models import (
+    SYSTEM_FOLDER_ACTIONS, escape_folder_segment, join_folder_path,
+)
 from src.scraper import selectors
 from src.scraper.browser import (
     ProtonMailBrowser, MODAL_TRANSITION_MS, DROPDOWN_MS, FILTERS_PAGE_LOAD_MS,
@@ -30,8 +34,9 @@ UI_OPERATOR_TO_MODEL = {
 }
 
 
-# Folder names that are special actions, not real folder targets
-SPECIAL_FOLDERS = {"Do not move", "Inbox - Default", "Trash", "Archive", "Spam"}
+# Dropdown entries that are not user folders: "Do not move" plus the system
+# folders, which map to fixed actions (SYSTEM_FOLDER_ACTIONS).
+SPECIAL_FOLDERS = {"Do not move", *SYSTEM_FOLDER_ACTIONS}
 
 # Bullet characters used by ProtonMail to indicate subfolder nesting
 BULLET_CHARS = " \t•·"
@@ -498,26 +503,28 @@ class ProtonMailScraper(ProtonMailBrowser):
                 if operator not in KNOWN_OPERATORS:
                     issues.append(f"condition {row_index}: unknown operator {operator_label!r}")
 
-                # Get values - check for tags/chips first, then input
-                value = ""
+                # Get values - check for tags/chips first, then input. Each
+                # chip is its own value (the condition matches if any does),
+                # so several chips are kept as a list, never joined into
+                # text that would later have to be split again.
+                values: List[str] = []
                 tags = await row.query_selector_all(selectors.CONDITION_VALUE_TAGS)
                 if tags:
-                    tag_texts = []
                     for tag in tags:
-                        tag_texts.append((await tag.inner_text()).strip())
-                    value = ", ".join(tag_texts)
+                        values.append((await tag.inner_text()).strip())
                 else:
                     value_el = await row.query_selector(selectors.CONDITION_VALUE_INPUT)
                     if value_el:
-                        value = await value_el.input_value()
-                if not value.strip() and cond_type != "attachments":
+                        values.append((await value_el.input_value()).strip())
+                if cond_type != "attachments" and (not values or not all(values)):
                     issues.append(f"condition {row_index}: no value found")
 
-                conditions.append({
-                    "type": cond_type,
-                    "operator": operator,
-                    "value": value.strip(),
-                })
+                condition = {"type": cond_type, "operator": operator}
+                if len(values) > 1:
+                    condition["values"] = values
+                else:
+                    condition["value"] = values[0] if values else ""
+                conditions.append(condition)
             except Exception as e:
                 issues.append(f"condition {row_index}: could not be read ({e})")
 
@@ -568,7 +575,8 @@ class ProtonMailScraper(ProtonMailBrowser):
             if issue:
                 issues.append(issue)
             for label in labels:
-                label_actions.append({"type": "label", "parameters": {"label": label}})
+                # A "/" in a label name would read as a folder separator
+                label_actions.append({"type": "label", "parameters": {"label": escape_folder_segment(label)}})
 
         # Check "Mark as" checkboxes
         mark_row = await page.query_selector(selectors.FILTER_ACTION_MARK_AS_ROW)
@@ -612,15 +620,12 @@ class ProtonMailScraper(ProtonMailBrowser):
                 await self._build_folder_path_map(folder_btn, page=page)
 
             folder = self._resolve_folder_path(folder_label)
-            folder_map = {
-                "Trash": "delete",
-                "Archive": "archive",
-                "Spam": "move_to",
-                "Inbox - Default": "move_to",
-            }
-            action_type = folder_map.get(folder, "move_to")
-            if action_type in ("delete", "archive"):
-                actions.append({"type": action_type, "parameters": {}})
+            # System folders (Trash, Archive, Spam, Inbox) become the action
+            # Proton's own Sieve generator uses for them; Trash is a folder
+            # move, never a permanent delete.
+            system_action = SYSTEM_FOLDER_ACTIONS.get(folder)
+            if system_action is not None:
+                actions.append(copy.deepcopy(system_action))
             else:
                 actions.append({"type": "move_to", "parameters": {"folder": folder}})
 
@@ -715,7 +720,9 @@ class ProtonMailScraper(ProtonMailBrowser):
                 path_stack = path_stack[:depth]
                 path_stack.append(clean)
 
-                full_path = "/".join(path_stack)
+                # Names are escaped per segment: a "/" inside a folder's
+                # own name must not read as a separator (Proton: "\\/").
+                full_path = join_folder_path(path_stack)
                 self._folder_path_map[text] = full_path
                 self._folder_path_map[clean] = full_path
 
@@ -728,25 +735,32 @@ class ProtonMailScraper(ProtonMailBrowser):
             logger.info(
                 "Built folder path map: %d entries (%d nested)",
                 len(self._folder_path_map),
-                sum(1 for v in self._folder_path_map.values() if "/" in v),
+                sum(1 for v in self._folder_path_map.values() if re.search(r"(?<!\\)/", v)),
             )
         except Exception as e:
             logger.warning("Failed to build folder path map: %s", e)
             self._folder_path_map = {}
 
     def _resolve_folder_path(self, raw_label: str) -> str:
-        """Resolve a raw aria-label to the full folder path."""
+        """Resolve a raw aria-label to the full, escaped folder path.
+
+        System folders (SYSTEM_FOLDER_ACTIONS) come back as their plain
+        label, which _scrape_actions maps to a fixed action. A folder not
+        in the map is treated as one top-level name, so a "/" in it is
+        escaped rather than read as nesting.
+        """
+        clean = raw_label.lstrip(BULLET_CHARS).strip()
+        if clean in SYSTEM_FOLDER_ACTIONS:
+            return clean
         if self._folder_path_map:
             # Try exact match first (includes bullet prefix)
             if raw_label in self._folder_path_map:
                 return self._folder_path_map[raw_label]
             # Try stripped version
-            clean = raw_label.lstrip(BULLET_CHARS).strip()
             if clean in self._folder_path_map:
                 return self._folder_path_map[clean]
-            return clean
-        # No map available, fall back to stripping bullets
-        return raw_label.lstrip(BULLET_CHARS).strip()
+        # Not in the map (or no map): one top-level name
+        return escape_folder_segment(clean)
 
     async def _scrape_logic(self, page: Page = None) -> str:
         """Scrape the logic type (AND/OR) from the Conditions step."""

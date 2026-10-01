@@ -47,9 +47,12 @@ ACTION_TYPE_MAP = {
     "star it": ActionType.STAR,
     "archive": ActionType.ARCHIVE,
     "move to archive": ActionType.ARCHIVE,
-    "move to trash": ActionType.DELETE,
-    "delete": ActionType.DELETE,
-    "permanently delete": ActionType.DELETE,
+    # Trash is a folder move: the mail stays recoverable. "delete" is the
+    # name older backups used for it (see LEGACY_ACTION_TYPES). There is no
+    # permanent-delete entry because Proton's wizard has no such action.
+    "trash": ActionType.TRASH,
+    "move to trash": ActionType.TRASH,
+    "delete": ActionType.TRASH,
 }
 
 LOGIC_MAP = {
@@ -135,11 +138,15 @@ def parse_filter(raw: dict, strict: bool = True) -> ProtonMailFilter:
 
     conditions = []
     for cond in raw.get("conditions", []):
-        conditions.append({
+        parsed = {
             "type": _parse_or_keep(parse_condition_type, cond.get("type"), name, strict),
             "operator": _parse_or_keep(parse_operator, cond.get("operator"), name, strict),
             "value": cond.get("value", ""),
-        })
+        }
+        # Several wizard chips arrive as a list; a single value is a literal
+        if "values" in cond:
+            parsed["values"] = cond["values"]
+        conditions.append(parsed)
 
     actions = []
     for act in raw.get("actions", []):

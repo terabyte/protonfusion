@@ -3,7 +3,7 @@ import json
 import logging
 from enum import Enum
 from typing import List, Optional
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_serializer, model_validator
 
 
 class ConditionType(str, Enum):
@@ -29,18 +29,134 @@ class ActionType(str, Enum):
     MARK_READ = "mark_read"
     STAR = "star"
     ARCHIVE = "archive"
-    DELETE = "delete"
+    # "Move to Trash" in the wizard's folder dropdown. Generated as
+    # `fileinto "trash";`: the mail stays recoverable from Trash. Proton's
+    # filter wizard has no permanent-delete action, so nothing generates
+    # `discard;` (which Proton documents as deleting "immediately and
+    # permanently").
+    TRASH = "trash"
+    # Old name for TRASH, kept as an enum alias so existing callers still
+    # mean Trash. Backups store the old value "delete"; see
+    # LEGACY_ACTION_TYPES.
+    DELETE = "trash"
+
+
+# Proton's system folders as the wizard's "Move to" dropdown labels them,
+# mapped to the action the scraper records. Names are the ones Proton's own
+# wizard-to-Sieve generator (github.com/ProtonMail/sieve.js) writes in
+# `fileinto`, which Proton's Sieve docs also use (`fileinto "trash";`).
+# Trash and Archive have their own action types, generated as
+# `fileinto "trash";` and `fileinto "archive";`.
+SYSTEM_FOLDER_ACTIONS = {
+    "Trash": {"type": "trash", "parameters": {}},
+    "Archive": {"type": "archive", "parameters": {}},
+    "Spam": {"type": "move_to", "parameters": {"folder": "spam"}},
+    "Inbox - Default": {"type": "move_to", "parameters": {"folder": "inbox"}},
+}
+
+
+def escape_folder_segment(name: str) -> str:
+    r"""Escape one folder or label name for use in a Proton `fileinto` path.
+
+    Proton reads "/" in a fileinto target as the folder separator, so a "/"
+    inside a single name is escaped with a backslash. Proton's Sieve docs:
+    `"Work/Misc\\/Others"` in a script is the subfolder 'Misc/Others' of
+    'Work'. The folder/label parameters stored on actions hold the
+    unquoted path (`Work/Misc\/Others`); Sieve string quoting in the
+    generator then doubles the backslash, giving exactly Proton's form.
+    """
+    return name.replace("/", "\\/")
+
+
+def join_folder_path(segments: List[str]) -> str:
+    """Join folder names (outermost first) into one escaped `fileinto` path."""
+    return "/".join(escape_folder_segment(segment) for segment in segments)
+
+
+# Action types older versions wrote to backups, and what they meant. The
+# scraper recorded the Trash folder as "delete", and nothing else ever
+# produced it, so it always meant Trash.
+LEGACY_ACTION_TYPES = {"delete": "trash"}
+
+# move_to folder targets older versions recorded for system folders: the
+# dropdown label, written into `fileinto` verbatim.
+LEGACY_FOLDER_TARGETS = {"Spam": "spam", "Inbox - Default": "inbox"}
+
+
+def migrate_legacy_action(entry: dict) -> dict:
+    """Rewrite an action dict from an older backup into its current form.
+
+    Maps the old "delete" type to "trash" and the old system-folder targets
+    ("Spam", "Inbox - Default") to Proton's Sieve names. Anything else is
+    returned unchanged.
+    """
+    action_type = entry.get("type")
+    if isinstance(action_type, str) and action_type in LEGACY_ACTION_TYPES:
+        entry = dict(entry, type=LEGACY_ACTION_TYPES[action_type])
+    params = entry.get("parameters")
+    if entry.get("type") in ("move_to", ActionType.MOVE_TO) and isinstance(params, dict):
+        folder = params.get("folder")
+        if folder in LEGACY_FOLDER_TARGETS:
+            entry = dict(entry, parameters=dict(params, folder=LEGACY_FOLDER_TARGETS[folder]))
+    return entry
 
 
 class FilterCondition(BaseModel):
+    """One condition of a filter.
+
+    A condition has either one `value` or, when the wizard shows several
+    value chips (or consolidation merged several filters), a `values` list.
+    A list is a Sieve key list: the condition matches if ANY value matches.
+    It is only ever built from that structure, never inferred from text: a
+    `value` is always one literal, even if it contains ", " or "|" (as old
+    backups' joined chip values do), because reading separators into a
+    literal would widen the rule.
+    """
     type: ConditionType
     operator: Operator
     value: str = ""
+    values: List[str] = Field(default_factory=list)
+
+    @model_validator(mode='after')
+    def one_form_only(self):
+        """Keep a single value in `value`; refuse a condition with both forms."""
+        if self.values and self.value:
+            raise ValueError("a condition has either value or values, not both")
+        if len(self.values) == 1:
+            self.value, self.values = self.values[0], []
+        return self
+
+    @model_serializer(mode='wrap')
+    def omit_empty_values(self, handler):
+        """Leave `values` out when unused, so single-value conditions
+        serialize exactly as they did before the field existed."""
+        data = handler(self)
+        if isinstance(data, dict) and not data.get("values"):
+            data.pop("values", None)
+        return data
+
+    @property
+    def keys(self) -> List[str]:
+        """The values this condition matches against (any one matching is enough)."""
+        return list(self.values) if self.values else [self.value]
+
+    @property
+    def display_value(self) -> str:
+        """The value(s) quoted for display: "a", or ["a", "b"] for a list."""
+        return json.dumps(self.values) if self.values else json.dumps(self.value)
 
 
 class FilterAction(BaseModel):
     type: ActionType
     parameters: dict = Field(default_factory=dict)
+
+    @model_validator(mode='before')
+    @classmethod
+    def migrate_legacy(cls, data):
+        """Read an action written by an older version in its current form."""
+        if isinstance(data, dict):
+            return migrate_legacy_action(data)
+        return data
 
 
 class LogicType(str, Enum):
@@ -92,6 +208,83 @@ def unknown_value_problem(entry: dict, enum_fields) -> Optional[str]:
     return None
 
 
+# Condition types that take no value: "has attachment" is a test of the
+# message, not a comparison against text.
+VALUELESS_CONDITION_TYPES = {"attachments"}
+
+
+def empty_value_problem(entry) -> Optional[str]:
+    """Describe a condition whose value is missing, empty or only whitespace.
+
+    `entry` is a condition dict or a FilterCondition. An empty value is not
+    "no restriction": `header :contains "Subject" ""` matches every message,
+    so a rule built from it widens to all mail. Condition types in
+    VALUELESS_CONDITION_TYPES are exempt. Returns None when the value is fine.
+    """
+    if isinstance(entry, dict):
+        ctype, value, values = entry.get("type"), entry.get("value", ""), entry.get("values") or []
+    else:
+        ctype = getattr(entry, "type", None)
+        value, values = getattr(entry, "value", ""), getattr(entry, "values", [])
+    ctype = getattr(ctype, "value", ctype)
+    if not isinstance(values, list):
+        return f"values is not a list: {values!r}"
+    if values and value:
+        return "has both value and values"
+    if ctype in VALUELESS_CONDITION_TYPES:
+        return None
+    for key in values or [value]:
+        if not isinstance(key, str) or not key.strip():
+            return f"empty value {key!r}"
+    return None
+
+
+def operator_mismatch_problem(entry) -> Optional[str]:
+    """Describe a condition whose operator does not apply to its type.
+
+    "has" is the attachment test and the attachment test takes only "has".
+    Any other pairing (attachments contains X, sender has X) has no defined
+    Sieve form, and guessing one could widen the rule.
+    """
+    if isinstance(entry, dict):
+        ctype, operator = entry.get("type"), entry.get("operator")
+    else:
+        ctype, operator = getattr(entry, "type", None), getattr(entry, "operator", None)
+    ctype = getattr(ctype, "value", ctype)
+    operator = getattr(operator, "value", operator)
+    if (ctype == ConditionType.ATTACHMENTS.value) != (operator == Operator.HAS.value):
+        return f"operator {operator!r} does not apply to condition type {ctype!r}"
+    return None
+
+
+# Name prefix for filters rebuilt from the live Sieve section by
+# consolidator.carry_forward. Shows up in the generated "# Source filters:"
+# comments and in `snapshot view`. No brackets: Rich would parse them as markup.
+CARRIED_PREFIX = "Carried forward"
+
+
+def split_legacy_carried_values(data: dict) -> dict:
+    """Turn an older carried-forward filter's "a|b|c" value into a values list.
+
+    Before conditions had a values list, carry-forward stored several keys
+    as one "|"-joined value and the generator split it again. Only a
+    carried filter's value is read this way: carry-forward never produced a
+    key containing "|", so there the "|" is always the join. Any other
+    value is a literal.
+    """
+    if not str(data.get("name", "")).startswith(CARRIED_PREFIX):
+        return data
+    conditions = data.get("conditions")
+    if not isinstance(conditions, list):
+        return data
+    migrated = []
+    for cond in conditions:
+        if isinstance(cond, dict) and not cond.get("values") and "|" in str(cond.get("value", "")):
+            cond = dict(cond, value="", values=cond["value"].split("|"))
+        migrated.append(cond)
+    return dict(data, conditions=migrated)
+
+
 class ProtonMailFilter(BaseModel):
     name: str
     enabled: bool = True
@@ -123,17 +316,18 @@ class ProtonMailFilter(BaseModel):
         """Flag, rather than guess or reject, entries with no defined meaning.
 
         A condition or action whose type/operator is missing or not one the
-        model knows (a hand-edited backup, a parser that let one through) is
-        dropped and recorded in scrape_issues, entry included, so the filter
-        is incomplete: consolidate leaves it out and cleanup will not delete
-        it. Guessing a value could widen a rule; rejecting would stop a
+        model knows (a hand-edited backup, a parser that let one through),
+        or a condition whose value is empty or whitespace (see
+        empty_value_problem), is dropped and recorded in scrape_issues,
+        entry included, so the filter is incomplete: consolidate leaves it
+        out and cleanup will not delete it. Guessing a value could widen a rule; rejecting would stop a
         whole backup loading over one filter. An unknown logic value is
         treated the same way; a missing one stays AND, as for backups made
         before the field existed.
         """
         if not isinstance(data, dict):
             return data
-        data = dict(data)
+        data = split_legacy_carried_values(dict(data))
         issues = []
         for key, kind, enum_fields in (
             ("conditions", "condition", _CONDITION_ENUM_FIELDS),
@@ -144,9 +338,14 @@ class ProtonMailFilter(BaseModel):
                 continue
             kept = []
             for index, entry in enumerate(entries, 1):
+                if key == "actions" and isinstance(entry, dict):
+                    entry = migrate_legacy_action(entry)
                 problem = unknown_value_problem(entry, enum_fields) if isinstance(entry, dict) else None
+                if problem is None and key == "conditions":
+                    problem = operator_mismatch_problem(entry) or empty_value_problem(entry)
                 if problem:
-                    issues.append(f"{kind} {index}: {problem}; dropped {json.dumps(entry, default=str)}")
+                    shown = entry.model_dump(mode="json") if isinstance(entry, BaseModel) else entry
+                    issues.append(f"{kind} {index}: {problem}; dropped {json.dumps(shown, default=str)}")
                 else:
                     kept.append(entry)
             data[key] = kept
@@ -204,7 +403,11 @@ class ProtonMailFilter(BaseModel):
             f"logic={self.logic.value}",
         ]
         for c in self.conditions:
-            parts.append(f"cond:{c.type.value}|{c.operator.value}|{c.value}")
+            if c.values:
+                # Distinct prefix, so a list never hashes like some literal
+                parts.append(f"conds:{c.type.value}|{c.operator.value}|{json.dumps(c.values)}")
+            else:
+                parts.append(f"cond:{c.type.value}|{c.operator.value}|{c.value}")
         for a in self.actions:
             params = ",".join(f"{k}={v}" for k, v in sorted(a.parameters.items()))
             parts.append(f"act:{a.type.value}|{params}")

@@ -414,7 +414,7 @@ def _display_filters(filters: list, source: str = "ProtonMail account"):
         # Format conditions
         cond_parts = []
         for c in f.conditions:
-            cond_parts.append(f"{c.type.value} {c.operator.value} \"{escape(c.value)}\"")
+            cond_parts.append(f"{c.type.value} {c.operator.value} {escape(c.display_value)}")
         conds_str = f" {f.logic.value.upper()} ".join(cond_parts) if cond_parts else "[dim]none[/]"
 
         # Format actions
@@ -1019,6 +1019,18 @@ def _rule_preservation_check(
             "are not dropped rules.",
         ]
         for old, new in result.wildcard_fixes:
+            fix_lines.append(f"  [yellow]~ {escape(old.describe())}[/]")
+            fix_lines.append(f"    [green]{escape(new.describe())}[/]")
+        summary += "\n" + "\n".join(fix_lines)
+    if result.folder_fixes:
+        fix_lines = [
+            "",
+            f"[yellow]Corrected: {len(result.folder_fixes)} Trash/Spam/Inbox actions.[/]",
+            "Older ProtonFusion versions wrote 'Move to Trash' as discard (a permanent "
+            "delete) and Spam/Inbox under their dropdown labels. The new section uses "
+            'fileinto "trash" / "spam" / "inbox"; these are not dropped rules.',
+        ]
+        for old, new in result.folder_fixes:
             fix_lines.append(f"  [yellow]~ {escape(old.describe())}[/]")
             fix_lines.append(f"    [green]{escape(new.describe())}[/]")
         summary += "\n" + "\n".join(fix_lines)
@@ -2206,7 +2218,7 @@ def snapshot_view(
 
         cond_parts = []
         for c in f.conditions:
-            cond_parts.append(f"{c.type.value} {c.operator.value} \"{escape(c.value)}\"")
+            cond_parts.append(f"{c.type.value} {c.operator.value} {escape(c.display_value)}")
         conds_str = f" {f.logic.value.upper()} ".join(cond_parts) if cond_parts else "[dim]none[/]"
 
         action_parts = []

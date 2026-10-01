@@ -1,12 +1,12 @@
 """Generate Sieve scripts from consolidated filters."""
 
 import logging
-import re
 from typing import List, Optional, Set
 
 from src.models.filter_models import (
     ConsolidatedFilter, ConditionGroup, FilterCondition, FilterAction,
-    ConditionType, Operator, ActionType, LogicType,
+    ConditionType, Operator, ActionType, LogicType, empty_value_problem,
+    operator_mismatch_problem,
 )
 
 logger = logging.getLogger(__name__)
@@ -19,11 +19,29 @@ SECTION_END = "# === END ProtonFusion ==="
 EXTENSION_MAP = {
     ActionType.MOVE_TO: "fileinto",
     ActionType.LABEL: "fileinto",  # Labels use fileinto in ProtonMail
-    ActionType.DELETE: None,  # discard is built-in
+    ActionType.TRASH: "fileinto",  # fileinto "trash", never discard
     ActionType.MARK_READ: "imap4flags",
     ActionType.STAR: "imap4flags",
     ActionType.ARCHIVE: "fileinto",
 }
+
+
+# Proton's Sieve name for the Trash folder (Proton's Sieve docs and
+# ProtonMail/sieve.js both write `fileinto "trash";`).
+TRASH_FOLDER = "trash"
+
+# Proton's Sieve name for the Archive folder, as ProtonMail/sieve.js writes
+# it (test/fixtures/archive.js). Older versions wrote "Archive"; the rule
+# comparison treats the two as the same action (see sieve_rules).
+ARCHIVE_FOLDER = "archive"
+
+
+# The wizard's "has attachment" condition, exactly as Proton's own
+# wizard-to-Sieve translator writes it: ProtonMail/sieve.js,
+# src/constants.js TEST_NODES.attachment = {Type: 'Exists', Headers:
+# ['X-Attached']}, used by toTree.js buildCondition for 'attachments'.
+# `exists` is a base RFC 5228 test (section 5.5), so it needs no require.
+ATTACHMENT_TEST = 'exists "X-Attached"'
 
 
 class SieveGenerationError(ValueError):
@@ -81,6 +99,7 @@ class SieveGenerator:
 
         for f in filters:
             self._check_no_section_markers(f)
+            self._check_has_conditions(f)
 
         # Collect required extensions
         extensions = self._collect_extensions(filters)
@@ -118,15 +137,11 @@ class SieveGenerator:
             condition_str = self._generate_conditions(f)
             action_lines = self._generate_actions(f)
 
-            if condition_str:
-                lines.append(f"if {condition_str} {{")
-                for action_line in action_lines:
-                    lines.append(f"    {action_line}")
-                lines.append("}")
-            else:
-                # No conditions = unconditional rule (rare)
-                for action_line in action_lines:
-                    lines.append(action_line)
+            # _check_has_conditions guarantees a test, so every rule is an if
+            lines.append(f"if {condition_str} {{")
+            for action_line in action_lines:
+                lines.append(f"    {action_line}")
+            lines.append("}")
 
             first = False
 
@@ -149,7 +164,8 @@ class SieveGenerator:
         """
         texts = [f.name, *f.source_filters]
         for group in f.condition_groups:
-            texts.extend(cond.value for cond in group.conditions)
+            for cond in group.conditions:
+                texts.extend(cond.keys)
         for action in f.actions:
             texts.extend(str(v) for v in action.parameters.values())
         for text in texts:
@@ -163,6 +179,28 @@ class SieveGenerator:
                         f"{marker!r}, which would corrupt the Sieve section on the next "
                         "sync. Rename or edit that filter in ProtonMail and back up again."
                     )
+
+    @staticmethod
+    def _check_has_conditions(f: ConsolidatedFilter) -> None:
+        """Refuse a rule that would run its actions on every message.
+
+        A rule with no condition groups, or with a group that has no
+        conditions (an original filter with none, which as one branch of an
+        OR matches everything), would become top-level actions or an always
+        true test. With a Trash or folder action that moves all incoming
+        mail. A filter normally has conditions, so this means one was lost
+        upstream (for example, dropped as unreadable); refuse rather than
+        widen the rule to all mail.
+        """
+        if f.condition_groups and all(group.conditions for group in f.condition_groups):
+            return
+        origin = f.name if f.source_filters in ([], [f.name]) else (
+            f"{f.name} (from {', '.join(f.source_filters)})")
+        raise SieveGenerationError(
+            f"Filter {origin!r} has no conditions, so its actions would apply to "
+            "every message. Refusing to generate it. Check the filter in ProtonMail "
+            "and back up again, or exclude it."
+        )
 
     @staticmethod
     def _comment_text(text: str) -> str:
@@ -182,46 +220,21 @@ class SieveGenerator:
         return extensions
 
     def _generate_conditions(self, f: ConsolidatedFilter) -> str:
-        """Generate the Sieve condition expression from condition groups."""
-        if not f.condition_groups:
-            return ""
+        """Generate the Sieve condition expression from condition groups.
 
-        # Filter out empty groups
-        non_empty = [g for g in f.condition_groups if g.conditions]
-        if not non_empty:
-            return ""
-
-        if len(non_empty) == 1:
-            return self._generate_group(non_empty[0])
-
-        # Multiple groups - OR them together (any group matching triggers action)
-        parts = []
-        for group in non_empty:
-            part = self._generate_group(group)
-            if part:
-                parts.append(part)
-
-        if not parts:
-            return ""
+        Every group has at least one condition (see _check_has_conditions).
+        """
+        parts = [self._generate_group(group) for group in f.condition_groups]
         if len(parts) == 1:
             return parts[0]
 
+        # Multiple groups - OR them together (any group matching triggers action)
         inner = ",\n    ".join(parts)
         return f"anyof (\n    {inner}\n)"
 
     def _generate_group(self, group: ConditionGroup) -> str:
-        """Generate conditions for a single ConditionGroup."""
-        if not group.conditions:
-            return ""
-
-        parts = []
-        for cond in group.conditions:
-            sieve_cond = self._condition_to_sieve(cond)
-            if sieve_cond:
-                parts.append(sieve_cond)
-
-        if not parts:
-            return ""
+        """Generate conditions for a single, non-empty ConditionGroup."""
+        parts = [self._condition_to_sieve(cond) for cond in group.conditions]
         if len(parts) == 1:
             return parts[0]
 
@@ -230,21 +243,25 @@ class SieveGenerator:
         return f"{joiner} (\n        {inner}\n    )"
 
     def _condition_to_sieve(self, cond: FilterCondition) -> str:
-        """Convert a single condition to Sieve syntax."""
+        """Convert a single condition to Sieve syntax.
+
+        Raises SieveGenerationError for an empty value, which would match
+        every message (the model flags such a filter incomplete, so this
+        only fires for a condition built some other way).
+        """
+        problem = operator_mismatch_problem(cond) or empty_value_problem(cond)
+        if problem:
+            raise SieveGenerationError(
+                f"Condition {cond.type.value} {cond.operator.value}: {problem}. "
+                "It has no Sieve form that would not widen the rule; refusing to generate it."
+            )
         comparator = self._operator_to_sieve(cond.operator)
 
-        # Handle pipe-delimited values (from merge_conditions strategy)
-        raw_values = cond.value.split("|") if "|" in cond.value else [cond.value]
-
-        # Also split comma-separated values within each entry.
-        # ProtonMail stores multiple values in a single condition field
-        # as "val1, val2, val3" — these need to become Sieve array elements.
-        values = []
-        for v in raw_values:
-            if ", " in v:
-                values.extend(part.strip() for part in v.split(", "))
-            else:
-                values.append(v)
+        # A key list comes only from an explicit values list (wizard chips,
+        # or filters merged by consolidation). A single value is one literal
+        # even if it contains ", " or "|": a key list is an OR, so splitting
+        # text would widen the rule.
+        values = cond.keys
 
         # begins-with / ends-with become a :matches pattern around the literal
         # value, so the value's own wildcard characters must be escaped first.
@@ -266,7 +283,7 @@ class SieveGenerator:
         elif cond.type == ConditionType.SUBJECT:
             return f'header {comparator} "Subject" {value_str}'
         elif cond.type == ConditionType.ATTACHMENTS:
-            return "true"  # Simplified - ProtonMail handles attachments differently
+            return ATTACHMENT_TEST
         elif cond.type == ConditionType.HEADER:
             return f'header {comparator} "X-Custom" {value_str}'
 
@@ -280,9 +297,9 @@ class SieveGenerator:
             Operator.MATCHES: ":matches",      # value is the user's own pattern
             Operator.STARTS_WITH: ":matches",  # value* (see _condition_to_sieve)
             Operator.ENDS_WITH: ":matches",    # *value
-            Operator.HAS: ":contains",
         }
-        return mapping.get(op, ":contains")
+        # HAS is only valid for attachments, which uses no comparator
+        return mapping.get(op, "")
 
     def _generate_actions(self, f: ConsolidatedFilter) -> List[str]:
         """Generate Sieve action statements."""
@@ -301,9 +318,11 @@ class SieveGenerator:
             elif action.type == ActionType.STAR:
                 lines.append('addflag "\\\\Flagged";')
             elif action.type == ActionType.ARCHIVE:
-                lines.append('fileinto "Archive";')
-            elif action.type == ActionType.DELETE:
-                lines.append("discard;")
+                lines.append(f'fileinto "{ARCHIVE_FOLDER}";')
+            elif action.type == ActionType.TRASH:
+                # Proton: discard deletes "immediately and permanently";
+                # a Trash move is `fileinto "trash";` and stays recoverable.
+                lines.append(f'fileinto "{TRASH_FOLDER}";')
 
         if not lines:
             lines.append("keep;")
@@ -316,19 +335,24 @@ class SieveGenerator:
 
     @staticmethod
     def parse_require_extensions(script: str) -> Set[str]:
-        """Extract extension names from require lines in a Sieve script."""
-        extensions = set()
-        for match in re.finditer(r'require\s+\[([^\]]+)\]\s*;', script):
-            for ext in re.findall(r'"([^"]+)"', match.group(1)):
-                extensions.add(ext)
-        return extensions
+        """Extension names from every require in a Sieve script.
+
+        Uses the Sieve tokenizer, so `require "x";` and a require list split
+        over lines are both read. Raises SieveParseError if the script does
+        not parse.
+        """
+        # Imported here: sieve_rules imports this module at load time
+        from src.generator.sieve_rules import require_extensions
+        return require_extensions(script)
 
     @staticmethod
     def strip_require_lines(script: str) -> str:
-        """Remove require statements from a Sieve script."""
-        lines = script.split("\n")
-        filtered = [l for l in lines if not re.match(r'\s*require\s+\[', l)]
-        return "\n".join(filtered)
+        """Remove every require command from a Sieve script, keeping the rest as written.
+
+        Raises SieveParseError if the script does not parse.
+        """
+        from src.generator.sieve_rules import strip_requires
+        return strip_requires(script)
 
     @staticmethod
     def wrap_with_markers(script: str) -> str:
@@ -355,6 +379,10 @@ class SieveGenerator:
 
         Deduplicates require extensions from every part into a single sorted
         require statement at the top.
+
+        Raises SieveParseError if either script does not parse. The result
+        should still be checked with sieve_rules.validate_script before it
+        is uploaded.
         """
         if not existing_script or not existing_script.strip():
             existing_script = ""

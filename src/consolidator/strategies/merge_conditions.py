@@ -55,14 +55,20 @@ def merge_conditions(filters: List[ConsolidatedFilter]) -> List[ConsolidatedFilt
             if len(groups) == 1:
                 merged_groups.append(groups[0])
             else:
-                # Combine values with pipe delimiter for Sieve array expansion
-                values = [g.conditions[0].value for g in groups if g.conditions[0].value]
+                # Combine every group's keys into one values list (a Sieve
+                # key list, matched if any key matches). Duplicates are
+                # dropped; order is kept so the output is stable.
+                values: List[str] = []
+                for g in groups:
+                    for key in g.conditions[0].keys:
+                        if key not in values:
+                            values.append(key)
                 merged_groups.append(ConditionGroup(
                     logic=groups[0].logic,
                     conditions=[FilterCondition(
                         type=groups[0].conditions[0].type,
                         operator=groups[0].conditions[0].operator,
-                        value="|".join(values),
+                        values=values,
                     )],
                 ))
 
