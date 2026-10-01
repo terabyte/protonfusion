@@ -1,14 +1,14 @@
 """Playwright automation for sync/restore operations on ProtonMail."""
 
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from src.scraper import selectors
 from src.scraper.browser import (
     ProtonMailBrowser, MODAL_TRANSITION_MS, DROPDOWN_MS,
-    ALL_SETTINGS_LOAD_MS,
+    ALL_SETTINGS_LOAD_MS, SieveReadError, row_filter_name,
 )
-from src.utils.config import ELEMENT_TIMEOUT_MS
+from src.utils.config import ELEMENT_TIMEOUT_MS, loggable_text
 
 # Maps our model condition types to ProtonMail UI dropdown labels
 CONDITION_TYPE_LABELS = {
@@ -37,6 +37,29 @@ MOVE_TO_LABELS = {
 
 logger = logging.getLogger(__name__)
 
+# Puts the script into the Sieve editor through the CodeMirror 5 API (which
+# fires the change events the Save button listens for) and says whether it
+# could: "no-editor" when the page has no attached CodeMirror instance.
+_SET_EDITOR_SCRIPT_JS = """(script) => {
+    const cm = document.querySelector('.CodeMirror');
+    if (!cm || !cm.CodeMirror) {
+        return 'no-editor';
+    }
+    cm.CodeMirror.setValue(script);
+    return 'ok';
+}"""
+
+
+def normalize_script(text: str) -> str:
+    """A script with trailing whitespace removed from each line and from the whole text.
+
+    The read-back comparison ignores only that: an editor may trim it, and
+    read_sieve_script strips the text it returns. Anything else that differs
+    means the saved script is not the one intended.
+    """
+    lines = [line.rstrip() for line in text.splitlines()]
+    return "\n".join(lines).strip()
+
 
 class ProtonMailSync(ProtonMailBrowser):
     """Handles sync operations: create/delete/toggle filters, upload Sieve."""
@@ -49,10 +72,15 @@ class ProtonMailSync(ProtonMailBrowser):
     async def upload_sieve(
         self, sieve_script: str, filter_name: str = "ProtonFusion Consolidated",
     ) -> bool:
-        """Upload a Sieve script as a named sieve filter.
+        """Upload a Sieve script as a named sieve filter, then prove it landed.
 
-        Creates a new sieve filter or updates an existing one.
-        Uses CodeMirror 5 JavaScript API for reliable content setting.
+        Creates a new sieve filter or updates an existing one, setting the
+        editor through the CodeMirror 5 JavaScript API. Returns True only
+        once the saved filter has been opened again, its script read back
+        and found equal to `sieve_script` (ignoring trailing whitespace), and
+        the filter is enabled. Any step that fails returns False, so the
+        caller takes its failed-upload path rather than reporting success
+        for a save that did not happen.
         """
         page = self.page
         self.upload_hit_filter_limit = False
@@ -91,15 +119,10 @@ class ProtonMailSync(ProtonMailBrowser):
                 return False
 
             # Set content via CodeMirror 5 API (triggers proper change events)
-            await page.evaluate(
-                """(script) => {
-                    const cm = document.querySelector('.CodeMirror');
-                    if (cm && cm.CodeMirror) {
-                        cm.CodeMirror.setValue(script);
-                    }
-                }""",
-                sieve_script,
-            )
+            status = await page.evaluate(_SET_EDITOR_SCRIPT_JS, sieve_script)
+            if status != "ok":
+                logger.error("The Sieve editor has no CodeMirror instance; the script was not set")
+                return False
             await page.wait_for_timeout(DROPDOWN_MS)
 
             # Wait for Save button to become enabled, then click it
@@ -117,38 +140,92 @@ class ProtonMailSync(ProtonMailBrowser):
 
                 await save_btn.click()
                 await page.wait_for_timeout(3000)
-                logger.info("Sieve script uploaded successfully")
 
                 # Ensure the filter is enabled after save
                 await self._ensure_filter_enabled(filter_name)
+                if not await self._verify_upload(sieve_script, filter_name):
+                    return False
+                logger.info("Sieve script uploaded and verified")
                 return True
 
             logger.warning("Could not find save button for Sieve editor")
             return False
 
         except Exception as e:
-            logger.error("Failed to upload Sieve script: %s", e)
+            logger.error("Failed to upload Sieve script: %s", loggable_text(str(e)))
             raise
 
+    async def _verify_upload(self, intended: str, filter_name: str) -> bool:
+        """True if the saved filter holds `intended` and is enabled.
+
+        Opens the filter again and reads its script back, since the Save
+        button enabling and being clicked says nothing about whether the
+        save went through.
+        """
+        try:
+            saved = await self.read_sieve_script(filter_name=filter_name)
+        except SieveReadError as e:
+            logger.error("Could not read the Sieve filter back after saving: %s", loggable_text(str(e)))
+            return False
+        if normalize_script(saved) != normalize_script(intended):
+            logger.error(
+                "The saved Sieve filter '%s' does not hold the uploaded script "
+                "(read back %d chars, expected %d)", filter_name, len(saved), len(intended),
+            )
+            return False
+        if not await self._filter_is_enabled(filter_name):
+            logger.error("The Sieve filter '%s' is not enabled after saving", filter_name)
+            return False
+        return True
+
+    async def _filter_is_enabled(self, name: str) -> bool:
+        """True if the one filter named exactly `name` has its toggle on."""
+        section = await self.page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
+        if not section:
+            logger.warning("Custom filters section not found")
+            return False
+        row = await self._unique_row_named(section, name)
+        if row is None:
+            return False
+        toggle_input = await row.query_selector(selectors.FILTER_TOGGLE)
+        return bool(toggle_input) and await toggle_input.is_checked()
+
     async def _ensure_filter_enabled(self, name: str):
-        """Enable a filter by name if it isn't already enabled."""
+        """Enable the one filter with exactly this name if it isn't already enabled.
+
+        Does nothing (with a warning) when no row or more than one row has the
+        name, so another filter sharing it is never switched on by mistake.
+        """
         page = self.page
         section = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
         if not section:
             return
+        row = await self._unique_row_named(section, name)
+        if row is None:
+            return
+        toggle_input = await row.query_selector(selectors.FILTER_TOGGLE)
+        if toggle_input and not await toggle_input.is_checked():
+            toggle_label = await row.query_selector(selectors.FILTER_TOGGLE_LABEL)
+            if toggle_label:
+                await toggle_label.click()
+                await page.wait_for_timeout(1000)
+                logger.info("Enabled filter: %s", name)
+
+    async def _unique_row_named(self, section, name: str):
+        """The single Custom filters row named exactly `name`, or None (with a warning).
+
+        None when no row has the name, and also when several do: rows can
+        only be told apart by name here, so picking one would be a guess.
+        """
         rows = await section.query_selector_all(selectors.FILTER_TABLE_ROWS)
-        for row in rows:
-            row_name = await self._get_filter_name(row)
-            if row_name == name:
-                toggle_input = await row.query_selector(selectors.FILTER_TOGGLE)
-                if toggle_input and not await toggle_input.is_checked():
-                    toggle_label = await row.query_selector(selectors.FILTER_TOGGLE_LABEL)
-                    if toggle_label:
-                        await toggle_label.click()
-                        await page.wait_for_timeout(1000)
-                        logger.info("Enabled filter: %s", name)
-                return
-        logger.warning("Could not find filter '%s' to enable", name)
+        matches = [row for row in rows if await self._get_filter_name(row) == name]
+        if not matches:
+            logger.warning("Filter '%s' not found", name)
+            return None
+        if len(matches) > 1:
+            logger.warning("%d filters are named '%s'; not touching any of them", len(matches), name)
+            return None
+        return matches[0]
 
     async def create_filter(
         self,
@@ -288,7 +365,7 @@ class ProtonMailSync(ProtonMailBrowser):
             return True
 
         except Exception as e:
-            logger.error("Failed to create filter '%s': %s", name, e)
+            logger.error("Failed to create filter '%s': %s", name, loggable_text(str(e)))
             try:
                 close_btn = await page.query_selector(selectors.FILTER_MODAL_CLOSE)
                 if close_btn:
@@ -326,42 +403,58 @@ class ProtonMailSync(ProtonMailBrowser):
         return await self._set_filter_toggle(name, enabled=False)
 
     async def _set_filter_toggle(self, name: str, enabled: bool) -> bool:
-        """Set a filter's toggle state by finding the row with the given name."""
+        """Set the toggle of the one filter named exactly `name`.
+
+        Returns False without clicking when no row, or more than one row,
+        has that name: with a shared name the wrong filter could be toggled.
+        """
         page = self.page
         section = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
         if not section:
             logger.warning("Custom filters section not found")
             return False
-        rows = await section.query_selector_all(selectors.FILTER_TABLE_ROWS)
+        row = await self._unique_row_named(section, name)
+        if row is None:
+            return False
 
-        for row in rows:
-            row_name = await self._get_filter_name(row)
-            if row_name == name:
-                toggle_input = await row.query_selector(selectors.FILTER_TOGGLE)
-                toggle_label = await row.query_selector(selectors.FILTER_TOGGLE_LABEL)
-                if toggle_input and toggle_label:
-                    is_checked = await toggle_input.is_checked()
-                    if is_checked != enabled:
-                        await toggle_label.click()
-                        await page.wait_for_timeout(1000)
-                        logger.info("%s filter: %s", "Enabled" if enabled else "Disabled", name)
-                    else:
-                        logger.info("Filter '%s' already %s", name, "enabled" if enabled else "disabled")
-                    return True
+        toggle_input = await row.query_selector(selectors.FILTER_TOGGLE)
+        toggle_label = await row.query_selector(selectors.FILTER_TOGGLE_LABEL)
+        if not toggle_input or not toggle_label:
+            logger.warning("No toggle for filter '%s'", name)
+            return False
+        if await toggle_input.is_checked() != enabled:
+            await toggle_label.click()
+            await page.wait_for_timeout(1000)
+            logger.info("%s filter: %s", "Enabled" if enabled else "Disabled", name)
+        else:
+            logger.info("Filter '%s' already %s", name, "enabled" if enabled else "disabled")
+        return True
 
-        logger.warning("Filter '%s' not found", name)
-        return False
-
-    async def set_row_enabled(self, index: int, name: str, enabled: bool) -> bool:
+    async def set_row_enabled(
+        self, index: int, name: str, enabled: bool, *,
+        expected_names: Optional[Sequence[str]] = None,
+        require_current: Optional[bool] = None,
+    ) -> bool:
         """Set the toggle of one Custom filters row, identified by position and name.
 
         `index` is the row's position when it was scraped (the filter's
         priority) and `name` its name then. Rows can share a name, so the
-        position picks the row and the name confirms it is still the same
-        one. If the row at `index` has a different name (the list moved),
-        a row is used only if it is the single row with that name. Anything
-        else returns False without clicking, so a filter is never toggled
-        on a guess. Returns True once the row is in the requested state.
+        position picks the row and the name confirms it. The position is
+        trusted only when the row there has that name and, if
+        `expected_names` (every row's name, in order, at scrape time) is
+        given, the list as a whole is unchanged: otherwise a list that moved
+        could put a neighbour with the same name at that position. When the
+        position is not trusted, a row is used only if it is the single row
+        with that name.
+
+        `require_current`, if given, is the state the row must be in before
+        the click (True when disabling a filter that was scraped as enabled).
+        A row in any other state is refused, so a filter the user switched
+        off since the scrape is never recorded as one this run disabled, and
+        so never switched on by a failed sync's re-enable.
+
+        Returns True once the row is in the requested state; False, without
+        clicking, whenever the row cannot be identified with certainty.
         """
         page = self.page
         section = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
@@ -369,12 +462,14 @@ class ProtonMailSync(ProtonMailBrowser):
             logger.warning("Custom filters section not found; not toggling '%s'", name)
             return False
         rows = await section.query_selector_all(selectors.FILTER_TABLE_ROWS)
+        names = [await self._get_filter_name(r) for r in rows]
 
+        list_unchanged = expected_names is None or list(expected_names) == names
         row = None
-        if 0 <= index < len(rows) and await self._get_filter_name(rows[index]) == name:
+        if list_unchanged and 0 <= index < len(rows) and names[index] == name:
             row = rows[index]
         else:
-            same_name = [r for r in rows if await self._get_filter_name(r) == name]
+            same_name = [r for r, n in zip(rows, names) if n == name]
             if len(same_name) == 1:
                 row = same_name[0]
         if row is None:
@@ -386,7 +481,14 @@ class ProtonMailSync(ProtonMailBrowser):
         if not toggle_input or not toggle_label:
             logger.warning("No toggle for filter '%s'", name)
             return False
-        if await toggle_input.is_checked() != enabled:
+        is_checked = await toggle_input.is_checked()
+        if require_current is not None and is_checked != require_current:
+            logger.warning(
+                "Filter '%s' is %s, not %s as scraped; not toggling it", name,
+                "enabled" if is_checked else "disabled", "enabled" if require_current else "disabled",
+            )
+            return False
+        if is_checked != enabled:
             await toggle_label.click()
             await page.wait_for_timeout(1000)
         logger.info("%s filter: %s", "Enabled" if enabled else "Disabled", name)
@@ -497,15 +599,5 @@ class ProtonMailSync(ProtonMailBrowser):
         return False
 
     async def _get_filter_name(self, row) -> str:
-        """Extract filter name from a table row."""
-        edit_btn = await row.query_selector(selectors.FILTER_EDIT_BUTTON)
-        if edit_btn:
-            aria = await edit_btn.get_attribute("aria-label")
-            if aria and '"' in aria:
-                return aria.split('"')[1]
-        tds = await row.query_selector_all("td")
-        if len(tds) >= 2:
-            return (await tds[1].inner_text()).strip()
-        elif tds:
-            return (await tds[0].inner_text()).strip()
-        return ""
+        """Exact filter name of a table row (see row_filter_name)."""
+        return await row_filter_name(row)

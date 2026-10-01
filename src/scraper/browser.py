@@ -93,6 +93,41 @@ def same_account(username: str, email: str) -> bool:
     return user_domain in PROTON_DOMAINS and domain in PROTON_DOMAINS and user_local == local
 
 
+# Proton labels each Custom filters row's Edit button `Edit filter "NAME"`.
+EDIT_FILTER_LABEL_PREFIX = 'Edit filter "'
+
+
+def name_from_edit_label(aria: Optional[str]) -> Optional[str]:
+    """The filter name inside an Edit button's aria-label, or None if it is not in that form.
+
+    Everything between the opening quote and the final quote is the name,
+    so a name containing quotes, or one that is a prefix of another name
+    ("X" vs "X (old copy)"), still comes back exactly.
+    """
+    if not aria or not aria.startswith(EDIT_FILTER_LABEL_PREFIX) or not aria.endswith('"'):
+        return None
+    return aria[len(EDIT_FILTER_LABEL_PREFIX):-1] or None
+
+
+async def row_filter_name(row) -> str:
+    """Exact name of the filter in one Custom filters row ("" if unreadable).
+
+    From the Edit button's aria-label when it has the expected form, else
+    from the name cell (the second cell, or the only one).
+    """
+    edit_btn = await row.query_selector(selectors.FILTER_EDIT_BUTTON)
+    if edit_btn:
+        name = name_from_edit_label(await edit_btn.get_attribute("aria-label"))
+        if name is not None:
+            return name
+    tds = await row.query_selector_all("td")
+    if len(tds) >= 2:
+        return (await tds[1].inner_text()).strip()
+    if tds:
+        return (await tds[0].inner_text()).strip()
+    return ""
+
+
 class ProtonMailBrowser:
     """Base class for ProtonMail browser automation.
 
@@ -249,6 +284,8 @@ class ProtonMailBrowser:
         if not self.credentials:
             return
         username = self.credentials.username
+        # The live email wins: it is what the app shows now, whereas the
+        # recorded one is only what the session file claims.
         account = self.account_email or self.session_account_email
         if not account:
             logger.warning(
@@ -649,12 +686,15 @@ class ProtonMailBrowser:
             raise SieveReadError(reason) from e
 
     async def _open_sieve_filter_by_name(self, name: str) -> bool:
-        """Find a filter by name in the list and click its Edit button.
+        """Find the one filter with exactly this name and click its Edit button.
 
         Returns True if the filter was found and the edit modal was opened,
         False if no filter in the Custom filters list has that name. Raises
-        SieveReadError if the list is missing or the filter is listed but
-        could not be opened, since neither means the filter is absent.
+        SieveReadError if the list is missing, if more than one row has the
+        name (opening either could read or overwrite the wrong script), or if
+        the filter is listed but could not be opened, since none of those
+        means the filter is absent. Names are compared exactly: a substring
+        match would open "NAME (old copy)" for "NAME".
         """
         page = self.page
         section = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
@@ -662,31 +702,23 @@ class ProtonMailBrowser:
             raise SieveReadError("the Custom filters section was not found")
         rows = await section.query_selector_all(selectors.FILTER_TABLE_ROWS)
 
-        for row in rows:
-            # Check the Edit button aria-label for the name
-            edit_btn = await row.query_selector(selectors.FILTER_EDIT_BUTTON)
-            if edit_btn:
-                aria = await edit_btn.get_attribute("aria-label")
-                if aria and name in aria:
-                    await edit_btn.click()
-                    await page.wait_for_timeout(ALL_SETTINGS_LOAD_MS)
-                    return True
-
-            # Fallback: check cell text
-            tds = await row.query_selector_all("td")
-            for td in tds:
-                text = (await td.inner_text()).strip()
-                if text == name:
-                    edit_btn = await row.query_selector(
-                        f'{selectors.FILTER_EDIT_BUTTON}, {selectors.FILTER_EDIT_BUTTON_ALT}'
-                    )
-                    if not edit_btn:
-                        raise SieveReadError(f"filter '{name}' is listed but has no Edit button")
-                    await edit_btn.click()
-                    await page.wait_for_timeout(ALL_SETTINGS_LOAD_MS)
-                    return True
-
-        return False
+        matches = [row for row in rows if await row_filter_name(row) == name]
+        if not matches:
+            return False
+        if len(matches) > 1:
+            raise SieveReadError(
+                f"{len(matches)} filters are named '{name}'; rename or delete the extra ones "
+                "so ProtonFusion knows which Sieve filter is its own"
+            )
+        edit_btn = (
+            await matches[0].query_selector(selectors.FILTER_EDIT_BUTTON)
+            or await matches[0].query_selector(selectors.FILTER_EDIT_BUTTON_ALT)
+        )
+        if not edit_btn:
+            raise SieveReadError(f"filter '{name}' is listed but has no Edit button")
+        await edit_btn.click()
+        await page.wait_for_timeout(ALL_SETTINGS_LOAD_MS)
+        return True
 
     async def create_worker_page(self) -> Page:
         """Create an additional page in the existing browser context."""

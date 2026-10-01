@@ -45,6 +45,8 @@ class FakeSync:
     upload_result = True  # False, or an exception instance to raise
     hit_limit = False  # what upload_hit_filter_limit reports after a failed upload
     toggle_fails: set = set()  # (name, enabled) pairs set_row_enabled refuses
+    toggle_raises: set = set()  # (name, enabled) pairs set_row_enabled raises on
+    row_enabled: dict = {}  # name -> live toggle state, for require_current; default enabled
     upload_hit_filter_limit = False
 
     def __init__(self, *args, **kwargs):
@@ -64,8 +66,12 @@ class FakeSync:
             raise type(self).read_error
         return type(self).live_script
 
-    async def set_row_enabled(self, index, name, enabled):
+    async def set_row_enabled(self, index, name, enabled, expected_names=None, require_current=None):
+        if (name, enabled) in type(self).toggle_raises:
+            raise RuntimeError(f"row for {name} detached")
         if (name, enabled) in type(self).toggle_fails:
+            return False
+        if require_current is not None and type(self).row_enabled.get(name, True) != require_current:
             return False
         type(self).calls.append(("enable" if enabled else "disable", name))
         return True
@@ -124,6 +130,8 @@ def fake_sync(monkeypatch):
     FakeSync.upload_result = True
     FakeSync.hit_limit = False
     FakeSync.toggle_fails = set()
+    FakeSync.toggle_raises = set()
+    FakeSync.row_enabled = {}
     FakeScraper.filters = []
     monkeypatch.setattr(src.scraper.protonmail_sync, "ProtonMailSync", FakeSync)
     monkeypatch.setattr(src.scraper.protonmail_scraper, "ProtonMailScraper", FakeScraper)
@@ -527,6 +535,121 @@ class TestFiltersWithoutEvidence:
         assert result.exit_code == 0, result.output
 
 
+class TestSyncRefusesIncompleteSources:
+    """sync refuses a script holding a rule from any filter not read in full (P2, sync half).
+
+    Checked from the backup and archive against the script itself, so it
+    holds for --sieve scripts and does not depend on the manifest. Scripts
+    are generated from the complete twin of each filter, so the tests do not
+    depend on what consolidate does with incomplete filters.
+    """
+
+    ISSUE = "condition 1: unknown condition type 'The size'"
+
+    @pytest.fixture
+    def script_with_incomplete(self, cli_snapshots_dir, fake_sync, tmp_path):
+        """A backup with one incomplete filter, and a --sieve script holding its rule."""
+        good, partial = _filter("good@x.com"), _filter("partial@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([
+            good, partial.model_copy(update={"scrape_issues": [self.ISSUE]}),
+        ])
+        FakeScraper.filters = [good, partial]
+        path = tmp_path / "s.sieve"
+        path.write_text(_section_for([good, partial]))
+        return str(path)
+
+    def test_sync_refuses(self, script_with_incomplete, fake_sync):
+        result = runner.invoke(app, ["sync", "--sieve", script_with_incomplete])
+        assert result.exit_code == 1, result.output
+        assert "- Filter partial@x.com" in result.output
+        assert self.ISSUE in result.output
+        assert "- Filter good@x.com" not in result.output
+        assert "Sync refused" in result.output
+        assert fake_sync.calls == []
+
+    def test_dry_run_refuses(self, script_with_incomplete, fake_sync):
+        result = runner.invoke(app, ["sync", "--dry-run", "--sieve", script_with_incomplete])
+        assert result.exit_code == 1, result.output
+        assert "Sync refused" in result.output
+
+    def test_allow_incomplete_proceeds(self, script_with_incomplete, fake_sync):
+        result = runner.invoke(app, ["sync", "--allow-incomplete", "--sieve", script_with_incomplete])
+        assert result.exit_code == 0, result.output
+        assert any(c[0] == "upload" for c in fake_sync.calls)
+
+    def test_incomplete_filter_not_in_script_is_fine(self, cli_snapshots_dir, fake_sync, tmp_path):
+        good, partial = _filter("good@x.com"), _filter("partial@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([
+            good, partial.model_copy(update={"scrape_issues": [self.ISSUE]}),
+        ])
+        FakeScraper.filters = [good]
+        path = tmp_path / "s.sieve"
+        path.write_text(_section_for([good]))
+        result = runner.invoke(app, ["sync", "--sieve", str(path)])
+        assert result.exit_code == 0, result.output
+
+    def test_incomplete_archived_filter_in_script_refuses(self, cli_snapshots_dir, fake_sync, tmp_path):
+        from src.models.backup_models import ArchiveEntry
+        good, partial = _filter("good@x.com"), _filter("partial@x.com")
+        manager = BackupManager(cli_snapshots_dir)
+        manager.create_backup([good])
+        snapshot_dir = manager.snapshot_dir_for("latest")
+        manager.write_archive(snapshot_dir, [ArchiveEntry(
+            filter=partial.model_copy(update={"scrape_issues": [self.ISSUE], "enabled": False}),
+            archived_at="2026-01-01T00:00:00+00:00", source_snapshot=snapshot_dir.name,
+        )])
+        FakeScraper.filters = [good]
+        path = tmp_path / "s.sieve"
+        path.write_text(_section_for([good, partial]))
+        result = runner.invoke(app, ["sync", "--sieve", str(path)])
+        assert result.exit_code == 1, result.output
+        assert "- Filter partial@x.com" in result.output
+
+
+class TestSyncRefusesUnparsableMergedScript:
+    """sync validates the merged script and refuses to upload one that does not parse."""
+
+    BROKEN_USER_RULES = 'require ["fileinto"];\nif header :contains "Subject" "x" { fileinto "X";\n'
+
+    @pytest.fixture
+    def account(self, cli_snapshots_dir, fake_sync):
+        f = _filter("a@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([f], sieve_script=self.BROKEN_USER_RULES)
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        FakeScraper.filters = [f]
+        fake_sync.live_script = self.BROKEN_USER_RULES
+
+    def test_sync_refuses_and_touches_nothing(self, account, fake_sync):
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        assert "merged Sieve script does not parse" in result.output
+        assert "Sync refused" in result.output
+        assert fake_sync.calls == []
+
+    def test_dry_run_reports_refusal(self, account, fake_sync):
+        result = runner.invoke(app, ["sync", "--dry-run"])
+        assert result.exit_code == 1, result.output
+        assert "merged Sieve script does not parse" in result.output
+
+    def test_show_diff_only_reports_refusal(self, account, fake_sync):
+        result = runner.invoke(app, ["sync", "--show-diff-only"])
+        assert result.exit_code == 1, result.output
+        assert "merged Sieve script does not parse" in result.output
+        assert fake_sync.calls == []
+
+
+@pytest.mark.parametrize("script,ok", [
+    ('require ["fileinto"];\nif header :is "From" "a" { fileinto "X"; }', True),
+    ('require "fileinto";\nrequire ["imap4flags"];\nkeep;', True),
+    ('keep;\nrequire ["fileinto"];', False),
+    ('if header :is "From" "a" { fileinto "X";', False),
+    ('', True),
+])
+def test_merged_script_problem(script, ok):
+    from src.main import _merged_script_problem
+    assert (_merged_script_problem(script) is None) is ok
+
+
 class TestCleanupExitCode:
     """cleanup exits 1 whenever it kept back anything it would otherwise delete."""
 
@@ -671,6 +794,14 @@ class TestSyncDisablesOnlyReplacedFilters:
         assert "Re-enabled 1 of the 1 filters" in result.output
         assert "Could not re-enable" not in result.output
 
+    def test_upload_error_printed_without_url_secrets(self, account, fake_sync):
+        fake_sync.upload_result = RuntimeError('navigated to "https://account.proton.me/x#sk=SECRET"')
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        assert "Failed to upload Sieve script" in result.output
+        assert "account.proton.me" in result.output
+        assert "SECRET" not in result.output
+
     def test_filter_limit_named_on_failure(self, account, fake_sync):
         fake_sync.upload_result = False
         fake_sync.hit_limit = True
@@ -695,6 +826,119 @@ class TestSyncDisablesOnlyReplacedFilters:
         assert "Could not re-enable 1 filter(s)" in result.output
         assert f"- {b.name}" in result.output
         assert "restore --backup latest" in result.output
+
+    def test_reenable_continues_after_exception(self, cli_snapshots_dir, fake_sync):
+        a, b, c = _filter("a@x.com"), _filter("b@x.com"), _filter("c@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([a, b, c])
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        FakeScraper.filters = [a, b, c]
+        fake_sync.upload_result = False
+        fake_sync.toggle_raises = {(a.name, True)}
+
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        # The exception on a's row did not stop b and c being re-enabled
+        assert self._toggled(fake_sync, "enable") == [b.name, c.name]
+        assert "Re-enabled 2 of the 3 filters" in result.output
+        assert "Re-enabled 3 of the 3" not in result.output
+        assert f"- {a.name}: row for {a.name} detached" in result.output
+
+    def test_failed_upload_does_not_enable_user_disabled_filter(self, cli_snapshots_dir, fake_sync):
+        """A filter the user switched off is never disabled by sync, so never re-enabled."""
+        on, off = _filter("on@x.com"), _filter("off@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([on, off])
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        FakeScraper.filters = [on, off.model_copy(update={"enabled": False})]
+        fake_sync.upload_result = False
+
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        assert self._toggled(fake_sync, "disable") == [on.name]
+        assert self._toggled(fake_sync, "enable") == [on.name]
+
+    def test_row_switched_off_since_scrape_is_not_reenabled(self, cli_snapshots_dir, fake_sync):
+        """Scraped enabled, but off by the time sync clicks: left alone, never re-enabled."""
+        a, b = _filter("a@x.com"), _filter("b@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([a, b])
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        FakeScraper.filters = [a, b]
+        fake_sync.row_enabled = {b.name: False}
+        fake_sync.upload_result = False
+
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        assert self._toggled(fake_sync, "disable") == [a.name]
+        assert self._toggled(fake_sync, "enable") == [a.name]
+
+    def test_exception_while_disabling_restores_and_uploads_nothing(self, cli_snapshots_dir, fake_sync):
+        a, b = _filter("a@x.com"), _filter("b@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([a, b])
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        FakeScraper.filters = [a, b]
+        fake_sync.toggle_raises = {(b.name, False)}
+
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        assert "Sync stopped while disabling" in result.output
+        assert not any(c[0] == "upload" for c in fake_sync.calls)
+        assert self._toggled(fake_sync, "enable") == [a.name, b.name]
+
+    @pytest.fixture
+    def b_excluded(self, cli_snapshots_dir, fake_sync):
+        """Backup of a and b; the snapshot's own consolidated.sieve leaves b out."""
+        a, b = _filter("a@x.com"), _filter("b@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([a, b])
+        assert runner.invoke(app, ["consolidate", "--exclude", b.name]).exit_code == 0
+        FakeScraper.filters = [a, b]
+        return a, b
+
+    @staticmethod
+    def _assert_b_kept(fake_sync, result, a, b):
+        assert result.exit_code == 0, result.output
+        assert TestSyncDisablesOnlyReplacedFilters._toggled(fake_sync, "disable") == [a.name]
+        assert "not all in the script being uploaded" in result.output
+        assert f"- {b.name}" in result.output
+
+    def test_second_consolidate_output_does_not_disable_uncarried(self, b_excluded, fake_sync, tmp_path):
+        """The manifest now names the --output file, so the snapshot's script falls back to the backup."""
+        a, b = b_excluded
+        assert runner.invoke(app, ["consolidate", "--output", str(tmp_path / "all.sieve")]).exit_code == 0
+        self._assert_b_kept(fake_sync, runner.invoke(app, ["sync"]), a, b)
+
+    def test_relative_manifest_path_from_other_directory(
+        self, cli_snapshots_dir, fake_sync, tmp_path, monkeypatch,
+    ):
+        a, b = _filter("a@x.com"), _filter("b@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([a, b])
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        assert runner.invoke(app, ["consolidate", "--exclude", b.name, "--output", "out.sieve"]).exit_code == 0
+        FakeScraper.filters = [a, b]
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        result = runner.invoke(app, ["sync", "--sieve", str(work / "out.sieve")])
+        self._assert_b_kept(fake_sync, result, a, b)
+
+    def test_relative_manifest_path_same_directory_uses_manifest(
+        self, cli_snapshots_dir, fake_sync, tmp_path, monkeypatch,
+    ):
+        a, b = _filter("a@x.com"), _filter("b@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([a, b])
+        monkeypatch.chdir(tmp_path)
+        assert runner.invoke(app, ["consolidate", "--exclude", b.name, "--output", "out.sieve"]).exit_code == 0
+        FakeScraper.filters = [a, b]
+        result = runner.invoke(app, ["sync", "--sieve", str(tmp_path / "out.sieve")])
+        assert result.exit_code == 0, result.output
+        assert "No consolidate manifest describes this script" not in result.output
+        assert self._toggled(fake_sync, "disable") == [a.name]
+
+    def test_sieve_copy_does_not_disable_uncarried(self, b_excluded, fake_sync, cli_snapshots_dir, tmp_path):
+        a, b = b_excluded
+        copy = tmp_path / "copy.sieve"
+        copy.write_text((cli_snapshots_dir / "latest" / "consolidated.sieve").read_text())
+        self._assert_b_kept(fake_sync, runner.invoke(app, ["sync", "--sieve", str(copy)]), a, b)
 
     def test_dry_run_lists_plan(self, account, fake_sync):
         result = runner.invoke(app, ["sync", "--dry-run"])

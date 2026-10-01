@@ -18,18 +18,22 @@ from rich.markup import escape
 from rich import print as rprint
 
 from src.utils.config import (
-    load_credentials, SNAPSHOTS_DIR, TOOL_VERSION,
+    load_credentials, loggable_text, SNAPSHOTS_DIR, TOOL_VERSION,
 )
 from src.models.filter_models import ProtonMailFilter, FilterStatus
 from src.models.backup_models import Backup, ArchiveEntry
 from src.backup.backup_manager import BackupManager, unverified_for_deletion
 from src.backup.diff_engine import DiffEngine
-from src.backup.sync_plan import DisablePlan, carried_hashes, plan_disable
+from src.backup.sync_plan import (
+    DisablePlan, carried_hashes, check_disable_candidates, incomplete_in_script,
+    incompleteness_reasons, plan_disable,
+)
 from src.utils.private_files import write_private_file
 from src.parser.filter_parser import parse_scraped_filters
 from src.consolidator.consolidation_engine import ConsolidationEngine
 from src.generator.sieve_generator import SieveGenerator, SieveGenerationError, SECTION_BEGIN
 from src.generator.sieve_rules import SieveParseError, compare_sections, extract_section, script_facts
+from src.generator.sieve_rules import _Parser as _SieveParser, _tokenize as _sieve_tokenize
 from src.consolidator.carry_forward import facts_to_filters, filter_facts, is_carried, label_targets
 
 SIEVE_FILTER_NAME = "ProtonFusion Consolidated"
@@ -949,6 +953,9 @@ def _print_disable_plan(plan: DisablePlan, backup_id: str, preview: bool) -> Non
 
     leave = "would be left" if preview else "were left"
     groups = [
+        (plan.not_covered, "bold red",
+         f"have rules that are not all in the script being uploaded, so they {leave} enabled. "
+         "The script may come from another consolidate run; re-run 'consolidate' for this backup."),
         (plan.after_backup, "yellow",
          f"created or changed after backup '{backup_id}' {leave} enabled; their rules are not in "
          "this script. Run 'backup' and 'consolidate' to fold them in."),
@@ -966,12 +973,16 @@ def _print_disable_plan(plan: DisablePlan, backup_id: str, preview: bool) -> Non
             console.print(f"  [{color}]- {escape(f.name)}")
 
 
-async def _reenable_after_failed_upload(sync_client, disabled: List[ProtonMailFilter], backup_id: str) -> None:
+async def _reenable_after_failed_upload(
+    sync_client, disabled: List[ProtonMailFilter], backup_id: str,
+    expected_names: Optional[List[str]] = None,
+) -> None:
     """Turn back on every filter this sync disabled, after its upload failed.
 
     Otherwise a failed upload leaves neither the old UI filters nor the new
-    script handling mail. Anything that cannot be re-enabled is listed with
-    the `restore` command that brings it back.
+    script handling mail. Every filter is attempted even if an earlier one
+    raised, and each one that is not confirmed back on is listed with why,
+    plus the `restore` command that brings it back.
     """
     if not disabled:
         console.print("[yellow]No filters had been disabled, so nothing else changed.")
@@ -980,24 +991,119 @@ async def _reenable_after_failed_upload(sync_client, disabled: List[ProtonMailFi
         # The failed upload may have left the Sieve editor open over the list
         await sync_client.navigate_to_filters()
     except Exception as e:
-        logger.warning("Could not reload the filters page before re-enabling: %s", e)
+        logger.warning("Could not reload the filters page before re-enabling: %s", loggable_text(str(e)))
 
-    failed = []
+    failed: List[tuple] = []  # (filter, reason)
     for f in disabled:
         try:
-            enabled = await sync_client.set_row_enabled(f.priority, f.name, True)
+            if await sync_client.set_row_enabled(f.priority, f.name, True, expected_names=expected_names):
+                continue
+            reason = "its row could not be identified with certainty"
         except Exception as e:
-            logger.warning("Re-enabling '%s' failed: %s", f.name, e)
-            enabled = False
-        if not enabled:
-            failed.append(f)
+            reason = loggable_text(str(e)) or type(e).__name__
+            logger.warning("Re-enabling '%s' failed: %s", f.name, reason)
+        failed.append((f, reason))
 
-    console.print(f"[green]Re-enabled {len(disabled) - len(failed)} of the {len(disabled)} filters this sync disabled.")
+    reenabled = len(disabled) - len(failed)
+    color = "green" if not failed else "yellow"
+    console.print(f"[{color}]Re-enabled {reenabled} of the {len(disabled)} filters this sync disabled.")
     if failed:
         console.print(f"[bold red]Could not re-enable {len(failed)} filter(s); they are still disabled:")
-        for f in failed:
-            console.print(f"  [red]- {escape(f.name)}")
+        for f, reason in failed:
+            console.print(f"  [red]- {escape(f.name)}: {escape(reason)}")
         console.print(f"[yellow]To re-enable them, run: restore --backup {backup_id}")
+
+
+def _scraped_row_names(live_filters: List[ProtonMailFilter]) -> Optional[List[str]]:
+    """Every scraped row's name in list order, or None if the scrape has gaps.
+
+    Lets set_row_enabled check the live list is the one scraped before it
+    trusts a stored row position. If any row did not make it into
+    `live_filters` (its priorities are not exactly 0..n-1) there is no full
+    list to compare, so positions fall back to unique-name matching.
+    """
+    by_priority = sorted(live_filters, key=lambda f: f.priority)
+    if [f.priority for f in by_priority] != list(range(len(by_priority))):
+        return None
+    return [f.name for f in by_priority]
+
+
+def _uploaded_facts(merged_script: str) -> set:
+    """Facts of the ProtonFusion section about to be uploaded (empty if it does not parse).
+
+    plan_disable checks every filter against these before disabling it, so
+    an unparsable section means nothing is disabled.
+    """
+    try:
+        return script_facts(merged_script)
+    except SieveParseError as e:
+        logger.warning("Could not parse the script being uploaded: %s", e)
+        return set()
+
+
+def _merged_script_problem(script: str) -> Optional[str]:
+    """Why the merged script is not valid Sieve, or None if it parses.
+
+    Stand-in for the generator's script validator (validate_script), which
+    is landing separately; once it exists this body should call it. Until
+    then: the whole script must tokenize and parse with the sieve_rules
+    parser, and every `require` must come before any other command
+    (RFC 5228 section 3.2), which is what a merge mishandling an unusual
+    `require` breaks. Constructs that parser does not support, such as
+    multi-line `text:` literals, are reported as problems too, so a script
+    is never uploaded unchecked.
+    """
+    try:
+        commands = _SieveParser(_sieve_tokenize(script)).parse_commands()
+    except SieveParseError as e:
+        return str(e)
+    seen_other_command = False
+    for command in commands:
+        if command.name != "require":
+            seen_other_command = True
+        elif seen_other_command:
+            return "a 'require' comes after other commands (RFC 5228 section 3.2)"
+    return None
+
+
+def _report_merged_script_problem(script: str) -> bool:
+    """Print why the merged script cannot be uploaded; True if it can."""
+    problem = _merged_script_problem(script)
+    if problem is None:
+        return True
+    console.print(Panel(
+        f"[bold red]The merged Sieve script does not parse: {escape(problem)}[/]\n"
+        "Uploading it could leave the account with a broken or partly applied script. "
+        "Check the rules outside the ProtonFusion section in the live script.",
+        title="Script Validation", border_style="red",
+    ))
+    return False
+
+
+def _refuse_incomplete_sources(incomplete: List[ProtonMailFilter], allow_incomplete: bool) -> None:
+    """Refuse the sync (exit 1) when the script holds rules from incomplete filters.
+
+    Lists each filter with why it is incomplete. --allow-incomplete turns
+    the refusal into a warning.
+    """
+    if not incomplete:
+        return
+    console.print(
+        f"[bold red]This script holds rules from {len(incomplete)} filter(s) that were not read in "
+        "full; their rules may be wider or narrower than the real filters, or missing labels:"
+    )
+    for f in incomplete:
+        console.print(f"  [red]- {escape(f.name)}")
+        for reason in incompleteness_reasons(f):
+            console.print(f"      {escape(reason)}")
+    if allow_incomplete:
+        console.print("[yellow]--allow-incomplete given: proceeding anyway.")
+        return
+    console.print(
+        "[bold red]Sync refused. No filters were disabled and nothing was uploaded.[/]\n"
+        "[yellow]Run 'backup' and 'consolidate' again, or pass --allow-incomplete."
+    )
+    raise typer.Exit(1)
 
 
 def _print_carried_source(from_manifest: bool, backup_id: str) -> None:
@@ -1024,7 +1130,8 @@ def sync(
     ),
     allow_incomplete: bool = typer.Option(
         False, "--allow-incomplete",
-        help="Upload even if the script was built from filters with no raw evidence (pre-1.1 backups)",
+        help="Upload even if the script holds rules from filters that were not read in full "
+             "(scrape issues, or no raw evidence from a pre-1.1 backup)",
     ),
     workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
 ):
@@ -1038,8 +1145,10 @@ def sync(
 
     Refuses (exit 1, nothing changed) if the new ProtonFusion section would drop
     any rule present in the live section, unless --allow-rule-removal is given.
-    Also refuses if 'consolidate' built the script from filters with no raw
-    evidence (backups made before format 1.1), unless --allow-incomplete is given.
+    Also refuses if the script holds rules from filters in the backup or
+    archive that were not read in full (scrape issues, or no raw evidence
+    because they were backed up before format 1.1), unless --allow-incomplete
+    is given.
     """
     from src.scraper.protonmail_scraper import ProtonMailScraper
     from src.scraper.protonmail_sync import ProtonMailSync
@@ -1064,39 +1173,34 @@ def sync(
     creds = _get_credentials(credentials_file, False)
     bkup = manager.load_backup(backup_id)
 
-    # A script built from pre-1.1 filters may be missing their labels. The
-    # manifest only describes the snapshot's own script, so it is checked
-    # only when that is the script being uploaded.
     manifest = manager.load_manifest(snapshot_dir) or {}
-    manifest_script = manifest.get("sieve_file")
-    without_evidence = manifest.get("without_evidence", [])
-    if without_evidence and manifest_script and Path(manifest_script).resolve() == sieve_path.resolve():
-        console.print(
-            f"[bold red]This script was built from {len(without_evidence)} filter(s) with no raw "
-            "evidence (backed up before format 1.1); labels or other actions may be missing:"
-        )
-        for name in without_evidence:
-            console.print(f"  [red]- {escape(name)}")
-        if allow_incomplete:
-            console.print("[yellow]--allow-incomplete given: proceeding anyway.")
-        else:
-            console.print(
-                "[bold red]Sync refused. No filters were disabled and nothing was uploaded.[/]\n"
-                "[yellow]Run 'backup' and 'consolidate' again, or pass --allow-incomplete."
-            )
-            raise typer.Exit(1)
-
     # Which UI filters the script replaces, by content. `reference` adds the
     # archive so a filter the script leaves out on purpose (deprecated) is
     # reported as such rather than as new since the backup.
     carried, from_manifest = carried_hashes(manifest, sieve_path, bkup.filters)
     reference = list(bkup.filters) + [e.filter for e in manager.load_archive(snapshot_dir)]
 
+    # A rule taken from a filter the scraper could not fully read (or one
+    # backed up before format 1.1, which may be missing its labels) may be
+    # wider or narrower than the real filter. Checked against the script
+    # itself, from the backup and archive, so it holds for any script.
+    _refuse_incomplete_sources(
+        incomplete_in_script(
+            reference, _uploaded_facts(sieve_script),
+            set(manifest.get("filter_hashes", [])) if from_manifest else set(),
+        ),
+        allow_incomplete,
+    )
+
     if dry_run:
         console.print(Panel("[bold yellow]DRY RUN - No changes will be made"))
         console.print(f"\nWould upload Sieve script ({len(sieve_script)} chars)")
         _print_carried_source(from_manifest, backup_id)
-        _print_disable_plan(plan_disable(bkup.filters, carried, reference, SIEVE_FILTER_NAME), backup_id, preview=True)
+        backed_up_merge = SieveGenerator.merge_with_existing(sieve_script, bkup.sieve_script or "")
+        _print_disable_plan(
+            plan_disable(bkup.filters, carried, reference, SIEVE_FILTER_NAME, _uploaded_facts(backed_up_merge)),
+            backup_id, preview=True,
+        )
         console.print(
             "[cyan]This list comes from the backup. Filters created since then are not in it and "
             "would be left enabled; --show-diff-only lists them from the live account.[/]"
@@ -1122,6 +1226,8 @@ def sync(
             else:
                 preview = "\n".join(merged.split("\n")[:40])
                 console.print(Panel(preview + "\n...", title="Merged Script Preview (first 40 lines)", border_style="cyan"))
+        if not _report_merged_script_problem(backed_up_merge):
+            safe = False
         if not safe:
             console.print("[bold red]A real sync would REFUSE and change nothing.")
             raise typer.Exit(1)
@@ -1155,15 +1261,19 @@ def sync(
                 existing_script, sieve_script, allow_rule_removal,
                 backup_script=bkup.sieve_script,
             )
+            merged_script = SieveGenerator.merge_with_existing(sieve_script, existing_script)
+            if safe and not _report_merged_script_problem(merged_script):
+                safe = False
             if not safe:
                 console.print("[bold red]A real sync would REFUSE and change nothing.")
             else:
                 _print_carried_source(from_manifest, backup_id)
                 _print_disable_plan(
-                    plan_disable(live_filters, carried, reference, SIEVE_FILTER_NAME), backup_id, preview=True,
+                    plan_disable(
+                        live_filters, carried, reference, SIEVE_FILTER_NAME, _uploaded_facts(merged_script),
+                    ),
+                    backup_id, preview=True,
                 )
-
-            merged_script = SieveGenerator.merge_with_existing(sieve_script, existing_script)
 
             if existing_script == merged_script:
                 console.print(Panel("[bold green]No changes: the live script already matches."))
@@ -1220,11 +1330,14 @@ def sync(
             return False
 
         merged_script = SieveGenerator.merge_with_existing(sieve_script, existing_script)
+        if not _report_merged_script_problem(merged_script):
+            console.print("[bold red]Sync refused. No filters were disabled and nothing was uploaded.")
+            return False
         if existing_script and SECTION_BEGIN not in existing_script:
             console.print("[yellow]User rules detected; preserving them outside ProtonFusion section")
 
         _print_carried_source(from_manifest, backup_id)
-        plan = plan_disable(live_filters, carried, reference, SIEVE_FILTER_NAME)
+        plan = plan_disable(live_filters, carried, reference, SIEVE_FILTER_NAME, _uploaded_facts(merged_script))
         _print_disable_plan(plan, backup_id, preview=False)
 
         sync_client = ProtonMailSync(headless=headless, credentials=creds, storage_state_path=state or None)
@@ -1236,18 +1349,39 @@ def sync(
             # Disable the replaced filters first: ProtonMail limits active
             # filters per plan, so a new Sieve filter can fail to save while
             # they are on. Rows are found by scraped position and name.
+            check_disable_candidates(plan.to_disable)
+            expected_names = _scraped_row_names(live_filters)
             disabled: List[ProtonMailFilter] = []
             not_disabled: List[ProtonMailFilter] = []
             for f in plan.to_disable:
-                if await sync_client.set_row_enabled(f.priority, f.name, False):
+                try:
+                    # require_current: a row the user switched off since the
+                    # scrape is left alone and never joins `disabled`.
+                    ok = await sync_client.set_row_enabled(
+                        f.priority, f.name, False,
+                        expected_names=expected_names, require_current=True,
+                    )
+                except Exception as e:
+                    # The row's state is unknown. It was enabled when scraped,
+                    # so re-enabling it with the rest restores the start state.
+                    console.print(
+                        f"[bold red]Sync stopped while disabling '{escape(f.name)}' "
+                        f"({escape(loggable_text(str(e)))}). Nothing was uploaded."
+                    )
+                    await _reenable_after_failed_upload(
+                        sync_client, disabled + [f], backup_id, expected_names,
+                    )
+                    return False
+                if ok:
                     disabled.append(f)
                 else:
                     not_disabled.append(f)
             console.print(f"[green]Disabled {len(disabled)} filters")
             if not_disabled:
                 console.print(
-                    f"[yellow]Could not find {len(not_disabled)} filter(s) to disable; "
-                    "they stay enabled alongside the Sieve script:"
+                    f"[yellow]Could not disable {len(not_disabled)} filter(s): the row could not be "
+                    "identified with certainty, or was already switched off since the scrape. "
+                    "Any still enabled stay enabled alongside the Sieve script:"
                 )
                 for f in not_disabled:
                     console.print(f"  [yellow]- {escape(f.name)}")
@@ -1261,7 +1395,7 @@ def sync(
                 upload_error = e
 
             if not success:
-                reason = f" ({escape(str(upload_error))})" if upload_error else ""
+                reason = f" ({escape(loggable_text(str(upload_error)))})" if upload_error else ""
                 console.print(f"[bold red]Failed to upload Sieve script{reason}.")
                 if sync_client.upload_hit_filter_limit:
                     console.print(
@@ -1270,7 +1404,7 @@ def sync(
                         "count toward it. Disable or delete enough of them by hand (or fold them in "
                         "with 'backup' and 'consolidate'), then re-run sync."
                     )
-                await _reenable_after_failed_upload(sync_client, disabled, backup_id)
+                await _reenable_after_failed_upload(sync_client, disabled, backup_id, expected_names)
                 return False
 
             console.print("[green]Sieve script uploaded successfully!")
