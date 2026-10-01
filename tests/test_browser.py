@@ -289,6 +289,7 @@ class TestExpiredSession:
         assert await browser.login() is True
         assert manual == [True]
         assert browser.page.visited[-1] == "https://account.proton.me/login"
+        assert browser._save_state_on_close  # the dead session file gets replaced
 
     @pytest.mark.asyncio
     async def test_headless_without_session_or_credentials_raises(self):

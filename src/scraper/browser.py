@@ -40,8 +40,8 @@ MAX_ONBOARDING_MODALS = 6
 
 # How long a saved session gets to open the mail app before it counts as dead.
 SESSION_CHECK_MS = 30000
-# Our own key inside the saved storage-state JSON (Playwright ignores the file's
-# other contents only if we strip this before handing the state over).
+# Our own metadata key inside the saved storage-state JSON (the account slot);
+# stripped before the state is handed to Playwright.
 STATE_META_KEY = "protonfusion"
 SESSION_POLL_S = 0.5
 
@@ -194,6 +194,9 @@ class ProtonMailBrowser:
                 await self._automated_login()
             else:
                 await self._manual_login()
+            if self.session_loaded:
+                # Headed fallback after an expired session: replace the dead file.
+                self._save_state_on_close = True
         await self._after_login()
         return True
 
