@@ -309,9 +309,38 @@ class TestParseScrapedFilters:
         ]
         with caplog.at_level(logging.WARNING):
             result = parse_scraped_filters(raw)
-        # Should parse the valid filters and log warning for the invalid one
-        assert len(result) == 2
+        # The invalid one is kept as a flagged stub, not dropped
+        assert [f.name for f in result] == ["Good Filter", "Unparseable filter #2", "Another Good"]
+        assert result[0].is_complete and result[2].is_complete
+        assert not result[1].is_complete
         assert "Failed to parse filter" in caplog.text
+
+    def test_unparseable_filter_kept_as_flagged_stub(self):
+        """A filter parse_filter rejects keeps its name, state, position and raw data."""
+        raw = {
+            "name": "Broken",
+            "enabled": False,
+            "priority": 7,
+            "conditions": [None],  # parse_filter cannot read this entry at all
+            "actions": [],
+            "raw": {"conditions_text": "the sender", "actions_text": "", "sieve_text": ""},
+            "scrape_issues": ["label row unreadable"],
+        }
+        [stub] = parse_scraped_filters([raw])
+        assert stub.name == "Broken"
+        assert stub.enabled is False
+        assert stub.priority == 7
+        assert stub.conditions == [] and stub.actions == []
+        assert stub.raw.conditions_text == "the sender"
+        assert stub.scrape_issues[0] == "label row unreadable"
+        assert "could not be parsed" in stub.scrape_issues[1]
+        assert '"conditions": [null]' in stub.scrape_issues[1]
+
+    def test_unparseable_stub_with_unreadable_state_counts_as_enabled(self):
+        """cleanup only deletes disabled filters, so an unknown state keeps it safe."""
+        [stub] = parse_scraped_filters([{"name": "X", "enabled": "maybe", "conditions": [None]}])
+        assert stub.enabled is True
+        assert not stub.is_complete
 
     def test_parse_filters_logs_summary(self, caplog):
         """Test that parsing logs a summary."""

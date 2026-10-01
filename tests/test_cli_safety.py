@@ -35,6 +35,7 @@ class FakeScraper:
     """Stands in for ProtonMailScraper; returns FakeScraper.raw_filters."""
     raw_filters: list = []
     read_error = None  # set to a SieveReadError to make the live read fail
+    covering = None  # scraped dicts the live section is built from (default: raw_filters)
 
     def __init__(self, *args, **kwargs):
         self.account_email = "test@proton.me"
@@ -63,7 +64,8 @@ class FakeScraper:
         from src.parser.filter_parser import parse_scraped_filters
         from src.consolidator.consolidation_engine import ConsolidationEngine
         from src.generator.sieve_generator import SieveGenerator
-        filters = parse_scraped_filters(FakeScraper.raw_filters)
+        covering = FakeScraper.covering if FakeScraper.covering is not None else FakeScraper.raw_filters
+        filters = parse_scraped_filters(covering)
         consolidated, _ = ConsolidationEngine().consolidate(filters, include_disabled=True)
         return SieveGenerator.merge_with_existing(SieveGenerator().generate(consolidated), "")
 
@@ -95,6 +97,7 @@ def fake_scraper(monkeypatch):
     monkeypatch.setattr(src.scraper.protonmail_scraper, "ProtonMailScraper", FakeScraper)
     FakeScraper.raw_filters = []
     FakeScraper.read_error = None
+    FakeScraper.covering = None
     return FakeScraper
 
 
@@ -137,6 +140,36 @@ class TestBackupGuard:
         assert result.exit_code == 0, result.output
         data = json.loads((cli_snapshots_dir / "latest" / "backup.json").read_text())
         assert data["filters"][0]["scrape_issues"] == ["label row unreadable"]
+
+
+def _unparseable_filter(name="Broken", enabled=True):
+    """A scraped dict parse_filter raises on (a condition entry that is not a dict)."""
+    raw = _raw_filter(name, enabled=enabled)
+    raw["conditions"] = [None]
+    return raw
+
+
+class TestUnparseableFilter:
+    """A filter that cannot be parsed is kept as a flagged stub, never dropped (P16)."""
+
+    def test_unparseable_filter_refuses(self, cli_snapshots_dir, fake_scraper):
+        fake_scraper.raw_filters = [_raw_filter("Good"), _unparseable_filter("Broken")]
+        result = runner.invoke(app, ["backup", "--headless"])
+        assert result.exit_code == 1
+        assert "- Broken" in result.output
+        assert "could not be parsed" in result.output
+        assert "Backup NOT saved" in result.output
+        assert not (cli_snapshots_dir / "latest").exists()
+
+    def test_allow_incomplete_keeps_flagged_stub(self, cli_snapshots_dir, fake_scraper):
+        fake_scraper.raw_filters = [_raw_filter("Good"), _unparseable_filter("Broken")]
+        result = runner.invoke(app, ["backup", "--headless", "--allow-incomplete"])
+        assert result.exit_code == 0, result.output
+        data = json.loads((cli_snapshots_dir / "latest" / "backup.json").read_text())
+        assert [f["name"] for f in data["filters"]] == ["Good", "Broken"]
+        stub = data["filters"][1]
+        assert any("could not be parsed" in i for i in stub["scrape_issues"])
+        assert stub["raw"]["conditions_text"] == "the sender"
 
 
 class FakeSync:
@@ -263,3 +296,126 @@ class TestCleanupGuard:
         assert result.exit_code == 1
         assert "0 would be" in result.output
         assert fake_sync.deleted == []
+
+    def test_unparseable_stub_never_counts_as_covered(self, cli_snapshots_dir, fake_scraper, fake_sync):
+        """A stub has no rules, so "all its rules are live" is vacuously true; it must
+        still be held back, even with --allow-incomplete."""
+        _backup(cli_snapshots_dir, [_unparseable_filter("Broken", enabled=False)])
+        fake_scraper.raw_filters = [_unparseable_filter("Broken", enabled=False)]
+        result = runner.invoke(app, ["cleanup", "--headless", "--allow-incomplete"], input="y\n")
+        assert result.exit_code == 1, result.output
+        assert "not fully read" in result.output
+        assert fake_sync.deleted == []
+
+
+def _snapshot_files(snapshots_dir):
+    """Every file under the snapshots dir with its bytes, to prove nothing was written."""
+    return {p: p.read_bytes() for p in sorted(snapshots_dir.rglob("*")) if p.is_file()}
+
+
+def _two_condition_filter(name, enabled=False, label="X"):
+    """"sender is a OR sender is b -> label X"."""
+    raw = _raw_filter(name, enabled=enabled, actions=[{"type": "label", "parameters": {"label": label}}])
+    raw["logic"] = "or"
+    raw["conditions"] = [
+        {"type": "sender", "operator": "is", "value": "a@example.com"},
+        {"type": "sender", "operator": "is", "value": "b@example.com"},
+    ]
+    return raw
+
+
+def _only_a(label="X"):
+    """A filter whose rule is the a@example.com half of _two_condition_filter."""
+    raw = _raw_filter("Only A", actions=[{"type": "label", "parameters": {"label": label}}])
+    raw["conditions"] = [{"type": "sender", "operator": "is", "value": "a@example.com"}]
+    return raw
+
+
+class TestCleanupCoverage:
+    """Mutation-run gaps: coverage needs EVERY rule of EVERY filter in the live section."""
+
+    def test_partially_covered_filter_kept(self, cli_snapshots_dir, fake_scraper, fake_sync):
+        """Live section has only the a@ half of "a or b -> label X": not covered."""
+        both = _two_condition_filter("A or B")
+        _backup(cli_snapshots_dir, [both])
+        fake_scraper.raw_filters = [both]
+        fake_scraper.covering = [_only_a()]
+        result = runner.invoke(app, ["cleanup", "--headless"], input="y\n")
+        assert result.exit_code == 1, result.output
+        assert "- A or B" in result.output
+        assert fake_sync.deleted == []
+
+    def test_cleanup_holds_back_every_uncovered_filter(self, cli_snapshots_dir, fake_scraper, fake_sync):
+        covered = _raw_filter("Covered", enabled=False)
+        gone1 = _raw_filter("Gone One", enabled=False)
+        gone2 = _raw_filter("Gone Two", enabled=False)
+        _backup(cli_snapshots_dir, [covered, gone1, gone2])
+        fake_scraper.raw_filters = [covered, gone1, gone2]
+        fake_scraper.covering = [covered]
+        result = runner.invoke(app, ["cleanup", "--headless"], input="y\n")
+        assert result.exit_code == 1, result.output
+        assert fake_sync.deleted == ["Covered"]
+
+
+class TestCleanupWritesOnlyAfterConfirmation:
+    """P10: the archive is written only for filters actually being deleted, after 'y'."""
+
+    def test_dry_run_writes_nothing(self, cli_snapshots_dir, fake_scraper, fake_sync):
+        _backup(cli_snapshots_dir, [_raw_filter("Old", enabled=False)])
+        fake_scraper.raw_filters = [_raw_filter("Old", enabled=False)]
+        before = _snapshot_files(cli_snapshots_dir)
+        result = runner.invoke(app, ["cleanup", "--headless", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert "1 would be" in result.output
+        assert _snapshot_files(cli_snapshots_dir) == before
+        assert fake_sync.deleted == []
+
+    def test_declined_confirmation_writes_nothing(self, cli_snapshots_dir, fake_scraper, fake_sync):
+        _backup(cli_snapshots_dir, [_raw_filter("Old", enabled=False)])
+        fake_scraper.raw_filters = [_raw_filter("Old", enabled=False)]
+        before = _snapshot_files(cli_snapshots_dir)
+        result = runner.invoke(app, ["cleanup", "--headless"], input="n\n")
+        assert "Cleanup cancelled" in result.output
+        assert _snapshot_files(cli_snapshots_dir) == before
+        assert fake_sync.deleted == []
+
+    def test_deleted_covered_filter_archived_as_archived(self, cli_snapshots_dir, fake_scraper, fake_sync):
+        from src.models.filter_models import FilterStatus
+        _backup(cli_snapshots_dir, [_raw_filter("Old", enabled=False)])
+        fake_scraper.raw_filters = [_raw_filter("Old", enabled=False)]
+        result = runner.invoke(app, ["cleanup", "--headless"], input="y\n")
+        assert result.exit_code == 0, result.output
+        archive = BackupManager(cli_snapshots_dir).load_archive(cli_snapshots_dir / "latest")
+        assert [(e.filter.name, e.filter.status) for e in archive] == [("Old", FilterStatus.ARCHIVED)]
+
+    def test_held_back_filters_not_archived(self, cli_snapshots_dir, fake_scraper, fake_sync):
+        """Only what is deleted is archived: not the uncovered filter cleanup kept."""
+        covered = _raw_filter("Covered", enabled=False)
+        gone = _raw_filter("Gone", enabled=False)
+        _backup(cli_snapshots_dir, [covered, gone])
+        fake_scraper.raw_filters = [covered, gone]
+        fake_scraper.covering = [covered]
+        runner.invoke(app, ["cleanup", "--headless"], input="y\n")
+        archive = BackupManager(cli_snapshots_dir).load_archive(cli_snapshots_dir / "latest")
+        assert [e.filter.name for e in archive] == ["Covered"]
+
+    def test_include_uncovered_archives_as_deprecated(self, cli_snapshots_dir, fake_scraper, fake_sync):
+        """A deliberately disabled filter whose rules are not live is deleted, but its
+        archive copy must not put the rule into the next script (the panel's repro)."""
+        from src.models.filter_models import FilterStatus
+        gone = _raw_filter("Gone", enabled=False, actions=[{"type": "delete", "parameters": {}}])
+        _backup(cli_snapshots_dir, [gone])
+        fake_scraper.raw_filters = [gone]
+        fake_scraper.covering = [_raw_filter("Something Else")]
+        result = runner.invoke(app, ["cleanup", "--headless", "--include-uncovered"], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert fake_sync.deleted == ["Gone"]
+        archive = BackupManager(cli_snapshots_dir).load_archive(cli_snapshots_dir / "latest")
+        assert [(e.filter.name, e.filter.status) for e in archive] == [("Gone", FilterStatus.DEPRECATED)]
+
+        result = runner.invoke(app, ["consolidate"])
+        assert result.exit_code == 0, result.output
+        script = (cli_snapshots_dir / "latest" / "consolidated.sieve").read_text()
+        assert "Gone@example.com" not in script
+        assert "discard" not in script
+

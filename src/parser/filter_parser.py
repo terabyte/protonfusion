@@ -1,10 +1,11 @@
 """Parse scraped filter data into validated Pydantic models."""
 
+import json
 import logging
 from typing import List, Optional
 
 from src.models.filter_models import (
-    ProtonMailFilter, ConditionType, Operator, ActionType, LogicType,
+    ProtonMailFilter, ConditionType, Operator, ActionType, LogicType, ScrapeEvidence,
 )
 
 logger = logging.getLogger(__name__)
@@ -165,21 +166,67 @@ def parse_filter(raw: dict, strict: bool = True) -> ProtonMailFilter:
     )
 
 
+def _unparseable_stub(raw, index: int, error: Exception) -> ProtonMailFilter:
+    """A flagged placeholder for a scraped filter that parse_filter rejected.
+
+    Dropping it would let `backup --allow-incomplete` save a snapshot with
+    the filter silently missing, and plain `backup` would have nothing to
+    name when it refuses. The stub keeps the name, enabled state and row
+    position where they are readable, the raw scrape evidence if it is
+    well formed, and the whole scraped dict in scrape_issues, so it is
+    flagged incomplete everywhere: backup refuses it without
+    --allow-incomplete, consolidate leaves it out, and cleanup and sync
+    will not act on it.
+    """
+    data = raw if isinstance(raw, dict) else {}
+    name = data.get("name")
+    if not isinstance(name, str) or not name:
+        name = f"Unparseable filter #{index + 1}"
+    enabled = data.get("enabled")
+    priority = data.get("priority")
+
+    evidence = None
+    if isinstance(data.get("raw"), dict):
+        try:
+            evidence = ScrapeEvidence.model_validate(data["raw"])
+        except Exception:
+            evidence = None
+
+    issues = [i for i in data.get("scrape_issues") or [] if isinstance(i, str)]
+    issues.append(
+        f"could not be parsed ({type(error).__name__}: {error}); "
+        f"scraped data: {json.dumps(raw, default=str)}"
+    )
+    return ProtonMailFilter(
+        name=name,
+        # An unreadable enabled state counts as enabled: cleanup only
+        # considers disabled filters, so this keeps it out of deletion.
+        enabled=enabled if isinstance(enabled, bool) else True,
+        priority=priority if isinstance(priority, int) and not isinstance(priority, bool) else index,
+        raw=evidence,
+        scrape_issues=issues,
+    )
+
+
 def parse_scraped_filters(raw_filters: List[dict]) -> List[ProtonMailFilter]:
     """Parse a list of scraped filter dicts into validated models.
 
     Unknown or missing condition/action values do not drop the filter: it is
     kept, flagged incomplete with the bad entry in scrape_issues (see
     parse_filter), so backup refuses it without --allow-incomplete,
-    consolidate leaves it out and cleanup will not delete it.
+    consolidate leaves it out and cleanup will not delete it. A filter that
+    cannot be parsed at all is kept the same way, as a flagged stub (see
+    _unparseable_stub), so the result always has one entry per scraped
+    filter, in the same order.
     """
     parsed = []
-    for raw in raw_filters:
+    for index, raw in enumerate(raw_filters):
         try:
-            f = parse_filter(raw, strict=False)
-            parsed.append(f)
+            parsed.append(parse_filter(raw, strict=False))
         except Exception as e:
             name = raw.get("name", "?") if isinstance(raw, dict) else "?"
-            logger.warning("Failed to parse filter '%s': %s", name, e)
-    logger.info("Parsed %d/%d filters successfully", len(parsed), len(raw_filters))
+            logger.warning("Failed to parse filter '%s': %s; keeping it flagged incomplete", name, e)
+            parsed.append(_unparseable_stub(raw, index, e))
+    complete = sum(1 for f in parsed if f.is_complete)
+    logger.info("Parsed %d/%d filters successfully", complete, len(raw_filters))
     return parsed

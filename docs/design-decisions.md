@@ -12,14 +12,14 @@ The downside is fragility -- ProtonMail can change their UI at any time and brea
 
 Every design choice prioritizes reversibility:
 
-- **Disable, don't delete.** When syncing, old UI filters are disabled rather than deleted. This means you can always re-enable them manually or via the `restore` command. See [Which Filters Sync Disables](#which-filters-sync-disables).
+- **Disable, don't delete.** When syncing, old UI filters are disabled rather than deleted. This means you can always re-enable them manually or via the `restore` command, which also puts back the ProtonFusion script captured in that backup (see [Restore Is a Full Rollback](#restore-is-a-full-rollback)). See [Which Filters Sync Disables](#which-filters-sync-disables).
 - **Snapshot-based operations.** Every action references a snapshot. You never modify filter data in place -- you create a new snapshot directory.
 - **Section markers in Sieve.** Generated Sieve rules are wrapped in `# === BEGIN/END ProtonFusion ===` markers. User-authored Sieve rules outside these markers are preserved during merge. This allows ProtonFusion to coexist with hand-written Sieve rules.
 - **Refuse rather than drop.** `sync` compares the live ProtonFusion section with the new one and refuses, before disabling or uploading anything, if any rule would disappear. See [Refusing to Drop Live Rules](#refusing-to-drop-live-rules).
 - **Never delete the last copy.** `cleanup` only deletes a disabled UI filter whose rules are all present in the live ProtonFusion section.
 - **Dry-run mode.** The `sync` and `cleanup` commands support `--dry-run` to preview changes before committing.
-- **Checksums.** Every backup includes a SHA-256 checksum so corruption can be detected.
-- **Incomplete reads are loud.** The scraper once read only the folder and mark-as rows of the Actions step, so every "Label as" action was silently dropped from backups and Sieve, and `cleanup` then deleted the only copy. Now anything the scraper cannot parse marks the filter incomplete, `backup` refuses to save it without `--allow-incomplete`, each filter keeps the wizard's raw text as evidence, and `cleanup` refuses to delete a filter without a complete, evidence-bearing backup copy.
+- **Checksums.** Every backup includes a SHA-256 checksum, and `load_backup` verifies it, so every command refuses a `backup.json` that changed after it was written. A hand edit fails this too, on purpose: it can change what a filter does. The global `--ignore-checksum` (before the command name) loads one anyway, with unknown values flagged incomplete rather than guessed.
+- **Incomplete reads are loud.** The scraper once read only the folder and mark-as rows of the Actions step, so every "Label as" action was silently dropped from backups and Sieve, and `cleanup` then deleted the only copy. Now anything the scraper cannot parse marks the filter incomplete, `backup` refuses to save it without `--allow-incomplete`, `consolidate` leaves it out of the script (what was read of a filter can be wider than the filter: an AND filter missing a condition matches more, and one whose only condition was dropped matches everything) unless given `--allow-incomplete`, each filter keeps the wizard's raw text as evidence, and `cleanup` refuses to delete a filter without a complete, evidence-bearing backup copy.
 
 ## Snapshot Architecture (vs. Single Backup File)
 
@@ -63,7 +63,9 @@ On every `backup`, `archive.json` is copied from the previous snapshot (via the 
 
 ### Post-Consolidation Auto-Archiving
 
-When `consolidate` runs, backup filters that were included in Sieve generation are automatically moved to `archive.json` as `archived`. This prepares the archive for the next cycle — after `sync` and `cleanup` remove UI filters, the next backup won't find them, but the archive still has them.
+When `consolidate` runs, backup filters that were included in Sieve generation are automatically moved to `archive.json` as `archived`. This prepares the archive for the next cycle: after `sync` and `cleanup` remove UI filters, the next backup won't find them, but the archive still has them. Inclusion is tracked by `content_hash`, never by name, so a disabled filter that shares a name with an included one is not archived (and its rule does not reach the next script).
+
+`cleanup` archives too, but only after the deletion is confirmed and only the filters it is deleting: a dry run or a declined prompt writes nothing, and a filter it refuses is not archived (its live copy would otherwise become the "verified backup copy" the next run checks for). A filter deleted with `--include-uncovered` is archived as `deprecated`, not `archived`: its rules are not in the live section and it was disabled, so consolidating it would switch on a rule the user had switched off.
 
 ### Refusing to Drop Live Rules
 
@@ -159,3 +161,12 @@ document.querySelector('.CodeMirror').CodeMirror.setValue(script)
 ```
 
 This properly triggers change events and enables the Save button.
+
+## Restore Is a Full Rollback
+
+`restore --backup <snapshot>` puts back both halves of a sync: the UI filters' on/off states and the `ProtonFusion Consolidated` script (`backup.json`'s `sieve_script`). It previews, asks, and saves a safety backup of the current state first (not made `latest`, since after the restore it no longer describes the account), so the restore can itself be undone.
+
+The order is chosen so a failure part-way never leaves mail unfiltered: enable the filters the backup has on, then replace the script, then disable the filters the backup has off. Until the last step every rule from both the current and the restored state is active, so the worst a failure leaves is a rule applied twice. It stops at the first failed enable or a failed upload (an upload that raises is reported as leaving the script in an unknown state) and reports what was done.
+
+Filters are matched by content hash and toggled by row position confirmed by name, as `sync` does; a Sieve filter is matched by name, since its script is exactly what may differ. If the backup holds no script while the account has one, restore refuses unless `--allow-empty-script`, which disables the ProtonFusion filter rather than uploading an empty script.
+

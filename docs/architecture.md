@@ -237,7 +237,7 @@ snapshots/
 
 Contains the full Pydantic-serialized `Backup` object: metadata (filter counts, account email, tool version), the list of `ProtonMailFilter` objects, the existing Sieve script (captured from the account at backup time), and a SHA-256 checksum for integrity verification.
 
-`version` is `1.2`: each filter carries `raw`, `scrape_issues` (added in 1.1) and `is_sieve` (added in 1.2). Older backups still load, and their checksum is verified without the fields their format lacked. For a backup without `is_sieve`, a filter with a captured `raw.sieve_text` is read as a Sieve filter.
+`version` is `1.3`: each filter carries `raw`, `scrape_issues` (added in 1.1) and `is_sieve` (added in 1.2); 1.3 adds no fields and marks a backup written by the strict parser (older ones may hold misread operators, so `consolidate` warns about them and `sync` refuses them without `--allow-old-snapshot`). Older backups still load, and their checksum is verified without the fields their format lacked. For a backup without `is_sieve`, a filter with a captured `raw.sieve_text` is read as a Sieve filter.
 
 `cleanup` deletes a disabled filter only if the latest snapshot's `backup.json` or `archive.json` holds a copy with the same `content_hash`, no `scrape_issues`, and non-null `raw` (see `unverified_for_deletion` in `backup_manager.py`). Override with `--allow-incomplete`.
 
@@ -280,7 +280,7 @@ The diff engine compares two filter states (backup vs. backup, or backup vs. cur
 
 ### Restore Engine
 
-The restore engine takes a backup and the current filter state, then enables or disables filters to match the backup. It reports on filters that were not found (deleted since backup), already correct, successfully toggled, or errored. Archived and deprecated filters are skipped during restore since they don't exist on ProtonMail.
+The restore engine plans and applies the filter half of `restore`: given a backup and the current filter state, it decides which filters to enable or disable to match the backup. The `restore` command handles the script half (uploading the backed-up ProtonFusion script) and the ordering: enable, then upload, then disable. Each backed-up filter is matched to the live filter with the same content hash (Sieve filters by name, since their script is what restore leaves alone) and toggled by row position plus name, so a shared name never toggles the wrong row; a match it cannot make unambiguously is reported and left alone. It reports filters not found (deleted or changed since backup), ambiguous, already correct, successfully toggled, or errored. Archived and deprecated filters are skipped during restore since they don't exist on ProtonMail.
 
 ## CLI Layer
 

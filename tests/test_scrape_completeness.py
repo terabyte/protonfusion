@@ -90,3 +90,54 @@ def test_sieve_filter_keeps_script(edge_filters):
 
 def test_wizard_filter_not_marked_sieve(edge_filters):
     assert edge_filters["Clean Labelled"]["is_sieve"] is False
+
+
+def test_backup_refuses_auto_reply_filter(edge_filters, tmp_path, monkeypatch):
+    """End to end from the real scrape: an auto-reply filter makes backup refuse.
+
+    The scraper flagging it (test_auto_reply_on_flagged) is only half the
+    guard; this pins that the flag reaches backup and stops the save.
+    """
+    import src.utils.config
+    import src.backup.backup_manager
+    import src.scraper.protonmail_scraper
+    from typer.testing import CliRunner
+    from src.main import app
+
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    monkeypatch.setattr(src.utils.config, "SNAPSHOTS_DIR", snapshots_dir)
+    monkeypatch.setattr(src.backup.backup_manager, "SNAPSHOTS_DIR", snapshots_dir)
+
+    class ScrapedEdgeSet:
+        """Returns the real scrape of the edge set; no browser needed again."""
+        account_email = "test@proton.me"
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def initialize(self):
+            pass
+
+        async def login(self):
+            pass
+
+        async def navigate_to_filters(self):
+            pass
+
+        async def scrape_all_filters(self, workers=1):
+            return [edge_filters["Clean Labelled"], edge_filters["Has Autoreply"]]
+
+        async def read_sieve_script(self, filter_name=""):
+            return ""
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(src.scraper.protonmail_scraper, "ProtonMailScraper", ScrapedEdgeSet)
+    result = CliRunner().invoke(app, ["backup", "--headless"])
+    assert result.exit_code == 1, result.output
+    assert "Has Autoreply" in result.output
+    assert "auto-reply action not supported" in result.output
+    assert "Backup NOT saved" in result.output
+    assert not (snapshots_dir / "latest").exists()

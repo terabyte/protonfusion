@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Tuple
 
 from src.models.backup_models import (
     Backup, BackupMetadata, Archive, ArchiveEntry, BACKUP_FORMAT_VERSION,
+    STRICT_PARSER_FORMAT_VERSION,
 )
 from src.models.filter_models import ProtonMailFilter
 from src.utils.config import SNAPSHOTS_DIR, TOOL_VERSION
@@ -29,6 +30,24 @@ FIELDS_ADDED_AFTER = {
 }
 
 
+def _version_tuple(version: str) -> Tuple[int, ...]:
+    """"1.2" -> (1, 2). Anything unparsable reads as (0,), i.e. oldest."""
+    try:
+        return tuple(int(part) for part in version.split("."))
+    except (AttributeError, ValueError):
+        return (0,)
+
+
+def predates_strict_parser(backup: Backup) -> bool:
+    """True if the backup was written before the parser matched values exactly.
+
+    Such a backup may hold conditions whose operator was misread (see
+    STRICT_PARSER_FORMAT_VERSION), so building a script from it can widen
+    or invert rules.
+    """
+    return _version_tuple(backup.version) < _version_tuple(STRICT_PARSER_FORMAT_VERSION)
+
+
 def compute_checksum(filters: List[ProtonMailFilter], sieve_script: str, version: str) -> str:
     """SHA-256 over the filters and Sieve script, in the layout of `version`."""
     exclude = FIELDS_ADDED_AFTER.get(version)
@@ -38,6 +57,15 @@ def compute_checksum(filters: List[ProtonMailFilter], sieve_script: str, version
     }
     checksum_json = json.dumps(checksum_data, sort_keys=True, default=str)
     return "sha256:" + hashlib.sha256(checksum_json.encode()).hexdigest()
+
+
+class BackupIntegrityError(Exception):
+    """backup.json does not match its checksum (or has none).
+
+    Raised by load_backup so no command builds a script from, restores
+    from, or verifies a deletion against a backup that changed after
+    'backup' wrote it. The message says how to proceed.
+    """
 
 
 def unverified_for_deletion(
@@ -85,14 +113,30 @@ def unverified_for_deletion(
 class BackupManager:
     """Manages filter backups inside timestamped snapshot directories."""
 
+    # When True, load_backup loads a backup whose checksum does not match
+    # instead of raising. Set for a whole CLI run by the global
+    # --ignore-checksum option; the escape hatch for a deliberately
+    # hand-edited backup.
+    ignore_checksum: bool = False
+
     def __init__(self, snapshots_dir: Optional[Path] = None):
         self.snapshots_dir = snapshots_dir or SNAPSHOTS_DIR
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
+        # Directory of the snapshot create_backup most recently wrote
+        self.last_snapshot_dir: Optional[Path] = None
 
     def create_backup(
         self, filters: List[ProtonMailFilter], account_email: str = "", sieve_script: str = "",
+        make_latest: bool = True,
     ) -> Backup:
-        """Create a new backup inside a timestamped snapshot directory."""
+        """Create a new backup inside a timestamped snapshot directory.
+
+        The directory name is the timestamp, with a -2, -3, ... suffix if a
+        snapshot from the same second exists, so one never overwrites
+        another. Its path is left in self.last_snapshot_dir. With
+        make_latest=False (restore's safety backup) the `latest` link is
+        left where it was.
+        """
         now = datetime.now()
 
         enabled_count = sum(1 for f in filters if f.enabled)
@@ -120,7 +164,12 @@ class BackupManager:
         # Save backup.json inside a new snapshot subdirectory. It holds the
         # user's filter data, so like the session file it is owner-only (a
         # snapshot dir this creates is 0700).
-        dirname = now.strftime("%Y-%m-%d_%H-%M-%S")
+        base = now.strftime("%Y-%m-%d_%H-%M-%S")
+        dirname = base
+        suffix = 2
+        while (self.snapshots_dir / dirname).exists():
+            dirname = f"{base}-{suffix}"
+            suffix += 1
         snapshot_dir = self.snapshots_dir / dirname
         filepath = snapshot_dir / "backup.json"
         write_private_file(filepath, json.dumps(backup.model_dump(), indent=2, default=str))
@@ -129,10 +178,12 @@ class BackupManager:
         self.carry_forward_archive(snapshot_dir)
 
         # Update latest symlink at snapshots/latest -> dirname
-        latest_link = self.snapshots_dir / "latest"
-        if latest_link.exists() or latest_link.is_symlink():
-            latest_link.unlink()
-        latest_link.symlink_to(dirname)
+        if make_latest:
+            latest_link = self.snapshots_dir / "latest"
+            if latest_link.exists() or latest_link.is_symlink():
+                latest_link.unlink()
+            latest_link.symlink_to(dirname)
+        self.last_snapshot_dir = snapshot_dir
 
         logger.info("Backup created: %s (%d filters)", snapshot_dir, len(filters))
         return backup
@@ -150,8 +201,15 @@ class BackupManager:
             return candidate
         raise FileNotFoundError(f"Snapshot not found: {identifier}")
 
-    def load_backup(self, identifier: str = "latest") -> Backup:
-        """Load a backup by timestamp or 'latest'."""
+    def load_backup(self, identifier: str = "latest", ignore_checksum: Optional[bool] = None) -> Backup:
+        """Load a backup by timestamp or 'latest', verifying its checksum.
+
+        Raises BackupIntegrityError if backup.json has no checksum or does
+        not match it, unless ignore_checksum (default: the class-wide
+        BackupManager.ignore_checksum) is set, in which case it only warns.
+        A hand-edited backup fails this too, by design: the edit may have
+        changed what the filters do.
+        """
         snapshot_dir = self.snapshot_dir_for(identifier)
         filepath = snapshot_dir / "backup.json"
         if not filepath.exists():
@@ -161,6 +219,20 @@ class BackupManager:
             data = json.load(f)
 
         backup = Backup.model_validate(data)
+        if not self.verify_backup(backup):
+            if ignore_checksum is None:
+                ignore_checksum = self.ignore_checksum
+            problem = "has no checksum" if not backup.checksum else "does not match its checksum"
+            if not ignore_checksum:
+                raise BackupIntegrityError(
+                    f"{filepath} {problem}: it was changed after 'backup' wrote it, "
+                    "by a hand edit or by corruption. Refusing to use it, since a changed "
+                    "backup could drop or alter rules. Run 'backup' again for a fresh snapshot, "
+                    "or, if you edited it on purpose, re-run with the global option before the "
+                    "command name: 'python -m src.main --ignore-checksum <command> ...'. "
+                    "Filters holding values ProtonFusion does not know then load flagged incomplete."
+                )
+            logger.warning("%s %s; loading it anyway (--ignore-checksum)", filepath, problem)
         logger.info("Loaded backup: %s (%d filters)", filepath, len(backup.filters))
         return backup
 
@@ -259,13 +331,25 @@ class BackupManager:
     def write_manifest(
         self, snapshot_dir: Path, filters: list, sieve_file: str,
         without_evidence: Optional[List[str]] = None,
+        incomplete_excluded: Optional[List[ProtonMailFilter]] = None,
+        incomplete_included: Optional[List[ProtonMailFilter]] = None,
     ):
         """Write manifest.json into a snapshot directory.
 
         `without_evidence` names the filters in the script that have no raw
         scrape evidence (backed up before format 1.1); `sync` refuses while
-        it is non-empty.
+        it is non-empty. `incomplete_excluded` and `incomplete_included`
+        are the filters not fully read when backed up that consolidate left
+        out of the script, or put in under --allow-incomplete; each is
+        recorded with its hash and scrape issues.
         """
+        def describe(incomplete: Optional[List[ProtonMailFilter]]) -> List[dict]:
+            """Name, hash and scrape issues of each incomplete filter."""
+            return [
+                {"name": f.name, "content_hash": f.content_hash, "scrape_issues": list(f.scrape_issues)}
+                for f in incomplete or []
+            ]
+
         manifest = {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "filter_hashes": sorted(set(f.content_hash for f in filters)),
@@ -273,6 +357,8 @@ class BackupManager:
             "filter_count": len(filters),
             "sieve_file": sieve_file,
             "without_evidence": sorted(set(without_evidence or [])),
+            "incomplete_excluded": describe(incomplete_excluded),
+            "incomplete_included": describe(incomplete_included),
             "synced_at": None,
         }
         manifest_path = snapshot_dir / "manifest.json"
