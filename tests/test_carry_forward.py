@@ -9,7 +9,7 @@ from src.main import app
 from src.backup.backup_manager import BackupManager
 from src.consolidator.carry_forward import CARRIED_PREFIX, facts_to_filters, label_targets
 from src.consolidator.consolidation_engine import ConsolidationEngine
-from src.generator.sieve_generator import SieveGenerator
+from src.generator.sieve_generator import SECTION_BEGIN, SECTION_END, SieveGenerator
 from src.generator.sieve_rules import compare_sections, script_facts
 from src.models.filter_models import (
     ProtonMailFilter, FilterCondition, FilterAction, FilterStatus,
@@ -250,7 +250,7 @@ class TestWildcardOperatorsCarryForward:
         ("*", Operator.MATCHES, "*"),
     ])
     def test_pattern_maps_to_operator(self, pattern, operator, value):
-        sieve = f'if address :matches "From" "{pattern}" {{ discard; }}'
+        sieve = f'if address :matches "From" "{pattern}" {{ fileinto "trash"; }}'
         (f,), unconvertible = facts_to_filters(script_facts(sieve))
         assert unconvertible == []
         (cond,) = f.conditions
@@ -271,3 +271,31 @@ class TestWildcardOperatorsCarryForward:
         assert unconvertible == []
         assert {c.operator for f in carried for c in f.conditions} == {Operator.STARTS_WITH, Operator.ENDS_WITH}
         assert _generated_facts(carried) == facts
+
+
+class TestLegacyTrashCarryForward:
+    """A live `discard;` (the old Move to Trash) is carried forward as a Trash move."""
+
+    def test_discard_carried_as_trash(self):
+        live = script_facts('if address :is "From" "a@x.com" { discard; }')
+        (f,), unconvertible = facts_to_filters(live)
+        assert unconvertible == []
+        assert [a.type for a in f.actions] == [ActionType.TRASH]
+        script = SieveGenerator().generate(ConsolidationEngine().consolidate([f], include_disabled=True)[0])
+        assert 'fileinto "trash";' in script
+        assert "discard" not in script
+        # The live section and the carried rule pair up as a correction
+        live_script = f'{SECTION_BEGIN}\nif address :is "From" "a@x.com" {{ discard; }}\n{SECTION_END}\n'
+        result = compare_sections(live_script, script)
+        assert result.is_safe
+        assert len(result.folder_fixes) == 1
+
+    def test_fileinto_trash_is_trash_action(self):
+        (f,), _ = facts_to_filters(script_facts('if address :is "From" "a" { fileinto "trash"; }'))
+        assert [a.type for a in f.actions] == [ActionType.TRASH]
+
+    def test_unconvertible_discard_fact_returned_as_given(self):
+        facts = script_facts('if not exists "X-Foo" { discard; }')
+        filters, unconvertible = facts_to_filters(facts)
+        assert filters == []
+        assert set(unconvertible) == facts

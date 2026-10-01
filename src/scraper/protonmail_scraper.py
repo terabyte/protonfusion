@@ -1,12 +1,14 @@
 """Playwright automation for scraping ProtonMail filters."""
 
 import asyncio
+import copy
 import logging
 import re
 from typing import Dict, List, Optional, Tuple
 
 from playwright.async_api import Page
 
+from src.models.filter_models import SYSTEM_FOLDER_ACTIONS
 from src.scraper import selectors
 from src.scraper.browser import (
     ProtonMailBrowser, MODAL_TRANSITION_MS, DROPDOWN_MS, FILTERS_PAGE_LOAD_MS,
@@ -30,8 +32,9 @@ UI_OPERATOR_TO_MODEL = {
 }
 
 
-# Folder names that are special actions, not real folder targets
-SPECIAL_FOLDERS = {"Do not move", "Inbox - Default", "Trash", "Archive", "Spam"}
+# Dropdown entries that are not user folders: "Do not move" plus the system
+# folders, which map to fixed actions (SYSTEM_FOLDER_ACTIONS).
+SPECIAL_FOLDERS = {"Do not move", *SYSTEM_FOLDER_ACTIONS}
 
 # Bullet characters used by ProtonMail to indicate subfolder nesting
 BULLET_CHARS = " \t•·"
@@ -612,15 +615,12 @@ class ProtonMailScraper(ProtonMailBrowser):
                 await self._build_folder_path_map(folder_btn, page=page)
 
             folder = self._resolve_folder_path(folder_label)
-            folder_map = {
-                "Trash": "delete",
-                "Archive": "archive",
-                "Spam": "move_to",
-                "Inbox - Default": "move_to",
-            }
-            action_type = folder_map.get(folder, "move_to")
-            if action_type in ("delete", "archive"):
-                actions.append({"type": action_type, "parameters": {}})
+            # System folders (Trash, Archive, Spam, Inbox) become the action
+            # Proton's own Sieve generator uses for them; Trash is a folder
+            # move, never a permanent delete.
+            system_action = SYSTEM_FOLDER_ACTIONS.get(folder)
+            if system_action is not None:
+                actions.append(copy.deepcopy(system_action))
             else:
                 actions.append({"type": "move_to", "parameters": {"folder": folder}})
 

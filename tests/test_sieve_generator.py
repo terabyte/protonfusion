@@ -52,8 +52,8 @@ class TestSieveGenerator:
         assert "require" in script
         assert "fileinto" in script
 
-    def test_generate_simple_delete_rule(self):
-        """Test generating a simple delete rule."""
+    def test_generate_simple_trash_rule(self):
+        """Move to Trash is a recoverable folder move, never discard."""
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Delete Spam",
@@ -69,7 +69,9 @@ class TestSieveGenerator:
         assert "address" in script
         assert "From" in script
         assert "spam@test.com" in script
-        assert "discard;" in script
+        assert 'fileinto "trash";' in script
+        assert "discard" not in script
+        assert 'require ["fileinto"];' in script
 
     def test_generate_move_to_folder(self):
         """Test generating move to folder action."""
@@ -79,13 +81,13 @@ class TestSieveGenerator:
             condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent")
             ])],
-            actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "Spam"})]
+            actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "Work"})]
         )
 
         script = gen.generate([cf])
 
         assert "fileinto" in script
-        assert '"Spam"' in script
+        assert '"Work"' in script
 
     def test_generate_mark_read(self):
         """Test generating mark as read action."""
@@ -380,7 +382,7 @@ class TestSieveGenerator:
 
         script = gen.generate(filters)
 
-        assert "Delete Spam" in script or "discard" in script
+        assert 'fileinto "trash";' in script
         assert "Archive News" in script or "Archive" in script
         assert script.count("if ") == 2
 
@@ -396,7 +398,7 @@ class TestSieveGenerator:
         script = gen.generate([cf])
 
         # Should have action without if statement
-        assert "discard;" in script
+        assert 'fileinto "trash";' in script
 
     def test_collect_extensions_fileinto(self):
         """Test that fileinto extension is collected."""
@@ -459,7 +461,7 @@ class TestSieveGenerator:
 
         assert "require" not in script or "require" in script  # May or may not need extensions
         assert "Delete spam" in script or "Spam Filter" in script
-        assert "discard;" in script
+        assert 'fileinto "trash";' in script
         assert "spam1@test.com" in script
 
     def test_generate_multiple_condition_groups_anyof(self):

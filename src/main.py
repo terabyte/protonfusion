@@ -907,6 +907,18 @@ def _rule_preservation_check(
             fix_lines.append(f"  [yellow]~ {escape(old.describe())}[/]")
             fix_lines.append(f"    [green]{escape(new.describe())}[/]")
         summary += "\n" + "\n".join(fix_lines)
+    if result.folder_fixes:
+        fix_lines = [
+            "",
+            f"[yellow]Corrected: {len(result.folder_fixes)} Trash/Spam/Inbox actions.[/]",
+            "Older ProtonFusion versions wrote 'Move to Trash' as discard (a permanent "
+            "delete) and Spam/Inbox under their dropdown labels. The new section uses "
+            'fileinto "trash" / "spam" / "inbox"; these are not dropped rules.',
+        ]
+        for old, new in result.folder_fixes:
+            fix_lines.append(f"  [yellow]~ {escape(old.describe())}[/]")
+            fix_lines.append(f"    [green]{escape(new.describe())}[/]")
+        summary += "\n" + "\n".join(fix_lines)
     if result.is_safe:
         console.print(Panel(
             f"[bold green]No rules dropped.[/]\n\n{summary}",

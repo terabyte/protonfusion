@@ -46,9 +46,12 @@ ACTION_TYPE_MAP = {
     "star it": ActionType.STAR,
     "archive": ActionType.ARCHIVE,
     "move to archive": ActionType.ARCHIVE,
-    "move to trash": ActionType.DELETE,
-    "delete": ActionType.DELETE,
-    "permanently delete": ActionType.DELETE,
+    # Trash is a folder move: the mail stays recoverable. "delete" is the
+    # name older backups used for it (see LEGACY_ACTION_TYPES). There is no
+    # permanent-delete entry because Proton's wizard has no such action.
+    "trash": ActionType.TRASH,
+    "move to trash": ActionType.TRASH,
+    "delete": ActionType.TRASH,
 }
 
 LOGIC_MAP = {

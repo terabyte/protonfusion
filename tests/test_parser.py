@@ -110,9 +110,9 @@ class TestParseActionType:
         ("star it", ActionType.STAR),
         ("archive", ActionType.ARCHIVE),
         ("move to archive", ActionType.ARCHIVE),
-        ("move to trash", ActionType.DELETE),
-        ("delete", ActionType.DELETE),
-        ("permanently delete", ActionType.DELETE),
+        ("move to trash", ActionType.TRASH),
+        ("trash", ActionType.TRASH),
+        ("delete", ActionType.TRASH),
     ])
     def test_parse_known_actions(self, raw, expected):
         """Test parsing known action types."""
@@ -433,7 +433,7 @@ class TestUnknownValues:
         f = result[0]
         assert not f.is_complete
         assert [c.value for c in f.conditions] == ["promo@shop.example"]
-        assert f.actions[0].type == ActionType.DELETE
+        assert f.actions[0].type == ActionType.TRASH
         assert len(f.scrape_issues) == 1
         assert "unknown condition type 'body'" in f.scrape_issues[0]
         assert '"value": "sale"' in f.scrape_issues[0]
@@ -455,3 +455,9 @@ class TestUnknownValues:
         f = parse_scraped_filters([raw])[0]
         assert f.scrape_issues[0] == "condition 2: unknown condition type 'Body'"
         assert len(f.scrape_issues) == 2
+
+
+def test_permanently_delete_is_not_a_known_action():
+    """Proton's wizard has no permanent delete; the label is never guessed at."""
+    with pytest.raises(UnknownFilterValueError):
+        parse_action_type("permanently delete")

@@ -17,7 +17,7 @@ def _wrap(body: str, before: str = "", after: str = "") -> str:
     return f'require ["fileinto"];\n{before}{SECTION_BEGIN}\n{body}\n{SECTION_END}\n{after}'
 
 
-def _sender_rule(senders, folder="Spam", op=Operator.IS):
+def _sender_rule(senders, folder="Junk", op=Operator.IS):
     return ConsolidatedFilter(
         name=f"to {folder}",
         condition_groups=[
@@ -187,12 +187,12 @@ class TestCompareSections:
         assert not result.is_safe
         assert len(result.dropped) == 2
         grouped = result.dropped_by_action()
-        assert list(grouped) == ['fileinto "Spam";']
-        assert any('"b"' in c for c in grouped['fileinto "Spam";'])
+        assert list(grouped) == ['fileinto "Junk";']
+        assert any('"b"' in c for c in grouped['fileinto "Junk";'])
 
     def test_changed_action_detected(self):
         gen = SieveGenerator()
-        live = SieveGenerator.merge_with_existing(gen.generate([_sender_rule(["a"], folder="Spam")]), "")
+        live = SieveGenerator.merge_with_existing(gen.generate([_sender_rule(["a"], folder="Junk")]), "")
         new = gen.generate([_sender_rule(["a"], folder="Work")])
         result = compare_sections(live, new)
         assert len(result.dropped) == 1
@@ -245,7 +245,7 @@ class TestCompareSections:
 class TestLegacyWildcardForm:
     """Older versions wrote begins/ends-with as :matches without the wildcard."""
 
-    def _new(self, op, value, folder="Spam"):
+    def _new(self, op, value, folder="Junk"):
         return SieveGenerator().generate([_sender_rule([value], folder=folder, op=op)])
 
     def test_generated_begins_with_has_wildcard(self):
@@ -259,7 +259,7 @@ class TestLegacyWildcardForm:
         (Operator.ENDS_WITH, "*news"),
     ])
     def test_old_form_reported_as_correction_not_drop(self, op, new_value):
-        live = _wrap('if address :matches "From" "news" { fileinto "Spam"; }')
+        live = _wrap('if address :matches "From" "news" { fileinto "Junk"; }')
         result = compare_sections(live, self._new(op, "news"))
         assert result.is_safe
         assert result.dropped == []
@@ -269,27 +269,74 @@ class TestLegacyWildcardForm:
         assert f'"{new_value}"' in new.describe()
 
     def test_old_form_with_backslash_pairs_with_escaped_pattern(self):
-        live = _wrap('if address :matches "From" "a\\\\b" { fileinto "Spam"; }')
+        live = _wrap('if address :matches "From" "a\\\\b" { fileinto "Junk"; }')
         result = compare_sections(live, self._new(Operator.STARTS_WITH, "a\\b"))
         assert result.is_safe
         assert len(result.wildcard_fixes) == 1
 
     def test_old_form_with_different_action_is_still_a_drop(self):
-        live = _wrap('if address :matches "From" "news" { fileinto "Spam"; }')
+        live = _wrap('if address :matches "From" "news" { fileinto "Junk"; }')
         result = compare_sections(live, self._new(Operator.STARTS_WITH, "news", folder="Work"))
         assert not result.is_safe
         assert result.wildcard_fixes == []
         assert len(result.dropped) == 1
 
     def test_old_form_without_replacement_is_still_a_drop(self):
-        live = _wrap('if address :matches "From" "news" { fileinto "Spam"; }\n'
-                     'if address :is "From" "a" { fileinto "Spam"; }')
+        live = _wrap('if address :matches "From" "news" { fileinto "Junk"; }\n'
+                     'if address :is "From" "a" { fileinto "Junk"; }')
         result = compare_sections(live, self._new(Operator.IS, "a"))
         assert not result.is_safe
         assert len(result.dropped) == 1
 
     def test_correction_does_not_hide_a_real_drop(self):
-        live = _wrap('if address :matches "From" ["news", "gone"] { fileinto "Spam"; }')
+        live = _wrap('if address :matches "From" ["news", "gone"] { fileinto "Junk"; }')
         result = compare_sections(live, self._new(Operator.STARTS_WITH, "news"))
         assert len(result.wildcard_fixes) == 1
-        assert [d.describe() for d in result.dropped] == ['address from :matches "gone"  ->  fileinto "Spam";']
+        assert [d.describe() for d in result.dropped] == ['address from :matches "gone"  ->  fileinto "Junk";']
+
+
+class TestLegacySystemFolderActions:
+    """Older versions wrote Move to Trash as discard, and Spam/Inbox by their labels."""
+
+    def _new(self, action, value="a", op=Operator.IS):
+        return SieveGenerator().generate([ConsolidatedFilter(
+            name="r",
+            condition_groups=[ConditionGroup(conditions=[
+                FilterCondition(type=ConditionType.SENDER, operator=op, value=value)])],
+            actions=[action],
+        )])
+
+    def test_trash_generates_fileinto_trash_never_discard(self):
+        script = self._new(FilterAction(type=ActionType.TRASH))
+        assert 'fileinto "trash";' in script
+        assert "discard" not in script
+
+    @pytest.mark.parametrize("old_action, new_action", [
+        ("discard;", FilterAction(type=ActionType.TRASH)),
+        ('fileinto "Spam";', FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "spam"})),
+        ('fileinto "Inbox - Default";', FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "inbox"})),
+    ])
+    def test_old_action_reported_as_correction_not_drop(self, old_action, new_action):
+        live = _wrap(f'if address :is "From" "a" {{ {old_action} }}')
+        result = compare_sections(live, self._new(new_action))
+        assert result.is_safe
+        assert result.dropped == [] and result.added == []
+        ((old, new),) = result.folder_fixes
+        assert old_action in old.actions
+        assert result.wildcard_fixes == []
+
+    def test_old_action_and_old_wildcard_form_together(self):
+        live = _wrap('if address :matches "From" "news" { discard; }')
+        result = compare_sections(live, self._new(FilterAction(type=ActionType.TRASH), "news", Operator.STARTS_WITH))
+        assert result.is_safe
+        ((old, new),) = result.folder_fixes
+        assert new.actions == frozenset({'fileinto "trash";'})
+        assert '"news*"' in new.describe()
+
+    def test_discard_replaced_by_other_folder_is_a_drop(self):
+        live = _wrap('if address :is "From" "a" { discard; }')
+        result = compare_sections(live, self._new(
+            FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "Junk"})))
+        assert not result.is_safe
+        assert result.folder_fixes == []
+        assert len(result.dropped) == 1

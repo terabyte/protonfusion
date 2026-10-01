@@ -515,6 +515,10 @@ class SectionComparison:
     # begins-with / ends-with form older ProtonFusion versions generated and
     # the new section has the corrected pattern. Not counted as drops.
     wildcard_fixes: List[Tuple[Fact, Fact]] = field(default_factory=list)
+    # (live fact, new fact) pairs where the live rule uses an action older
+    # versions generated for a system folder (see LEGACY_ACTION_FIXES) and
+    # the new section has the corrected action. Not counted as drops.
+    folder_fixes: List[Tuple[Fact, Fact]] = field(default_factory=list)
 
     @property
     def is_safe(self) -> bool:
@@ -568,6 +572,26 @@ def _legacy_wildcard_variants(fact: Fact) -> Set[Fact]:
     return variants
 
 
+# Actions older ProtonFusion versions generated for Proton's system folders,
+# and what the current generator writes for the same wizard choice. "Move to
+# Trash" used to be `discard;`, which Proton documents as deleting the mail
+# "immediately and permanently"; Spam and Inbox were written with their
+# dropdown labels instead of Proton's Sieve folder names.
+LEGACY_ACTION_FIXES = {
+    "discard;": 'fileinto "trash";',
+    'fileinto "Spam";': 'fileinto "spam";',
+    'fileinto "Inbox - Default";': 'fileinto "inbox";',
+}
+
+
+def correct_legacy_actions(fact: Fact) -> Fact:
+    """The fact with any LEGACY_ACTION_FIXES action replaced by its current form."""
+    actions = frozenset(LEGACY_ACTION_FIXES.get(a, a) for a in fact.actions)
+    if actions == fact.actions:
+        return fact
+    return Fact(fact.conditions, actions)
+
+
 def compare_sections(live_script: str, new_script: str) -> SectionComparison:
     """Compare the rules of a live script's ProtonFusion section with a new one.
 
@@ -599,6 +623,22 @@ def compare_sections(live_script: str, new_script: str) -> SectionComparison:
     dropped -= {old for old, _ in wildcard_fixes}
     added -= {new for _, new in wildcard_fixes}
 
+    # Likewise pair a live rule using an old system-folder action (discard
+    # for Trash, "Spam", "Inbox - Default") with the same rule in its
+    # corrected form, wildcard fix included if it needs both.
+    folder_fixes: List[Tuple[Fact, Fact]] = []
+    for fact in sorted(dropped, key=Fact.describe):
+        corrected = correct_legacy_actions(fact)
+        if corrected == fact:
+            continue
+        candidates = [corrected] + sorted(_legacy_wildcard_variants(corrected), key=Fact.describe)
+        for candidate in candidates:
+            if candidate in new_facts:
+                folder_fixes.append((fact, candidate))
+                break
+    dropped -= {old for old, _ in folder_fixes}
+    added -= {new for _, new in folder_fixes}
+
     return SectionComparison(
         live_rule_count=len(live_rules),
         new_rule_count=len(new_rules),
@@ -608,6 +648,7 @@ def compare_sections(live_script: str, new_script: str) -> SectionComparison:
         added=sorted(added, key=Fact.describe),
         opaque_live_rules=[r.text for r in live_rules if r.opaque],
         wildcard_fixes=wildcard_fixes,
+        folder_fixes=folder_fixes,
     )
 
 

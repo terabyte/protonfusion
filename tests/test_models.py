@@ -67,10 +67,10 @@ class TestFilterAction:
         """Test creating action with parameters."""
         action = FilterAction(
             type=ActionType.MOVE_TO,
-            parameters={"folder": "Spam"}
+            parameters={"folder": "Work"}
         )
         assert action.type == ActionType.MOVE_TO
-        assert action.parameters == {"folder": "Spam"}
+        assert action.parameters == {"folder": "Work"}
 
     def test_action_default_parameters(self):
         """Test that parameters defaults to empty dict."""
@@ -395,7 +395,9 @@ class TestEnums:
         assert ActionType.MARK_READ.value == "mark_read"
         assert ActionType.STAR.value == "star"
         assert ActionType.ARCHIVE.value == "archive"
-        assert ActionType.DELETE.value == "delete"
+        assert ActionType.TRASH.value == "trash"
+        # Old name kept as an alias; it means Trash, not a permanent delete
+        assert ActionType.DELETE is ActionType.TRASH
 
     def test_logic_type_enum(self):
         """Test LogicType enum values."""
@@ -617,3 +619,23 @@ class TestSieveFilterMarker:
         a = ProtonMailFilter(name="X")
         b = ProtonMailFilter(name="X", raw=ScrapeEvidence(sieve_text="", actions_text="a"))
         assert a.content_hash == b.content_hash
+
+
+class TestLegacyActions:
+    """Backups from older versions recorded Trash as "delete" and Spam/Inbox by label."""
+
+    def test_backup_delete_action_reads_as_trash(self):
+        f = ProtonMailFilter.model_validate({
+            "name": "old", "conditions": [{"type": "sender", "operator": "is", "value": "a"}],
+            "actions": [{"type": "delete", "parameters": {}}],
+        })
+        assert [a.type for a in f.actions] == [ActionType.TRASH]
+        assert f.is_complete
+
+    @pytest.mark.parametrize("old, new", [("Spam", "spam"), ("Inbox - Default", "inbox"), ("Work", "Work")])
+    def test_backup_system_folder_targets(self, old, new):
+        a = FilterAction.model_validate({"type": "move_to", "parameters": {"folder": old}})
+        assert a.parameters == {"folder": new}
+
+    def test_direct_action_construction_migrates(self):
+        assert FilterAction(type="delete").type == ActionType.TRASH

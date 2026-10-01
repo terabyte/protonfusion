@@ -78,9 +78,10 @@ Clicking "Edit" opens a multi-step wizard modal:
   - Value input field
 
 **Step 3: Actions**
-- Action rows, each with:
-  - Type dropdown: Move to, Label as, Mark as read, Star, Archive, Permanently delete
-  - Parameter (folder/label selector, when applicable)
+- Four action rows (below): "Move to" (a folder dropdown that also lists the
+  system folders Inbox, Archive, Spam and Trash), "Label as", "Mark as" and
+  auto-reply. There is no permanent-delete action; "Move to" Trash is a
+  recoverable move (see [sieve-reference.md](sieve-reference.md#trash-is-a-move-not-a-delete)).
 
 Every filter's Actions step has four rows, identified by `data-testid`
 (checked against the live UI on 2026-09-30): `filter-modal:folder-row`,

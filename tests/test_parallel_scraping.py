@@ -137,9 +137,9 @@ async def test_actions_parsed(mock_scraper):
         await _setup_scraper_on_mock(scraper)
         filters = await scraper.scrape_all_filters(workers=1)
 
-        # Filter 0: Newsletter Trash -> Trash = delete action
+        # Filter 0: Newsletter Trash -> Trash = a move to Trash, not a delete
         f0 = filters[0]
-        assert any(a["type"] == "delete" for a in f0["actions"])
+        assert any(a["type"] == "trash" for a in f0["actions"])
 
         # Filter 2: Project Updates -> mark_read
         f2 = filters[2]

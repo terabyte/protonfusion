@@ -50,7 +50,8 @@ async def test_only_ticked_labels_read():
     # rest of its Actions step must still be read.
     newsletter = filters["Newsletter Trash"]
     assert _labels(newsletter) == ["pf-test-label"]
-    assert any(a["type"] == "delete" for a in newsletter["actions"])
+    assert any(a["type"] == "trash" for a in newsletter["actions"])
+    assert not any(a["type"] == "delete" for a in newsletter["actions"])
     assert newsletter["scrape_issues"] == []
 
     # A filter that moves, labels twice, marks read and stars keeps every action.

@@ -29,7 +29,57 @@ class ActionType(str, Enum):
     MARK_READ = "mark_read"
     STAR = "star"
     ARCHIVE = "archive"
-    DELETE = "delete"
+    # "Move to Trash" in the wizard's folder dropdown. Generated as
+    # `fileinto "trash";`: the mail stays recoverable from Trash. Proton's
+    # filter wizard has no permanent-delete action, so nothing generates
+    # `discard;` (which Proton documents as deleting "immediately and
+    # permanently").
+    TRASH = "trash"
+    # Old name for TRASH, kept as an enum alias so existing callers still
+    # mean Trash. Backups store the old value "delete"; see
+    # LEGACY_ACTION_TYPES.
+    DELETE = "trash"
+
+
+# Proton's system folders as the wizard's "Move to" dropdown labels them,
+# mapped to the action the scraper records. Names are the ones Proton's own
+# wizard-to-Sieve generator (github.com/ProtonMail/sieve.js) writes in
+# `fileinto`, which Proton's Sieve docs also use (`fileinto "trash";`).
+# Archive keeps its own action type, generated as `fileinto "Archive";` as
+# it always has been.
+SYSTEM_FOLDER_ACTIONS = {
+    "Trash": {"type": "trash", "parameters": {}},
+    "Archive": {"type": "archive", "parameters": {}},
+    "Spam": {"type": "move_to", "parameters": {"folder": "spam"}},
+    "Inbox - Default": {"type": "move_to", "parameters": {"folder": "inbox"}},
+}
+
+# Action types older versions wrote to backups, and what they meant. The
+# scraper recorded the Trash folder as "delete", and nothing else ever
+# produced it, so it always meant Trash.
+LEGACY_ACTION_TYPES = {"delete": "trash"}
+
+# move_to folder targets older versions recorded for system folders: the
+# dropdown label, written into `fileinto` verbatim.
+LEGACY_FOLDER_TARGETS = {"Spam": "spam", "Inbox - Default": "inbox"}
+
+
+def migrate_legacy_action(entry: dict) -> dict:
+    """Rewrite an action dict from an older backup into its current form.
+
+    Maps the old "delete" type to "trash" and the old system-folder targets
+    ("Spam", "Inbox - Default") to Proton's Sieve names. Anything else is
+    returned unchanged.
+    """
+    action_type = entry.get("type")
+    if isinstance(action_type, str) and action_type in LEGACY_ACTION_TYPES:
+        entry = dict(entry, type=LEGACY_ACTION_TYPES[action_type])
+    params = entry.get("parameters")
+    if entry.get("type") in ("move_to", ActionType.MOVE_TO) and isinstance(params, dict):
+        folder = params.get("folder")
+        if folder in LEGACY_FOLDER_TARGETS:
+            entry = dict(entry, parameters=dict(params, folder=LEGACY_FOLDER_TARGETS[folder]))
+    return entry
 
 
 class FilterCondition(BaseModel):
@@ -41,6 +91,14 @@ class FilterCondition(BaseModel):
 class FilterAction(BaseModel):
     type: ActionType
     parameters: dict = Field(default_factory=dict)
+
+    @model_validator(mode='before')
+    @classmethod
+    def migrate_legacy(cls, data):
+        """Read an action written by an older version in its current form."""
+        if isinstance(data, dict):
+            return migrate_legacy_action(data)
+        return data
 
 
 class LogicType(str, Enum):
@@ -144,6 +202,8 @@ class ProtonMailFilter(BaseModel):
                 continue
             kept = []
             for index, entry in enumerate(entries, 1):
+                if key == "actions" and isinstance(entry, dict):
+                    entry = migrate_legacy_action(entry)
                 problem = unknown_value_problem(entry, enum_fields) if isinstance(entry, dict) else None
                 if problem:
                     issues.append(f"{kind} {index}: {problem}; dropped {json.dumps(entry, default=str)}")

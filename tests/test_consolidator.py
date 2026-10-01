@@ -156,7 +156,7 @@ class TestGroupByAction:
 
         result = group_by_action(filters)
 
-        assert "Delete" in result[0].name
+        assert "Trash" in result[0].name
         assert "consolidated from 2 filters" in result[0].name
 
     def test_preserves_and_logic_in_condition_group(self):

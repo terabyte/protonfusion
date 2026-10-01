@@ -19,11 +19,16 @@ SECTION_END = "# === END ProtonFusion ==="
 EXTENSION_MAP = {
     ActionType.MOVE_TO: "fileinto",
     ActionType.LABEL: "fileinto",  # Labels use fileinto in ProtonMail
-    ActionType.DELETE: None,  # discard is built-in
+    ActionType.TRASH: "fileinto",  # fileinto "trash", never discard
     ActionType.MARK_READ: "imap4flags",
     ActionType.STAR: "imap4flags",
     ActionType.ARCHIVE: "fileinto",
 }
+
+
+# Proton's Sieve name for the Trash folder (Proton's Sieve docs and
+# ProtonMail/sieve.js both write `fileinto "trash";`).
+TRASH_FOLDER = "trash"
 
 
 class SieveGenerationError(ValueError):
@@ -302,8 +307,10 @@ class SieveGenerator:
                 lines.append('addflag "\\\\Flagged";')
             elif action.type == ActionType.ARCHIVE:
                 lines.append('fileinto "Archive";')
-            elif action.type == ActionType.DELETE:
-                lines.append("discard;")
+            elif action.type == ActionType.TRASH:
+                # Proton: discard deletes "immediately and permanently";
+                # a Trash move is `fileinto "trash";` and stays recoverable.
+                lines.append(f'fileinto "{TRASH_FOLDER}";')
 
         if not lines:
             lines.append("keep;")

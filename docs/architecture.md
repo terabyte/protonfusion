@@ -100,7 +100,7 @@ The key insight is the **ConditionGroup** abstraction. When multiple filters are
 |------|--------|
 | `ConditionType` | sender, recipient, subject, attachments, header |
 | `Operator` | contains, is, matches, starts_with, ends_with, has |
-| `ActionType` | move_to, label, mark_read, star, archive, delete |
+| `ActionType` | move_to, label, mark_read, star, archive, trash (old backups' `delete` is read as trash) |
 | `LogicType` | and, or |
 | `FilterStatus` | enabled, disabled, archived, deprecated |
 
@@ -186,7 +186,7 @@ This preserves exact behavioral equivalence.
 
 ### Strategy 3: Optimize Ordering (`optimize_ordering.py`)
 
-Rules are sorted by action priority (delete > archive > move > label > mark_read > star), with a secondary sort by filter count. This ensures the most impactful rules (like spam deletion) are evaluated first.
+Rules are sorted by action priority (trash > archive > move > label > mark_read > star), with a secondary sort by filter count.
 
 ### Adding New Strategies
 
@@ -214,7 +214,7 @@ The generator converts `ConsolidatedFilter` objects into RFC 5228 Sieve scripts.
 | mark as read | `addflag "\\Seen";` |
 | star | `addflag "\\Flagged";` |
 | archive | `fileinto "Archive";` |
-| delete | `discard;` |
+| trash | `fileinto "trash";` (never `discard;`, which Proton documents as a permanent delete) |
 
 ## Snapshot System
 

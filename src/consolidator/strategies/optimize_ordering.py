@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 # Priority ordering: lower number = higher priority (evaluated first)
 ACTION_PRIORITY = {
-    ActionType.DELETE: 0,      # Spam/delete first (most common, stops processing)
+    ActionType.TRASH: 0,       # Trash first (most common)
     ActionType.ARCHIVE: 1,     # Archive next
     ActionType.MOVE_TO: 2,     # Folder routing
     ActionType.LABEL: 3,       # Labeling
@@ -21,7 +21,7 @@ ACTION_PRIORITY = {
 def optimize_ordering(filters: List[ConsolidatedFilter]) -> List[ConsolidatedFilter]:
     """Sort consolidated filters by priority.
 
-    Delete/spam rules come first (most impactful, can stop processing).
+    Trash rules come first (most common).
     Then folder moves, labels, etc.
     Also sorts by filter count (more consolidated = higher priority within same action type).
     """
