@@ -31,6 +31,15 @@ from src.models.filter_models import (
 # generated "# Source filters:" comments and in `snapshot view`.
 CARRIED_PREFIX = "Carried forward"  # no brackets: Rich would parse them as markup
 
+
+def is_carried(f: ProtonMailFilter) -> bool:
+    """True for a filter rebuilt from the live Sieve section by facts_to_filters.
+
+    Such a filter has no scrape evidence (raw is None) because it was never
+    scraped; it is verified by regenerating it instead.
+    """
+    return f.name.startswith(CARRIED_PREFIX)
+
 _MATCH_TO_OPERATOR = {
     ":is": Operator.IS,
     ":contains": Operator.CONTAINS,

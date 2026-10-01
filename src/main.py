@@ -29,7 +29,7 @@ from src.parser.filter_parser import parse_scraped_filters
 from src.consolidator.consolidation_engine import ConsolidationEngine
 from src.generator.sieve_generator import SieveGenerator, SECTION_BEGIN
 from src.generator.sieve_rules import SieveParseError, compare_sections, extract_section, script_facts
-from src.consolidator.carry_forward import facts_to_filters, filter_facts
+from src.consolidator.carry_forward import facts_to_filters, filter_facts, is_carried
 
 SIEVE_FILTER_NAME = "ProtonFusion Consolidated"
 STATE_HELP = (
@@ -63,6 +63,16 @@ def _print_incomplete(filters: List[ProtonMailFilter], heading: str):
         console.print(f"  [red]- {escape(f.name)}")
         for issue in f.scrape_issues:
             console.print(f"      {escape(issue)}")
+
+
+def _without_evidence(filters: List[ProtonMailFilter]) -> List[ProtonMailFilter]:
+    """Filters with no raw scrape evidence, i.e. from a backup made before format 1.1.
+
+    They report no scrape issues only because the old scraper recorded none;
+    that is the scraper which silently dropped labels, so they are treated as
+    incomplete. Carried-forward filters were never scraped and are exempt.
+    """
+    return [f for f in filters if f.raw is None and not is_carried(f)]
 
 
 def _get_credentials(credentials_file: str, manual_login: bool):
@@ -632,7 +642,23 @@ def consolidate(
         all_source_names.update(cf.source_filters)
     all_processed = backup_filters + archived_filters
     processed_filters = [f for f in all_processed if f.name in all_source_names]
-    manager.write_manifest(snapshot_dir, processed_filters, str(out_path))
+    without_evidence = _without_evidence(processed_filters)
+    if without_evidence:
+        console.print(
+            f"[bold red]Warning: {len(without_evidence)} filter(s) in this script come from a backup "
+            "made before format 1.1 and have no raw evidence. Labels or other actions the old "
+            "scraper missed are not in them:"
+        )
+        for f in without_evidence:
+            console.print(f"  [red]- {escape(f.name)}")
+        console.print(
+            "[yellow]'sync' will refuse this script unless given --allow-incomplete. "
+            "Run 'backup' again, then 'consolidate', to fix it."
+        )
+    manager.write_manifest(
+        snapshot_dir, processed_filters, str(out_path),
+        without_evidence=[f.name for f in without_evidence],
+    )
     console.print(f"[cyan]Manifest written to snapshot ({len(processed_filters)} filters)")
 
     # Post-consolidation archiving: move included backup filters to archive
@@ -886,11 +912,17 @@ def sync(
         False, "--allow-rule-removal",
         help="Proceed even if the new ProtonFusion section drops rules present in the live one",
     ),
+    allow_incomplete: bool = typer.Option(
+        False, "--allow-incomplete",
+        help="Upload even if the script was built from filters with no raw evidence (pre-1.1 backups)",
+    ),
 ):
     """Upload Sieve script and disable old UI filters (reversible).
 
     Refuses (exit 1, nothing changed) if the new ProtonFusion section would drop
     any rule present in the live section, unless --allow-rule-removal is given.
+    Also refuses if 'consolidate' built the script from filters with no raw
+    evidence (backups made before format 1.1), unless --allow-incomplete is given.
     """
     from src.scraper.protonmail_sync import ProtonMailSync
 
@@ -912,6 +944,28 @@ def sync(
     sieve_script = sieve_path.read_text()
     creds = _get_credentials(credentials_file, False)
     bkup = manager.load_backup(backup_id)
+
+    # A script built from pre-1.1 filters may be missing their labels. The
+    # manifest only describes the snapshot's own script, so it is checked
+    # only when that is the script being uploaded.
+    manifest = manager.load_manifest(snapshot_dir) or {}
+    manifest_script = manifest.get("sieve_file")
+    without_evidence = manifest.get("without_evidence", [])
+    if without_evidence and manifest_script and Path(manifest_script).resolve() == sieve_path.resolve():
+        console.print(
+            f"[bold red]This script was built from {len(without_evidence)} filter(s) with no raw "
+            "evidence (backed up before format 1.1); labels or other actions may be missing:"
+        )
+        for name in without_evidence:
+            console.print(f"  [red]- {escape(name)}")
+        if allow_incomplete:
+            console.print("[yellow]--allow-incomplete given: proceeding anyway.")
+        else:
+            console.print(
+                "[bold red]Sync refused. No filters were disabled and nothing was uploaded.[/]\n"
+                "[yellow]Run 'backup' and 'consolidate' again, or pass --allow-incomplete."
+            )
+            raise typer.Exit(1)
 
     if dry_run:
         console.print(Panel("[bold yellow]DRY RUN - No changes will be made"))

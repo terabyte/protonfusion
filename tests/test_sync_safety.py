@@ -363,3 +363,45 @@ class TestCleanupHoldsBackSharedNames:
 
         runner.invoke(app, ["cleanup", "--include-uncovered", "--allow-incomplete"], input="y\n")
         assert fake_sync.calls == []
+
+
+class TestFiltersWithoutEvidence:
+    """Filters from a pre-1.1 backup (raw None) may be missing labels; sync refuses them."""
+
+    @pytest.fixture
+    def legacy_snapshot(self, cli_snapshots_dir, fake_sync):
+        """A backup holding one filter as format 1.0 recorded it: no raw evidence."""
+        legacy = _filter("old@x.com").model_copy(update={"raw": None})
+        BackupManager(cli_snapshots_dir).create_backup([legacy, _filter("new@x.com")])
+        result = runner.invoke(app, ["consolidate"])
+        assert result.exit_code == 0, result.output
+        return result
+
+    def test_consolidate_warns(self, legacy_snapshot):
+        assert "no raw evidence" in legacy_snapshot.output
+        assert "- Filter old@x.com" in legacy_snapshot.output
+        assert "- Filter new@x.com" not in legacy_snapshot.output
+
+    def test_sync_refuses(self, legacy_snapshot, fake_sync):
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1
+        assert "Filter old@x.com" in result.output
+        assert "Sync refused" in result.output
+        assert fake_sync.calls == []
+
+    def test_dry_run_refuses(self, legacy_snapshot, fake_sync):
+        result = runner.invoke(app, ["sync", "--dry-run"])
+        assert result.exit_code == 1
+        assert fake_sync.calls == []
+
+    def test_allow_incomplete_proceeds(self, legacy_snapshot, fake_sync):
+        result = runner.invoke(app, ["sync", "--allow-incomplete"])
+        assert result.exit_code == 0, result.output
+        assert "disable_all" in fake_sync.calls
+
+    def test_explicit_other_script_not_checked(self, legacy_snapshot, fake_sync, tmp_path):
+        """The manifest describes the snapshot's own script, not one given with --sieve."""
+        other = tmp_path / "other.sieve"
+        other.write_text(_section_for([_filter("new@x.com")]))
+        result = runner.invoke(app, ["sync", "--sieve", str(other)])
+        assert result.exit_code == 0, result.output

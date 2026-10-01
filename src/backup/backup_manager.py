@@ -257,14 +257,23 @@ class BackupManager:
 
     # --- Manifest methods ---
 
-    def write_manifest(self, snapshot_dir: Path, filters: list, sieve_file: str):
-        """Write manifest.json into a snapshot directory."""
+    def write_manifest(
+        self, snapshot_dir: Path, filters: list, sieve_file: str,
+        without_evidence: Optional[List[str]] = None,
+    ):
+        """Write manifest.json into a snapshot directory.
+
+        `without_evidence` names the filters in the script that have no raw
+        scrape evidence (backed up before format 1.1); `sync` refuses while
+        it is non-empty.
+        """
         manifest = {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "filter_hashes": sorted(set(f.content_hash for f in filters)),
             "filter_names": sorted(set(f.name for f in filters)),
             "filter_count": len(filters),
             "sieve_file": sieve_file,
+            "without_evidence": sorted(set(without_evidence or [])),
             "synced_at": None,
         }
         manifest_path = snapshot_dir / "manifest.json"

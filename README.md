@@ -164,7 +164,7 @@ A GitHub Actions workflow runs unit + integration tests on every push and pull r
 | `consolidate` | Generate optimized Sieve script from a backup |
 | `consolidate --keep-live-rules` | Also carry forward rules that exist only in the live Sieve section (saved to the archive) |
 | `diff` | Compare two backups or a backup vs current state |
-| `sync` | Upload Sieve script and disable old UI filters; refuses if the new script drops live rules (`--allow-rule-removal` to override) |
+| `sync` | Upload Sieve script and disable old UI filters; refuses if the new script drops live rules (`--allow-rule-removal` to override) or was built from pre-1.1 filters with no raw text (`--allow-incomplete` to override) |
 | `sync --show-diff-only` | Preview Sieve changes against the live script (no upload) |
 | `restore` | Restore filters to a previous backup state |
 | `cleanup` | Delete disabled filters whose rules are in the live Sieve section and that have a verified backup copy (with confirmation) |
@@ -248,7 +248,7 @@ ProtonFusion is designed to be non-destructive:
 - **Dry-run mode**: Preview what `sync` and `cleanup` will do before committing.
 - **Checksums**: Backups include SHA256 checksums to detect corruption.
 - **Incomplete reads are loud**: A filter the scraper cannot fully read stops `backup` (override: `--allow-incomplete`). Each backed-up filter also keeps the wizard's raw text, so a field the parser missed can still be recovered.
-- **Cleanup needs a verified copy**: `cleanup` only deletes a disabled filter if the latest snapshot holds an identical, complete copy with raw text. Others are listed and kept (override: `--allow-incomplete`). Backups made before format 1.1 have no raw text, so run `backup` again after upgrading.
+- **Cleanup needs a verified copy**: `cleanup` only deletes a disabled filter if the latest snapshot holds an identical, complete copy with raw text. Others are listed and kept (override: `--allow-incomplete`). Backups made before format 1.1 have no raw text, so run `backup` again after upgrading. `consolidate` warns about such filters and `sync` refuses a script built from them (override: `--allow-incomplete`).
 - **Shared names are never deleted**: deletion works by name, so `cleanup` keeps any filter whose name another filter (enabled or not) also uses, and only ever deletes a disabled filter in the Custom filters list.
 - **Sieve filters are left alone**: `consolidate` skips filters written in Sieve (including ProtonFusion's own), and `cleanup` never deletes them.
 - **Restore**: One command to roll back to any previous backup.
