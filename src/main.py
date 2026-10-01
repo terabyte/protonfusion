@@ -31,6 +31,7 @@ from src.backup.backup_manager import (
 from src.backup.diff_engine import DiffEngine
 from src.backup.sync_plan import (
     DisablePlan, carried_hashes, check_disable_candidates, incomplete_in_script, old_entries_in_script,
+    trusted_sources,
     incompleteness_reasons, plan_disable,
 )
 from src.utils.private_files import write_private_file
@@ -1418,9 +1419,10 @@ def sync(
     # Refused the same way when the script draws on one.
     old_entries = unverified_old_entries(archive_entries, bkup)
     old_entry_filter_ids = {id(e.filter) for e in old_entries}
-    # Complete filters not from an old archive entry: a rule one of them
-    # generates is in the script on its account
-    trusted = [f for f in reference if id(f) not in old_entry_filter_ids and not incompleteness_reasons(f)]
+    # Complete filters not from an old archive entry (and, with no manifest,
+    # ones consolidate would use): a rule one of them generates is in the
+    # script on its account
+    trusted = trusted_sources(reference, archive_entries, old_entry_filter_ids, from_manifest)
     script_facts_uploaded = _uploaded_facts(sieve_script)
     # What a manifest describing this script says went into it, and which
     # incomplete filters consolidate left out of it

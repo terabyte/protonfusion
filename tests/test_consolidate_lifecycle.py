@@ -326,6 +326,22 @@ class TestOldSnapshot:
         assert "Old Archive Entries" not in result.output
         assert "b@x.com" in _script(snapshots_dir)
 
+    def test_incomplete_strict_filter_does_not_confirm_old_entry(self, snapshots_dir):
+        """Hardening: a strict filter the scrape could not fully read hashes only
+        what was read, so it can equal a misread entry while the real filter
+        differs. It confirms nothing."""
+        from src.backup.backup_manager import unverified_old_entries
+        partial = _filter("Old rule", [SENDER_B, UNKNOWN_BODY], [DELETE], enabled=False)
+        assert not partial.is_complete and partial.content_hash == self.MISREAD.content_hash
+        m = BackupManager(snapshots_dir)
+        m.create_backup([_filter("Work", [SENDER_A], [LABEL_WORK]), partial])
+        self._write_legacy_archive(snapshots_dir, [self.MISREAD])
+        old = unverified_old_entries(m.load_archive(snapshots_dir / "latest"), m.load_backup("latest"))
+        assert [e.filter.name for e in old] == ["Old rule"]
+        result = runner.invoke(app, ["consolidate"])
+        assert "Old Archive Entries" in result.output
+        assert "b@x.com" not in _script(snapshots_dir)
+
     def test_consolidate_stamps_new_entries(self, snapshots_dir):
         from src.models.backup_models import BACKUP_FORMAT_VERSION
         BackupManager(snapshots_dir).create_backup([_filter("Work", [SENDER_A], [LABEL_WORK])])

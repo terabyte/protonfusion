@@ -119,7 +119,7 @@ The `enabled: bool` field is kept in sync with `status` via a Pydantic model val
 
 ### Archive System
 
-`ArchiveEntry` wraps a `ProtonMailFilter` with metadata (`archived_at`, `source_snapshot`, `source_format`). `source_format` is the backup format whose reader produced the filter: the source backup's version for a scraped filter, the current format for one rebuilt from Sieve or scraped live by `cleanup`. An entry without it (written before the field existed) counts as older than 1.3. Entries older than 1.3 may hold misread operators, so `consolidate` and `sync` treat them like an old snapshot (see `unverified_old_entries` in `backup_manager.py`) unless the current backup holds a filter with the same `content_hash`. The `Archive` model contains a list of entries and is stored as `archive.json` in each snapshot directory.
+`ArchiveEntry` wraps a `ProtonMailFilter` with metadata (`archived_at`, `source_snapshot`, `source_format`). `source_format` is the backup format whose reader produced the filter: the source backup's version for a scraped filter, the current format for one rebuilt from Sieve or scraped live by `cleanup`. An entry without it (written before the field existed) counts as older than 1.3. Entries older than 1.3 may hold misread operators, so `consolidate` and `sync` treat them like an old snapshot (see `unverified_old_entries` in `backup_manager.py`) unless the current backup holds a fully read filter with the same `content_hash`. The `Archive` model contains a list of entries and is stored as `archive.json` in each snapshot directory.
 
 Archive entries are carried forward automatically: when a new backup is created, the `archive.json` from the previous snapshot (via the `latest` symlink) is copied into the new snapshot directory.
 

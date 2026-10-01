@@ -63,15 +63,17 @@ def unverified_old_entries(entries: List[ArchiveEntry], backup: Backup) -> List[
 
     An entry predates the strict parser when its source_format does (or is
     unrecorded). It is still trusted when `backup` is itself strict and
-    holds a filter with the same content_hash: the fresh, strict scrape
-    read exactly the same rule, so it was not misread. archive.json is
-    carried from snapshot to snapshot, so without this check a misread
+    holds a fully read filter with the same content_hash: the fresh, strict
+    scrape read exactly the same rule, so it was not misread. archive.json
+    is carried from snapshot to snapshot, so without this check a misread
     filter archived from an old backup would outlive the re-backup that
-    the old-snapshot warning asks for.
+    the old-snapshot warning asks for. A filter the scrape could not fully
+    read confirms nothing: its hash covers only what was read, so it can
+    equal a misread entry's while the real filter differs.
     """
     strict_hashes = set()
     if not predates_strict_parser(backup):
-        strict_hashes = {f.content_hash for f in backup.filters}
+        strict_hashes = {f.content_hash for f in backup.filters if f.is_complete and f.raw is not None}
     return [
         e for e in entries
         if format_predates_strict_parser(e.source_format) and e.filter.content_hash not in strict_hashes

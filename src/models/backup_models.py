@@ -50,7 +50,8 @@ class ArchiveEntry(BaseModel):
     # from Sieve (carry-forward) or scraped live (cleanup). None means
     # unknown: an entry written before this field existed, which is
     # treated as predating the strict parser (see
-    # backup_manager.entry_predates_strict_parser).
+    # backup_manager.format_predates_strict_parser and
+    # unverified_old_entries).
     source_format: Optional[str] = None
 
     @model_validator(mode='before')
