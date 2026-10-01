@@ -611,6 +611,72 @@ class TestBackupFormatVersions:
         assert compute_checksum([plain], "", "1.1") != compute_checksum([with_evidence], "", "1.1")
 
 
+class TestUnknownValuesOnLoad:
+    """A backup or archive holding a value the model does not know (hand-edited,
+    or written by a buggy version) loads with that filter flagged incomplete,
+    instead of failing the whole load or guessing a meaning."""
+
+    def _delete_rule(self, name="Delete Promos"):
+        return ProtonMailFilter(
+            name=name,
+            raw=ScrapeEvidence(conditions_text="c", actions_text="a"),
+            conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="promo@x")],
+            actions=[FilterAction(type=ActionType.DELETE)],
+        )
+
+    def _edit_json(self, path, edit):
+        data = json.loads(path.read_text())
+        edit(data)
+        path.write_text(json.dumps(data))
+
+    def test_backup_with_unknown_condition_loads_flagged(self, temp_snapshots_dir):
+        manager = BackupManager(temp_snapshots_dir)
+        manager.create_backup([self._delete_rule(), self._delete_rule("Other")])
+        path = manager.snapshot_dir_for("latest") / "backup.json"
+
+        def edit(data):
+            data["filters"][0]["conditions"].append({"type": "body", "operator": "contains", "value": "sale"})
+        self._edit_json(path, edit)
+
+        backup = manager.load_backup("latest")
+        bad, other = backup.filters
+        assert not bad.is_complete
+        assert "condition 2: unknown condition type 'body'" in bad.scrape_issues[0]
+        assert [c.value for c in bad.conditions] == ["promo@x"]
+        assert other.is_complete
+        # The edit also no longer matches the checksum
+        assert manager.verify_backup(backup) is False
+
+    def test_flagged_backup_copy_blocks_deletion(self, temp_snapshots_dir):
+        """The F2 rule: an incomplete backup copy does not verify a deletion."""
+        manager = BackupManager(temp_snapshots_dir)
+        manager.create_backup([self._delete_rule()])
+        path = manager.snapshot_dir_for("latest") / "backup.json"
+
+        def edit(data):
+            data["filters"][0]["conditions"].append({"type": "sender", "operator": "is not", "value": "boss@x"})
+        self._edit_json(path, edit)
+
+        copy = manager.load_backup("latest").filters[0]
+        live = self._delete_rule()
+        [(f, reason)] = unverified_for_deletion([live], [copy])
+        assert "incomplete" in reason and "unknown operator 'is not'" in reason
+
+    def test_archive_with_missing_action_type_loads_flagged(self, temp_snapshots_dir):
+        manager = BackupManager(temp_snapshots_dir)
+        manager.create_backup([])
+        snapshot_dir = manager.snapshot_dir_for("latest")
+        manager.write_archive(snapshot_dir, [ArchiveEntry(filter=self._delete_rule())])
+
+        def edit(data):
+            del data["entries"][0]["filter"]["actions"][0]["type"]
+        self._edit_json(snapshot_dir / "archive.json", edit)
+
+        [entry] = manager.load_archive(snapshot_dir)
+        assert entry.filter.actions == []
+        assert any("action 1: missing action type" in i for i in entry.filter.scrape_issues)
+
+
 class TestUnverifiedForDeletion:
     """Unit tests for the cleanup safety rule."""
 

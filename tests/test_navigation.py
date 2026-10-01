@@ -135,3 +135,54 @@ async def test_saved_session_loads_into_real_context(tmp_path):
         assert [c["name"] for c in cookies] == ["probe"]
     finally:
         await browser.close()
+
+
+ADD_FILTER_WARNING = "'Add filter' button not found"
+ADD_FILTER_TAG = '<button id="addFilterBtn">Add filter</button>'
+
+
+def _mock_page_with(add_filter_markup: str) -> str:
+    """The mock filters page with its 'Add filter' button replaced."""
+    assert MOCK_HTML.count(ADD_FILTER_TAG) == 1
+    return MOCK_HTML.replace(ADD_FILTER_TAG, add_filter_markup)
+
+
+# Inserts the button 400 ms after load, after the Custom filters heading,
+# as the live page did when the check reported it missing.
+LATE_ADD_FILTER = """<script>
+setTimeout(() => {
+  const b = document.createElement('button');
+  b.textContent = 'Add filter';
+  document.body.prepend(b);
+}, 400);
+</script>"""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("markup", [
+    LATE_ADD_FILTER,
+    # Present but not visible (covered or hidden) still counts as present
+    '<button style="display:none">Add filter</button>',
+], ids=["renders-late", "hidden"])
+async def test_add_filter_check_does_not_warn_when_button_present(markup, caplog):
+    browser = await _browser_serving(_mock_page_with(markup), [])
+    try:
+        browser.account_slot = 1
+        with caplog.at_level("WARNING", logger="src.scraper.browser"):
+            await browser.navigate_to_filters()
+        assert ADD_FILTER_WARNING not in caplog.text
+    finally:
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_add_filter_check_warns_when_button_absent(monkeypatch, caplog):
+    monkeypatch.setattr("src.scraper.browser.ADD_FILTER_WAIT_MS", 300)
+    browser = await _browser_serving(_mock_page_with(""), [])
+    try:
+        browser.account_slot = 1
+        with caplog.at_level("WARNING", logger="src.scraper.browser"):
+            await browser.navigate_to_filters()
+        assert ADD_FILTER_WARNING in caplog.text
+    finally:
+        await browser.close()

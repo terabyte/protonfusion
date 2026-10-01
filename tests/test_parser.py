@@ -5,7 +5,7 @@ import logging
 
 from src.parser.filter_parser import (
     parse_condition_type, parse_operator, parse_action_type,
-    parse_filter, parse_scraped_filters,
+    parse_filter, parse_scraped_filters, UnknownFilterValueError,
     CONDITION_TYPE_MAP, OPERATOR_MAP, ACTION_TYPE_MAP,
 )
 from src.models.filter_models import (
@@ -42,17 +42,13 @@ class TestParseConditionType:
         assert parse_condition_type("  sender  ") == ConditionType.SENDER
         assert parse_condition_type("\trecipient\n") == ConditionType.RECIPIENT
 
-    def test_parse_partial_match(self):
-        """Test partial matching."""
-        assert parse_condition_type("sender address") == ConditionType.SENDER
-        assert parse_condition_type("email from") == ConditionType.SENDER
-
-    def test_parse_unknown_type(self, caplog):
-        """Test parsing unknown type defaults to SENDER with warning."""
-        with caplog.at_level(logging.WARNING):
-            result = parse_condition_type("unknown_type")
-        assert result == ConditionType.SENDER
-        assert "Unknown condition type" in caplog.text
+    @pytest.mark.parametrize("raw", ["unknown_type", "body", "sender address", "", None])
+    def test_parse_unknown_type_raises(self, raw):
+        """No default and no substring guess: an unknown type is an error."""
+        with pytest.raises(UnknownFilterValueError) as exc:
+            parse_condition_type(raw)
+        assert exc.value.field == "condition type"
+        assert exc.value.value == raw
 
 
 class TestParseOperator:
@@ -82,17 +78,21 @@ class TestParseOperator:
         assert parse_operator("  contains  ") == Operator.CONTAINS
         assert parse_operator("\tstarts with\n") == Operator.STARTS_WITH
 
-    def test_parse_partial_match(self):
-        """Test partial matching."""
-        assert parse_operator("string contains") == Operator.CONTAINS
-        assert parse_operator("is equal") == Operator.IS
+    @pytest.mark.parametrize("raw,expected", [
+        ("starts_with", Operator.STARTS_WITH),
+        ("ends_with", Operator.ENDS_WITH),
+        ("begins with", Operator.STARTS_WITH),
+    ])
+    def test_parse_scraper_model_values(self, raw, expected):
+        """The scraper emits model values; these used to fall through to CONTAINS."""
+        assert parse_operator(raw) == expected
 
-    def test_parse_unknown_operator(self, caplog):
-        """Test parsing unknown operator defaults to CONTAINS with warning."""
-        with caplog.at_level(logging.WARNING):
-            result = parse_operator("unknown_op")
-        assert result == Operator.CONTAINS
-        assert "Unknown operator" in caplog.text
+    @pytest.mark.parametrize("raw", ["unknown_op", "is not", "does not contain", "", None])
+    def test_parse_unknown_operator_raises(self, raw):
+        """A substring match would read "is not" as IS, inverting the condition."""
+        with pytest.raises(UnknownFilterValueError) as exc:
+            parse_operator(raw)
+        assert exc.value.field == "operator"
 
 
 class TestParseActionType:
@@ -129,17 +129,12 @@ class TestParseActionType:
         assert parse_action_type("  label  ") == ActionType.LABEL
         assert parse_action_type("\tdelete\n") == ActionType.DELETE
 
-    def test_parse_partial_match(self):
-        """Test partial matching."""
-        assert parse_action_type("please move to folder") == ActionType.MOVE_TO
-        assert parse_action_type("should archive this") == ActionType.ARCHIVE
-
-    def test_parse_unknown_action(self, caplog):
-        """Test parsing unknown action defaults to MOVE_TO with warning."""
-        with caplog.at_level(logging.WARNING):
-            result = parse_action_type("unknown_action")
-        assert result == ActionType.MOVE_TO
-        assert "Unknown action type" in caplog.text
+    @pytest.mark.parametrize("raw", ["unknown_action", "forward", "please move to folder", None])
+    def test_parse_unknown_action_raises(self, raw):
+        """Test parsing an unknown action type is an error, not MOVE_TO."""
+        with pytest.raises(UnknownFilterValueError) as exc:
+            parse_action_type(raw)
+        assert exc.value.field == "action type"
 
 
 class TestParseFilter:
@@ -392,3 +387,71 @@ class TestParseEvidence:
     def test_sieve_flag_absent_derives_from_script(self):
         f = parse_filter({"name": "S", "raw": {"sieve_text": "keep;"}})
         assert f.is_sieve is True
+
+
+class TestUnknownValues:
+    """Unknown or missing condition/action values are never guessed at."""
+
+    DELETE_RULE = {
+        "name": "Delete Promos",
+        "logic": "and",
+        "conditions": [
+            {"type": "sender", "operator": "is", "value": "promo@shop.example"},
+            {"type": "body", "operator": "contains", "value": "sale"},
+        ],
+        "actions": [{"type": "delete", "parameters": {}}],
+    }
+
+    def test_strict_parse_names_filter_and_value(self):
+        with pytest.raises(UnknownFilterValueError) as exc:
+            parse_filter(self.DELETE_RULE)
+        assert exc.value.filter_name == "Delete Promos"
+        assert exc.value.value == "body"
+        assert "'Delete Promos'" in str(exc.value) and "'body'" in str(exc.value)
+
+    @pytest.mark.parametrize("cond,act,needle", [
+        ({"operator": "contains", "value": "x"}, {"type": "delete"}, "missing condition type"),
+        ({"type": "sender", "value": "x"}, {"type": "delete"}, "missing operator"),
+        ({"type": "sender", "operator": "contains", "value": "x"}, {"parameters": {}}, "missing action type"),
+        ({"type": "sender", "operator": "contains", "value": "x"}, {"type": "forward"}, "unknown action type 'forward'"),
+    ])
+    def test_missing_keys_raise(self, cond, act, needle):
+        """Keys that used to default (sender/contains/move_to) are errors too."""
+        with pytest.raises(UnknownFilterValueError, match=needle):
+            parse_filter({"name": "F", "conditions": [cond], "actions": [act]})
+
+    def test_unknown_logic_raises(self):
+        with pytest.raises(UnknownFilterValueError, match="unknown logic 'xor'"):
+            parse_filter({"name": "F", "logic": "xor"})
+
+    def test_scraped_list_keeps_filter_flagged_incomplete(self, caplog):
+        """parse_scraped_filters neither crashes, drops, nor guesses: the
+        bad entry is removed and recorded, so the filter is incomplete."""
+        with caplog.at_level(logging.WARNING):
+            result = parse_scraped_filters([self.DELETE_RULE])
+        assert len(result) == 1
+        f = result[0]
+        assert not f.is_complete
+        assert [c.value for c in f.conditions] == ["promo@shop.example"]
+        assert f.actions[0].type == ActionType.DELETE
+        assert len(f.scrape_issues) == 1
+        assert "unknown condition type 'body'" in f.scrape_issues[0]
+        assert '"value": "sale"' in f.scrape_issues[0]
+        assert "Delete Promos" in caplog.text
+
+    def test_scraped_list_unknown_action_and_logic(self):
+        f = parse_scraped_filters([{
+            "name": "F", "logic": "xor",
+            "conditions": [{"type": "sender", "operator": "contains", "value": "a"}],
+            "actions": [{"type": "forward", "parameters": {"to": "x@y"}}],
+        }])[0]
+        assert f.actions == []
+        assert f.logic == LogicType.AND
+        assert any("unknown action type 'forward'" in i for i in f.scrape_issues)
+        assert any("unknown logic 'xor'" in i for i in f.scrape_issues)
+
+    def test_existing_scrape_issues_kept(self):
+        raw = dict(self.DELETE_RULE, scrape_issues=["condition 2: unknown condition type 'Body'"])
+        f = parse_scraped_filters([raw])[0]
+        assert f.scrape_issues[0] == "condition 2: unknown condition type 'Body'"
+        assert len(f.scrape_issues) == 2

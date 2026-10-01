@@ -8,6 +8,7 @@ from typing import Optional, Union
 from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright, Browser, Page, BrowserContext
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from src.scraper import selectors
 from src.utils.config import (
@@ -33,6 +34,9 @@ SETTINGS_DRAWER_MS = 2000
 ALL_SETTINGS_LOAD_MS = 5000
 FILTERS_PAGE_LOAD_MS = 3000
 FILTERS_PAGE_WAIT_MS = 30000
+# How long the 'Add filter' button gets to appear after the Custom filters
+# heading has. Only spent in full when the button really is absent.
+ADD_FILTER_WAIT_MS = 5000
 MODAL_TRANSITION_MS = 1500
 DROPDOWN_MS = 500
 POST_LOGIN_SETTLE_MS = 15000
@@ -562,9 +566,16 @@ class ProtonMailBrowser:
                 "ProtonMail may have changed their UI layout."
             )
 
-        # Add filter button
-        add_btn = await page.query_selector(selectors.ADD_FILTER_BUTTON)
-        if not add_btn:
+        # Add filter button. It can render after the Custom filters heading
+        # this method was gated on, so a one-shot query_selector straight
+        # after navigation reported it missing on a live page that had it.
+        # Wait briefly for it to attach instead; visibility is not required,
+        # since an onboarding spotlight may be covering it.
+        try:
+            await page.wait_for_selector(
+                selectors.ADD_FILTER_BUTTON, state="attached", timeout=ADD_FILTER_WAIT_MS,
+            )
+        except PlaywrightTimeoutError:
             logger.warning("'Add filter' button not found (may be hidden on free tier)")
 
     async def read_sieve_script(self, filter_name: str = "") -> str:
