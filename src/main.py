@@ -1127,7 +1127,10 @@ async def _reenable_after_failed_upload(
         try:
             if await sync_client.set_row_enabled(f.priority, f.name, True, expected_names=expected_names):
                 continue
-            reason = "its row could not be identified with certainty"
+            reason = (
+                "its switch did not change when clicked" if sync_client.last_toggle_refused
+                else "its row could not be identified with certainty"
+            )
         except Exception as e:
             reason = loggable_text(str(e)) or type(e).__name__
             logger.warning("Re-enabling '%s' failed: %s", f.name, reason)

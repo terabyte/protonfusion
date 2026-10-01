@@ -94,6 +94,11 @@ class ProtonMailSync(ProtonMailBrowser):
     # the "Add sieve filter" button was gone, which is how ProtonMail shows
     # an account at its active-filter limit. Lets the caller say so.
     upload_hit_filter_limit = False
+    # Set by set_row_enabled (and the name-keyed toggles) when a click on a
+    # filter's switch did not change it. ProtonMail refuses to switch a
+    # filter on that way when the account is at its active-filter limit, so
+    # a refused enable is reported as the probable limit.
+    last_toggle_refused = False
 
     async def upload_sieve(
         self, sieve_script: str, filter_name: str = "ProtonFusion Consolidated",
@@ -445,12 +450,32 @@ class ProtonMailSync(ProtonMailBrowser):
         if not toggle_input or not toggle_label:
             logger.warning("No toggle for filter '%s'", name)
             return False
+        self.last_toggle_refused = False
         if await toggle_input.is_checked() != enabled:
-            await toggle_label.click()
-            await page.wait_for_timeout(1000)
-            logger.info("%s filter: %s", "Enabled" if enabled else "Disabled", name)
-        else:
-            logger.info("Filter '%s' already %s", name, "enabled" if enabled else "disabled")
+            return await self._click_toggle_and_confirm(row, toggle_label, name, enabled)
+        logger.info("Filter '%s' already %s", name, "enabled" if enabled else "disabled")
+        return True
+
+    async def _click_toggle_and_confirm(self, row, toggle_label, name: str, enabled: bool) -> bool:
+        """Click a row's switch, then read it back; True only if it is now `enabled`.
+
+        A click can be swallowed (a modal over the list, ProtonMail refusing
+        an enable at the active-filter limit), and callers act on the result
+        as proof of the filter's state: sync switches ProtonFusion's filter on
+        this way after the UI filters are off. So a switch still in the old
+        state sets last_toggle_refused and returns False. The switch is
+        looked up again because the list may re-render on click.
+        """
+        await toggle_label.click()
+        await self.page.wait_for_timeout(1000)
+        toggle_after = await row.query_selector(selectors.FILTER_TOGGLE)
+        if not toggle_after or await toggle_after.is_checked() != enabled:
+            self.last_toggle_refused = True
+            logger.warning(
+                "Clicked the switch of filter '%s' but it did not turn %s", name, "on" if enabled else "off",
+            )
+            return False
+        logger.info("%s filter: %s", "Enabled" if enabled else "Disabled", name)
         return True
 
     async def set_row_enabled(
@@ -476,10 +501,13 @@ class ProtonMailSync(ProtonMailBrowser):
         off since the scrape is never recorded as one this run disabled, and
         so never switched on by a failed sync's re-enable.
 
-        Returns True once the row is in the requested state; False, without
-        clicking, whenever the row cannot be identified with certainty.
+        Returns True once the row is in the requested state, read back after
+        any click; False, without clicking, whenever the row cannot be
+        identified with certainty, and False (with last_toggle_refused set)
+        when the switch did not change on click.
         """
         page = self.page
+        self.last_toggle_refused = False
         section = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
         if not section:
             logger.warning("Custom filters section not found; not toggling '%s'", name)
@@ -512,9 +540,8 @@ class ProtonMailSync(ProtonMailBrowser):
             )
             return False
         if is_checked != enabled:
-            await toggle_label.click()
-            await page.wait_for_timeout(1000)
-        logger.info("%s filter: %s", "Enabled" if enabled else "Disabled", name)
+            return await self._click_toggle_and_confirm(row, toggle_label, name, enabled)
+        logger.info("Filter '%s' already %s", name, "enabled" if enabled else "disabled")
         return True
 
     async def delete_filter(self, name: str) -> bool:

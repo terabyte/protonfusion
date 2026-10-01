@@ -41,6 +41,8 @@ def _sieve(name, script, enabled=True, priority=0) -> ProtonMailFilter:
 class FakeSync:
     """Records set_row_enabled calls; the other toggles must never be used."""
 
+    last_toggle_refused = False
+
     def __init__(self, fail=()):
         self.calls = []
         self.fail = set(fail)
@@ -137,6 +139,19 @@ class TestRestoreEngine:
         )
         assert report["errors"] and "failed to enable" in report["errors"][0]
 
+    def test_switch_that_ignores_the_click_is_an_error(self):
+        """V5: the real set_row_enabled, over a page whose switch does not change on click."""
+        from src.scraper.protonmail_sync import ProtonMailSync
+        from tests.test_toggle_row import TogglePage
+        sync = ProtonMailSync()
+        sync.page = TogglePage([("A", False)], stuck={0})
+        report = asyncio.run(RestoreEngine(sync).restore_from_backup(
+            Backup(filters=[_filter("A", "a@x", enabled=True)]),
+            [_filter("A", "a@x", enabled=False, priority=0)],
+        ))
+        assert report["enabled"] == []
+        assert report["errors"] == ["A: failed to enable: its switch did not change when clicked"]
+
 
 def _section_for(filters) -> str:
     """A full live script whose ProtonFusion section holds `filters`."""
@@ -157,6 +172,7 @@ class FakeBrowser:
     read_error = None
     upload_result = True  # False, or an exception instance to raise
     toggle_fails: set = set()  # (name, enabled) pairs set_row_enabled refuses
+    last_toggle_refused = False
     calls: list = []
     account_email = "test@proton.me"
 

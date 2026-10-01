@@ -123,7 +123,8 @@ class RestoreEngine:
         """Set each matched live row to `enabled`, by row position confirmed by name.
 
         Uses ProtonMailSync.set_row_enabled, so a shared name never toggles
-        the wrong row. Carries on past a failure. Returns (names done,
+        the wrong row, and a click that did not change the switch counts as
+        a failure. Carries on past a failure. Returns (names done,
         error lines naming each failure).
         """
         done, errors = [], []
@@ -132,6 +133,8 @@ class RestoreEngine:
             try:
                 if await self.sync.set_row_enabled(live.priority, live.name, enabled):
                     done.append(backed.name)
+                elif self.sync.last_toggle_refused:
+                    errors.append(f"{backed.name}: failed to {verb}: its switch did not change when clicked")
                 else:
                     errors.append(f"{backed.name}: failed to {verb} (row {live.priority} not found unambiguously)")
             except Exception as e:

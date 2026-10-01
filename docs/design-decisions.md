@@ -146,7 +146,7 @@ ProtonMail limits active filters per plan, so `sync` disables UI filters before 
 
 Now `sync` scrapes the live filters and disables only wizard filters whose `content_hash` (name, logic, conditions, actions) is in the set the script was built from: the snapshot manifest's `filter_hashes`, or every wizard filter in the `--backup` snapshot when `--sieve` names a script with no manifest. Matching by content rather than name means a filter edited since the backup stays on. Sieve filters, unmatched filters, and rows the scraper could not read in full are left enabled and listed, so a mismatch errs toward a rule running twice, never toward a rule not running. `--dry-run` shows the plan from the backup and `--show-diff-only` from the live account.
 
-Rows are toggled by scraped position, confirmed by name (`set_row_enabled`), since names need not be unique. If the upload fails, every row this run disabled is re-enabled; any that cannot be are listed with the `restore` command. A missing "Add sieve filter" button is reported as the probable active-filter limit, with the filters left enabled as the ones to disable or fold in. `sync` never falls back to disabling everything.
+Rows are toggled by scraped position, confirmed by name (`set_row_enabled`), since names need not be unique, and each switch is read back after the click, so a click that did not take counts as a failure rather than a done toggle. If the upload fails, every row this run disabled is re-enabled; any that cannot be are listed with the `restore` command. A missing "Add sieve filter" button is reported as the probable active-filter limit, with the filters left enabled as the ones to disable or fold in. `sync` never falls back to disabling everything.
 
 ## Free Tier Limitations
 
