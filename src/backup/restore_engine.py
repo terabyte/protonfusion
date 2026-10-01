@@ -99,6 +99,9 @@ class RestoreEngine:
         # Filters whose switch did not turn on when clicked: how ProtonMail
         # refuses an enable at the account's active-filter limit
         self.enable_refused: List[str] = []
+        # The pairs the last apply() call confirmed in the requested state, in
+        # order: names can repeat, so a rollback needs the rows themselves.
+        self.last_done: List[Pair] = []
 
     @staticmethod
     def plan(backup: Backup, current_filters: List[ProtonMailFilter]) -> RestorePlan:
@@ -217,14 +220,16 @@ class RestoreEngine:
         Uses ProtonMailSync.set_row_enabled, so a shared name never toggles
         the wrong row, and a click that did not change the switch counts as
         a failure. Carries on past a failure. Returns (names done,
-        error lines naming each failure).
+        error lines naming each failure); the pairs done are in last_done.
         """
         done, errors = [], []
+        self.last_done = []
         verb = "enable" if enabled else "disable"
         for backed, live in pairs:
             try:
                 if await self.sync.set_row_enabled(live.priority, live.name, enabled):
                     done.append(backed.name)
+                    self.last_done.append((backed, live))
                 elif self.sync.last_toggle_refused:
                     errors.append(f"{backed.name}: failed to {verb}: its switch did not change when clicked")
                     if enabled:

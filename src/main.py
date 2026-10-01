@@ -1942,7 +1942,8 @@ def restore(
     """
     from src.scraper.protonmail_scraper import ProtonMailScraper
     from src.scraper.protonmail_sync import ProtonMailSync, normalize_script
-    from src.backup.restore_engine import RestoreEngine
+    from src.backup.restore_engine import RestoreEngine, uncovered_live_rules
+    from src.generator.sieve_rules import SieveParseError
 
     creds = _get_credentials(credentials_file, False)
     _workers = max(1, min(workers, 10))
@@ -2086,6 +2087,34 @@ def restore(
                 progress.disabled = [n for n in progress.disabled if n != SIEVE_FILTER_NAME]
                 progress.disable_errors += errors
 
+            async def _undo_enables_then_pf_on(enabled_pairs) -> None:
+                """After a failed enable with ProtonFusion's filter off: get every rule running again.
+
+                The filters this run enabled may hold the active-filter slots
+                ProtonFusion's filter needs, so they go off first, newest
+                first, and then it is switched back on. If it still cannot
+                be, they go back on (they carry some of its rules), and the
+                rules left in no running filter are listed.
+                """
+                progress.rolled_back, progress.rollback_errors = await engine.apply(
+                    list(reversed(enabled_pairs)), False,
+                )
+                rolled_back = list(engine.last_done)
+                await _switch_pf_back_on()
+                if progress.pf_back_on:
+                    return
+                progress.reenabled, errors = await engine.apply(list(reversed(rolled_back)), True)
+                progress.rollback_errors += errors
+                off_again = {id(live) for _, live in rolled_back} - {id(live) for _, live in engine.last_done}
+                on_now = [f for f in current_filters if f.enabled and not f.is_sieve]
+                on_now += [live for _, live in enabled_pairs if id(live) not in off_again]
+                try:
+                    progress.unfiltered = [
+                        fact.describe() for fact in uncovered_live_rules(live_script, "", on_now)
+                    ]
+                except SieveParseError:
+                    progress.unfiltered = None
+
             # 0. ProtonFusion's filter off, when the backup has it off. If that
             # failed, nothing went off, so there is nothing to switch back on.
             if pf_first:
@@ -2100,7 +2129,7 @@ def restore(
                 if progress.enable_errors:
                     progress.stopped_at = "enable"
                     if pf_first:
-                        await _switch_pf_back_on()
+                        await _undo_enables_then_pf_on(list(engine.last_done))
 
             # 2. Replace the script (this switches ProtonFusion's filter on)
             if progress.stopped_at is None and script_action == "upload":
@@ -2155,6 +2184,13 @@ class RestoreState:
     after such a stop (None when that was not needed). enable_refused names
     the filters whose switch did not turn on when clicked, which is how
     ProtonMail refuses at the active-filter limit.
+
+    After a failed enable with ProtonFusion's filter switched off,
+    rolled_back names the filters this run enabled and then switched off
+    again to free their slots for it; reenabled, those switched back on
+    because it still could not come back on; unfiltered, the rules of its
+    section then in no running filter (None if that could not be worked
+    out).
     """
     enabled: List[str] = field(default_factory=list)
     enable_errors: List[str] = field(default_factory=list)
@@ -2164,6 +2200,10 @@ class RestoreState:
     script_status: str = "unchanged"
     stopped_at: Optional[str] = None
     pf_back_on: Optional[bool] = None
+    rolled_back: List[str] = field(default_factory=list)
+    rollback_errors: List[str] = field(default_factory=list)
+    reenabled: List[str] = field(default_factory=list)
+    unfiltered: Optional[List[str]] = None
 
 
 def _print_restore_outcome(
@@ -2184,12 +2224,33 @@ def _print_restore_outcome(
             )
         else:
             lines.append(f"Disabled: none of {len(to_disable)} (not attempted: stopped before this step)")
+        if state.rolled_back:
+            lines.append(
+                f"Switched back off to free their active-filter slots for '{SIEVE_FILTER_NAME}': "
+                f"{len(state.rolled_back)}{_named(state.rolled_back)}"
+            )
+        if state.reenabled:
+            lines.append(
+                f"Switched on again, since '{SIEVE_FILTER_NAME}' stayed off and they carry some of its "
+                f"rules: {len(state.reenabled)}{_named(state.reenabled)}"
+            )
         if state.pf_back_on is False:
             lines.append(
                 f"[bold red]'{SIEVE_FILTER_NAME}' was switched off first (the backup has it off) and could "
-                "not be switched back on, so any of its rules whose UI filter is not on are filtering "
-                "nothing. Switch it on in ProtonMail.[/]"
+                "not be switched back on. Switch it on in ProtonMail.[/]"
             )
+            if state.unfiltered:
+                lines.append(
+                    f"[bold red]Until then these {len(state.unfiltered)} rule(s) of its section are in no "
+                    "running filter, so the mail they handle is filtered by nothing:[/]"
+                )
+                lines += [f"  [red]- {escape(rule)}[/]" for rule in state.unfiltered]
+            elif state.unfiltered == []:
+                lines.append("[yellow]Every rule of its section is carried by a UI filter that is on.[/]")
+            else:
+                lines.append(
+                    "[bold red]Any of its rules whose UI filter is not on are filtering nothing.[/]"
+                )
         else:
             caveat = " (apart from the rules --allow-rule-removal let go)" if allow_rule_removal else ""
             pf_note = (
@@ -2210,7 +2271,10 @@ def _print_restore_outcome(
     if not complete:
         lines.append("To finish: fix the cause and run the same restore again (it only changes what still differs).")
     console.print(Panel("\n".join(lines), title="Restore Report"))
-    for title, errors in (("Could not enable", state.enable_errors), ("Could not disable", state.disable_errors)):
+    for title, errors in (
+        ("Could not enable", state.enable_errors), ("Could not disable", state.disable_errors),
+        ("Could not undo", state.rollback_errors),
+    ):
         if errors:
             console.print(f"[bold red]{title}:")
             for line in errors:
