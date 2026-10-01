@@ -34,13 +34,9 @@ from src.generator.sieve_rules import (
     Atom, Fact, _tokenize, correct_legacy_actions, describe_atom, script_facts,
 )
 from src.models.filter_models import (
-    ActionType, ConditionGroup, ConditionType, ConsolidatedFilter, FilterAction,
-    FilterCondition, FilterStatus, LogicType, Operator, ProtonMailFilter,
+    CARRIED_PREFIX, ActionType, ConditionGroup, ConditionType, ConsolidatedFilter,
+    FilterAction, FilterCondition, FilterStatus, LogicType, Operator, ProtonMailFilter,
 )
-
-# Name prefix for filters synthesized from live Sieve rules. Shows up in the
-# generated "# Source filters:" comments and in `snapshot view`.
-CARRIED_PREFIX = "Carried forward"  # no brackets: Rich would parse them as markup
 
 
 def is_carried(f: ProtonMailFilter) -> bool:
@@ -83,8 +79,7 @@ def _atom_to_condition(atom: Atom) -> Optional[FilterCondition]:
         return None
     if operator == Operator.MATCHES:
         operator, value = _matches_operator(value)
-    # The generator splits values on "|" and ", ", so such values cannot round-trip
-    if "|" in value or ", " in value or not value:
+    if not value:
         return None
     return FilterCondition(type=ctype, operator=operator, value=value)
 
@@ -208,8 +203,8 @@ def facts_to_filters(
     label_targets); their actions come back as LABEL instead of MOVE_TO.
 
     Single-atom facts sharing an action set, condition type and operator are
-    packed into one filter with a pipe-joined value (which the generator
-    expands to a Sieve key list). Multi-atom facts (from allof tests) each
+    packed into one filter whose condition has a values list (generated as
+    a Sieve key list). Multi-atom facts (from allof tests) each
     become their own AND filter.
 
     A fact using an action older versions generated for a system folder
@@ -267,7 +262,7 @@ def facts_to_filters(
                 ProtonMailFilter(
                     name=f"{prefix} {ctype.value} {operator.value} -> {action_desc}",
                     logic=LogicType.AND,
-                    conditions=[FilterCondition(type=ctype, operator=operator, value="|".join(values))],
+                    conditions=[FilterCondition(type=ctype, operator=operator, values=values)],
                     actions=actions,
                 ),
                 {fact for _, fact in entries},

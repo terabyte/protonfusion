@@ -532,13 +532,8 @@ class TestSieveGenerator:
         assert "alice" in script
         assert "urgent" in script
 
-    def test_generate_comma_separated_values_expanded_to_array(self):
-        """Test that ProtonMail comma-separated values are expanded into Sieve arrays.
-
-        ProtonMail stores multiple values in a single condition field as
-        "val1, val2, val3". These must become Sieve array elements, not a
-        single string literal.
-        """
+    def test_generate_values_list_expanded_to_array(self):
+        """A condition's values list (several wizard chips) becomes a Sieve key list."""
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="dumb services",
@@ -548,7 +543,7 @@ class TestSieveGenerator:
                     FilterCondition(
                         type=ConditionType.SENDER,
                         operator=Operator.CONTAINS,
-                        value="redfin.com, zillow.com, ebay.com",
+                        values=["redfin.com", "zillow.com", "ebay.com"],
                     ),
                     FilterCondition(
                         type=ConditionType.SUBJECT,
@@ -565,33 +560,25 @@ class TestSieveGenerator:
 
         script = gen.generate([cf])
 
-        # Each comma-separated value must be a separate array element
+        # Each listed value must be a separate array element
         assert '["redfin.com", "zillow.com", "ebay.com"]' in script
         # Single values should NOT become arrays
         assert '"[IEEE-Announcements]"' in script
 
-    def test_generate_comma_separated_with_pipe_merged(self):
-        """Test comma-separated values combined with pipe-merged values."""
-        gen = SieveGenerator()
+    @pytest.mark.parametrize("literal", ["Invoice, Receipt", "a|b", "a.com, b.com|c.com"])
+    def test_separators_in_a_single_value_stay_literal(self, literal):
+        """A key list is an OR (RFC 5228 2.7), so splitting text on ", " or
+        "|" would widen the rule: "Invoice, Receipt" must stay one literal."""
         cf = ConsolidatedFilter(
             name="Test",
             condition_groups=[ConditionGroup(conditions=[
-                FilterCondition(
-                    type=ConditionType.SENDER,
-                    operator=Operator.CONTAINS,
-                    # Pipe from merge_conditions, commas from ProtonMail
-                    value="a.com, b.com|c.com, d.com",
-                ),
+                FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value=literal),
             ])],
-            actions=[FilterAction(type=ActionType.DELETE)],
+            actions=[FilterAction(type=ActionType.TRASH)],
         )
-
-        script = gen.generate([cf])
-
-        assert '"a.com"' in script
-        assert '"b.com"' in script
-        assert '"c.com"' in script
-        assert '"d.com"' in script
+        script = SieveGenerator().generate([cf])
+        assert f'header :contains "Subject" "{literal}"' in script
+        assert "[" not in script.split("header", 1)[1].split("{", 1)[0]
 
     def test_generate_mixed_and_or_groups(self):
         """Test rendering consolidated filter with AND and single-condition groups."""
@@ -1007,7 +994,10 @@ class TestWildcardOperators:
         assert 'address :matches "From" "*@x.com"' in script
 
     def test_each_value_in_a_list_gets_the_wildcard(self):
-        script = SieveGenerator().generate([_single_condition(Operator.STARTS_WITH, "a|b")])
+        cf = _single_condition(Operator.STARTS_WITH, "a")
+        cf.condition_groups[0].conditions[0] = FilterCondition(
+            type=ConditionType.SENDER, operator=Operator.STARTS_WITH, values=["a", "b"])
+        script = SieveGenerator().generate([cf])
         assert 'address :matches "From" ["a*", "b*"]' in script
 
     def test_literal_wildcard_characters_are_escaped(self):

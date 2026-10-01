@@ -117,11 +117,11 @@ class TestParseRules:
             name="mixed",
             condition_groups=[
                 ConditionGroup(conditions=[
-                    FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="a|b"),
+                    FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, values=["a", "b"]),
                 ]),
                 ConditionGroup(logic=LogicType.AND, conditions=[
                     FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="c"),
-                    FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="d, e"),
+                    FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, values=["d", "e"]),
                 ]),
                 ConditionGroup(logic=LogicType.OR, conditions=[
                     FilterCondition(type=ConditionType.RECIPIENT, operator=Operator.IS, value="f"),

@@ -473,3 +473,13 @@ def test_scraped_empty_value_is_quarantined():
     assert not f.is_complete
     assert f.conditions == []
     assert any("empty value" in issue for issue in f.scrape_issues)
+
+
+def test_scraped_chip_list_passes_through():
+    (f,) = parse_scraped_filters([{
+        "name": "chips",
+        "conditions": [{"type": "subject", "operator": "contains", "values": ["Invoice, Receipt", "Bill"]}],
+        "actions": [{"type": "trash"}],
+    }])
+    assert f.is_complete
+    assert f.conditions[0].values == ["Invoice, Receipt", "Bill"]

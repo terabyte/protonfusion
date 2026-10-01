@@ -137,11 +137,15 @@ def parse_filter(raw: dict, strict: bool = True) -> ProtonMailFilter:
 
     conditions = []
     for cond in raw.get("conditions", []):
-        conditions.append({
+        parsed = {
             "type": _parse_or_keep(parse_condition_type, cond.get("type"), name, strict),
             "operator": _parse_or_keep(parse_operator, cond.get("operator"), name, strict),
             "value": cond.get("value", ""),
-        })
+        }
+        # Several wizard chips arrive as a list; a single value is a literal
+        if "values" in cond:
+            parsed["values"] = cond["values"]
+        conditions.append(parsed)
 
     actions = []
     for act in raw.get("actions", []):

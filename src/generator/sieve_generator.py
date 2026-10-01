@@ -160,7 +160,8 @@ class SieveGenerator:
         """
         texts = [f.name, *f.source_filters]
         for group in f.condition_groups:
-            texts.extend(cond.value for cond in group.conditions)
+            for cond in group.conditions:
+                texts.extend(cond.keys)
         for action in f.actions:
             texts.extend(str(v) for v in action.parameters.values())
         for text in texts:
@@ -252,18 +253,11 @@ class SieveGenerator:
             )
         comparator = self._operator_to_sieve(cond.operator)
 
-        # Handle pipe-delimited values (from merge_conditions strategy)
-        raw_values = cond.value.split("|") if "|" in cond.value else [cond.value]
-
-        # Also split comma-separated values within each entry.
-        # ProtonMail stores multiple values in a single condition field
-        # as "val1, val2, val3" — these need to become Sieve array elements.
-        values = []
-        for v in raw_values:
-            if ", " in v:
-                values.extend(part.strip() for part in v.split(", "))
-            else:
-                values.append(v)
+        # A key list comes only from an explicit values list (wizard chips,
+        # or filters merged by consolidation). A single value is one literal
+        # even if it contains ", " or "|": a key list is an OR, so splitting
+        # text would widen the rule.
+        values = cond.keys
 
         # begins-with / ends-with become a :matches pattern around the literal
         # value, so the value's own wildcard characters must be escaped first.

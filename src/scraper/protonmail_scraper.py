@@ -501,26 +501,28 @@ class ProtonMailScraper(ProtonMailBrowser):
                 if operator not in KNOWN_OPERATORS:
                     issues.append(f"condition {row_index}: unknown operator {operator_label!r}")
 
-                # Get values - check for tags/chips first, then input
-                value = ""
+                # Get values - check for tags/chips first, then input. Each
+                # chip is its own value (the condition matches if any does),
+                # so several chips are kept as a list, never joined into
+                # text that would later have to be split again.
+                values: List[str] = []
                 tags = await row.query_selector_all(selectors.CONDITION_VALUE_TAGS)
                 if tags:
-                    tag_texts = []
                     for tag in tags:
-                        tag_texts.append((await tag.inner_text()).strip())
-                    value = ", ".join(tag_texts)
+                        values.append((await tag.inner_text()).strip())
                 else:
                     value_el = await row.query_selector(selectors.CONDITION_VALUE_INPUT)
                     if value_el:
-                        value = await value_el.input_value()
-                if not value.strip() and cond_type != "attachments":
+                        values.append((await value_el.input_value()).strip())
+                if cond_type != "attachments" and (not values or not all(values)):
                     issues.append(f"condition {row_index}: no value found")
 
-                conditions.append({
-                    "type": cond_type,
-                    "operator": operator,
-                    "value": value.strip(),
-                })
+                condition = {"type": cond_type, "operator": operator}
+                if len(values) > 1:
+                    condition["values"] = values
+                else:
+                    condition["value"] = values[0] if values else ""
+                conditions.append(condition)
             except Exception as e:
                 issues.append(f"condition {row_index}: could not be read ({e})")
 

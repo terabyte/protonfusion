@@ -67,7 +67,15 @@ A "matches" value is the user's own pattern and is written as is. A begins-with 
 
 ### Array Values
 
-When multiple filters with the same condition type and operator are consolidated, their values become a Sieve array:
+A Sieve key list (`["a", "b"]`) matches if **any** key matches (RFC 5228 section 2.7), so it is only ever generated from an explicit list, never by splitting text:
+
+- A condition whose wizard field holds several value chips is scraped as a `values` list, one entry per chip.
+- When multiple filters with the same condition type and operator are consolidated, their values are merged into one `values` list.
+- A single `value` is always one literal. Subject contains "Invoice, Receipt" is written as `"Invoice, Receipt"`, not as `["Invoice", "Receipt"]`, which would match either word.
+
+Backups made before the `values` list existed stored several chips as one ", "-joined value. Those values are read as a single literal, because the text cannot say whether ", " was a join or part of a value, and guessing "join" would widen the rule. A rule that used several chips therefore narrows until you run `backup` again; the rule preservation check reports the narrowed rule as dropped, and `cleanup` treats it as uncovered, so nothing is lost silently. Filters carried forward by older versions stored their key list "|"-joined; those (and only those) are read back as a list, since carry-forward never produced a key containing "|".
+
+For example, consolidating three filters:
 
 ```sieve
 # Before consolidation: 3 separate rules

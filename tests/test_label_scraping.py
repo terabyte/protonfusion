@@ -48,6 +48,14 @@ async def test_only_ticked_labels_read():
     # The first filter with a folder is where the folder map gets built
     # (which presses Escape and closes the wizard); its label and the
     # rest of its Actions step must still be read.
+    # Several value chips are kept as a list, one entry per chip, so a chip
+    # whose own text contains ", " stays one value.
+    (spam_cond,) = filters["Spam Filter"]["conditions"]
+    assert spam_cond["values"] == ["buy now", "limited offer", "Invoice, Receipt"]
+    assert "value" not in spam_cond
+    (one_chip,) = filters["Newsletter Trash"]["conditions"]
+    assert one_chip["value"] == "newsletter@example.com"
+
     newsletter = filters["Newsletter Trash"]
     assert _labels(newsletter) == ["pf-test-label"]
     assert any(a["type"] == "trash" for a in newsletter["actions"])

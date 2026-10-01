@@ -79,7 +79,7 @@ class TestFactsToFilters:
         facts = _generated_facts([_filter(f"s{i}") for i in range(50)])
         filters, _ = facts_to_filters(facts)
         assert len(filters) == 1
-        assert filters[0].conditions[0].value.count("|") == 49
+        assert len(filters[0].conditions[0].values) == 50
 
     def test_fileinto_is_move_to_without_label_info(self):
         """The Sieve cannot tell a label from a folder, so the default is MOVE_TO."""
@@ -335,3 +335,21 @@ class TestAttachmentCarryForward:
         filters, unconvertible = facts_to_filters(script_facts(sieve))
         assert filters == []
         assert unconvertible
+
+
+class TestMultiValueCarryForward:
+    """Key lists round-trip as values lists; a literal with ", " stays literal."""
+
+    def test_literal_with_comma_round_trips(self):
+        facts = script_facts('if header :contains "Subject" "Invoice, Receipt" { fileinto "trash"; }')
+        (f,), unconvertible = facts_to_filters(facts)
+        assert unconvertible == []
+        assert f.conditions[0].keys == ["invoice, receipt"]
+        assert _generated_facts([f]) == facts
+
+    def test_key_with_pipe_round_trips(self):
+        facts = script_facts('if header :contains "Subject" ["a|b", "c"] { fileinto "trash"; }')
+        (f,), unconvertible = facts_to_filters(facts)
+        assert unconvertible == []
+        assert sorted(f.conditions[0].values) == ["a|b", "c"]
+        assert _generated_facts([f]) == facts

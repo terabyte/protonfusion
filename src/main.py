@@ -364,7 +364,7 @@ def _display_filters(filters: list, source: str = "ProtonMail account"):
         # Format conditions
         cond_parts = []
         for c in f.conditions:
-            cond_parts.append(f"{c.type.value} {c.operator.value} \"{c.value}\"")
+            cond_parts.append(f"{c.type.value} {c.operator.value} {c.display_value}")
         conds_str = f" {f.logic.value.upper()} ".join(cond_parts) if cond_parts else "[dim]none[/]"
 
         # Format actions
@@ -1681,7 +1681,7 @@ def snapshot_view(
 
         cond_parts = []
         for c in f.conditions:
-            cond_parts.append(f"{c.type.value} {c.operator.value} \"{c.value}\"")
+            cond_parts.append(f"{c.type.value} {c.operator.value} {c.display_value}")
         conds_str = f" {f.logic.value.upper()} ".join(cond_parts) if cond_parts else "[dim]none[/]"
 
         action_parts = []

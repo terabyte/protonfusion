@@ -325,11 +325,9 @@ class TestMergeConditions:
         assert len(result) == 1
         # 3 single-condition groups should merge into 1
         assert len(result[0].condition_groups) == 1
-        merged_value = result[0].condition_groups[0].conditions[0].value
-        assert "spam1" in merged_value
-        assert "spam2" in merged_value
-        assert "spam3" in merged_value
-        assert "|" in merged_value
+        merged = result[0].condition_groups[0].conditions[0]
+        assert merged.values == ["spam1", "spam2", "spam3"]
+        assert merged.value == ""
 
     def test_different_types_not_merged(self):
         """Test that single-condition groups with different types are not merged."""
@@ -440,7 +438,7 @@ class TestMergeConditions:
         multis = [g for g in result[0].condition_groups if len(g.conditions) == 2]
         assert len(singles) == 1
         assert len(multis) == 1
-        assert "|" in singles[0].conditions[0].value  # merged
+        assert singles[0].conditions[0].values == ["spam1", "spam2"]  # merged
         assert multis[0].logic == LogicType.AND
 
 
@@ -771,13 +769,12 @@ class TestConsolidationEngine:
 
         and_groups = [g for g in cf.condition_groups if g.logic == LogicType.AND and len(g.conditions) == 2]
         or_groups = [g for g in cf.condition_groups if g.logic == LogicType.OR and len(g.conditions) == 2]
-        merged_singles = [g for g in cf.condition_groups if len(g.conditions) == 1 and "|" in g.conditions[0].value]
+        merged_singles = [g for g in cf.condition_groups if len(g.conditions) == 1 and g.conditions[0].values]
 
         assert len(and_groups) == 1
         assert len(or_groups) == 1
         assert len(merged_singles) == 1
-        assert "spam1" in merged_singles[0].conditions[0].value
-        assert "spam2" in merged_singles[0].conditions[0].value
+        assert merged_singles[0].conditions[0].values == ["spam1", "spam2"]
 
 
 class TestDisabledFilterHandling:

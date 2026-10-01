@@ -3,7 +3,7 @@ import json
 import logging
 from enum import Enum
 from typing import List, Optional
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_serializer, model_validator
 
 
 class ConditionType(str, Enum):
@@ -83,9 +83,48 @@ def migrate_legacy_action(entry: dict) -> dict:
 
 
 class FilterCondition(BaseModel):
+    """One condition of a filter.
+
+    A condition has either one `value` or, when the wizard shows several
+    value chips (or consolidation merged several filters), a `values` list.
+    A list is a Sieve key list: the condition matches if ANY value matches.
+    It is only ever built from that structure, never inferred from text: a
+    `value` is always one literal, even if it contains ", " or "|" (as old
+    backups' joined chip values do), because reading separators into a
+    literal would widen the rule.
+    """
     type: ConditionType
     operator: Operator
     value: str = ""
+    values: List[str] = Field(default_factory=list)
+
+    @model_validator(mode='after')
+    def one_form_only(self):
+        """Keep a single value in `value`; refuse a condition with both forms."""
+        if self.values and self.value:
+            raise ValueError("a condition has either value or values, not both")
+        if len(self.values) == 1:
+            self.value, self.values = self.values[0], []
+        return self
+
+    @model_serializer(mode='wrap')
+    def omit_empty_values(self, handler):
+        """Leave `values` out when unused, so single-value conditions
+        serialize exactly as they did before the field existed."""
+        data = handler(self)
+        if isinstance(data, dict) and not data.get("values"):
+            data.pop("values", None)
+        return data
+
+    @property
+    def keys(self) -> List[str]:
+        """The values this condition matches against (any one matching is enough)."""
+        return list(self.values) if self.values else [self.value]
+
+    @property
+    def display_value(self) -> str:
+        """The value(s) quoted for display: "a", or ["a", "b"] for a list."""
+        return json.dumps(self.values) if self.values else json.dumps(self.value)
 
 
 class FilterAction(BaseModel):
@@ -164,14 +203,20 @@ def empty_value_problem(entry) -> Optional[str]:
     VALUELESS_CONDITION_TYPES are exempt. Returns None when the value is fine.
     """
     if isinstance(entry, dict):
-        ctype, value = entry.get("type"), entry.get("value", "")
+        ctype, value, values = entry.get("type"), entry.get("value", ""), entry.get("values") or []
     else:
-        ctype, value = getattr(entry, "type", None), getattr(entry, "value", "")
+        ctype = getattr(entry, "type", None)
+        value, values = getattr(entry, "value", ""), getattr(entry, "values", [])
     ctype = getattr(ctype, "value", ctype)
+    if not isinstance(values, list):
+        return f"values is not a list: {values!r}"
+    if values and value:
+        return "has both value and values"
     if ctype in VALUELESS_CONDITION_TYPES:
         return None
-    if not isinstance(value, str) or not value.strip():
-        return f"empty value {value!r}"
+    for key in values or [value]:
+        if not isinstance(key, str) or not key.strip():
+            return f"empty value {key!r}"
     return None
 
 
@@ -191,6 +236,34 @@ def operator_mismatch_problem(entry) -> Optional[str]:
     if (ctype == ConditionType.ATTACHMENTS.value) != (operator == Operator.HAS.value):
         return f"operator {operator!r} does not apply to condition type {ctype!r}"
     return None
+
+
+# Name prefix for filters rebuilt from the live Sieve section by
+# consolidator.carry_forward. Shows up in the generated "# Source filters:"
+# comments and in `snapshot view`. No brackets: Rich would parse them as markup.
+CARRIED_PREFIX = "Carried forward"
+
+
+def split_legacy_carried_values(data: dict) -> dict:
+    """Turn an older carried-forward filter's "a|b|c" value into a values list.
+
+    Before conditions had a values list, carry-forward stored several keys
+    as one "|"-joined value and the generator split it again. Only a
+    carried filter's value is read this way: carry-forward never produced a
+    key containing "|", so there the "|" is always the join. Any other
+    value is a literal.
+    """
+    if not str(data.get("name", "")).startswith(CARRIED_PREFIX):
+        return data
+    conditions = data.get("conditions")
+    if not isinstance(conditions, list):
+        return data
+    migrated = []
+    for cond in conditions:
+        if isinstance(cond, dict) and not cond.get("values") and "|" in str(cond.get("value", "")):
+            cond = dict(cond, value="", values=cond["value"].split("|"))
+        migrated.append(cond)
+    return dict(data, conditions=migrated)
 
 
 class ProtonMailFilter(BaseModel):
@@ -235,7 +308,7 @@ class ProtonMailFilter(BaseModel):
         """
         if not isinstance(data, dict):
             return data
-        data = dict(data)
+        data = split_legacy_carried_values(dict(data))
         issues = []
         for key, kind, enum_fields in (
             ("conditions", "condition", _CONDITION_ENUM_FIELDS),
@@ -311,7 +384,11 @@ class ProtonMailFilter(BaseModel):
             f"logic={self.logic.value}",
         ]
         for c in self.conditions:
-            parts.append(f"cond:{c.type.value}|{c.operator.value}|{c.value}")
+            if c.values:
+                # Distinct prefix, so a list never hashes like some literal
+                parts.append(f"conds:{c.type.value}|{c.operator.value}|{json.dumps(c.values)}")
+            else:
+                parts.append(f"cond:{c.type.value}|{c.operator.value}|{c.value}")
         for a in self.actions:
             params = ",".join(f"{k}={v}" for k, v in sorted(a.parameters.items()))
             parts.append(f"act:{a.type.value}|{params}")
