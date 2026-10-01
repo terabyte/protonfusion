@@ -373,3 +373,19 @@ def test_live_archive_counts_as_covering_archive_filter():
     )
     live = script_facts('if address :is "From" "a" { fileinto "Archive"; }')
     assert filter_facts(f) <= live
+
+
+def test_escaped_slash_in_folder_round_trips():
+    """'Misc/Others' inside 'Work' survives carry-forward without double escaping."""
+    from src.models.filter_models import join_folder_path
+    folder = join_folder_path(["Work", "Misc/Others"])
+    f = ProtonMailFilter(
+        name="nested",
+        conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="a")],
+        actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": folder})],
+    )
+    facts = _generated_facts([f])
+    (carried,), unconvertible = facts_to_filters(facts)
+    assert unconvertible == []
+    assert carried.actions[0].parameters == {"folder": "Work/Misc\\/Others"}
+    assert _generated_facts([carried]) == facts

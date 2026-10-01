@@ -150,6 +150,8 @@ fileinto "Parent/Child";
 
 ProtonFusion automatically resolves the display names from ProtonMail's dropdown (which prefixes subfolders with a bullet character) to full folder paths.
 
+A `/` inside a single folder or label name is escaped with a backslash, as Proton's Sieve docs require: `"Work/Misc\\/Others"` in the script is the subfolder 'Misc/Others' of 'Work'. The scraper escapes each name before joining the path, so the stored folder parameter is `Work/Misc\/Others` and the generator's usual string quoting (which doubles the backslash) produces exactly Proton's form. Label names are escaped the same way. Backups made before this stored the path unescaped and cannot be told apart from real nesting; run `backup` again if a folder or label name contains `/`.
+
 ## Section Markers
 
 ProtonFusion wraps its generated rules in section markers:

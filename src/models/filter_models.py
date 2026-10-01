@@ -54,6 +54,25 @@ SYSTEM_FOLDER_ACTIONS = {
     "Inbox - Default": {"type": "move_to", "parameters": {"folder": "inbox"}},
 }
 
+
+def escape_folder_segment(name: str) -> str:
+    r"""Escape one folder or label name for use in a Proton `fileinto` path.
+
+    Proton reads "/" in a fileinto target as the folder separator, so a "/"
+    inside a single name is escaped with a backslash. Proton's Sieve docs:
+    `"Work/Misc\\/Others"` in a script is the subfolder 'Misc/Others' of
+    'Work'. The folder/label parameters stored on actions hold the
+    unquoted path (`Work/Misc\/Others`); Sieve string quoting in the
+    generator then doubles the backslash, giving exactly Proton's form.
+    """
+    return name.replace("/", "\\/")
+
+
+def join_folder_path(segments: List[str]) -> str:
+    """Join folder names (outermost first) into one escaped `fileinto` path."""
+    return "/".join(escape_folder_segment(segment) for segment in segments)
+
+
 # Action types older versions wrote to backups, and what they meant. The
 # scraper recorded the Trash folder as "delete", and nothing else ever
 # produced it, so it always meant Trash.
