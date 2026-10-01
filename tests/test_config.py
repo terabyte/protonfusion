@@ -7,7 +7,7 @@ from src.utils.config import (
     load_credentials, Credentials,
     SNAPSHOTS_DIR, TOOL_VERSION,
     PROTONMAIL_LOGIN_URL, MAIL_HOST, ACCOUNT_HOST, FILTERS_PATH,
-    proton_url, slot_from_url,
+    proton_url, slot_from_url, loggable_url, loggable_text,
 )
 
 
@@ -225,6 +225,32 @@ class TestProtonUrls:
     ])
     def test_slot_from_url_none(self, url):
         assert slot_from_url(url) is None
+
+
+class TestLoggableUrl:
+    """Logged URLs never carry a query string or fragment (session fork keys)."""
+
+    @pytest.mark.parametrize("url,expected", [
+        ("https://account.proton.me/u/0/mail/filters", "https://account.proton.me/u/0/mail/filters"),
+        ("https://account.proton.me/login#selector=abc&sk=SECRET", "https://account.proton.me/login"),
+        ("https://mail.proton.me/u/1/inbox?token=SECRET#x", "https://mail.proton.me/u/1/inbox"),
+        ("https://account.proton.me/authorize;p=1?state=SECRET", "https://account.proton.me/authorize"),
+        ("about:blank", "about:blank"),
+        ("", ""),
+    ])
+    def test_strips_query_and_fragment(self, url, expected):
+        assert loggable_url(url) == expected
+
+    def test_text_scrubs_every_url(self):
+        text = (
+            'Timeout 30000ms exceeded.\n  navigated to "https://account.proton.me/fork#sk=SECRET"\n'
+            "  then https://mail.proton.me/u/0/inbox?k=SECRET2 done"
+        )
+        scrubbed = loggable_text(text)
+        assert "SECRET" not in scrubbed
+        assert '"https://account.proton.me/fork"' in scrubbed
+        assert "https://mail.proton.me/u/0/inbox done" in scrubbed
+        assert scrubbed.startswith("Timeout 30000ms exceeded.")
 
 
 class TestStorageStatePath:

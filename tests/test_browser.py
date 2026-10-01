@@ -318,3 +318,29 @@ class TestExpiredSession:
         browser = make_browser("https://account.proton.me/login?product=mail")
         # A 60s budget would hang the test if the redirect were not noticed.
         assert await browser._wait_for_mail_app_or_login(60000) is False
+
+
+class TestLoggedUrls:
+    """Page URLs in logs and errors never include the query or fragment."""
+
+    @pytest.mark.asyncio
+    async def test_stalled_session_reuse_logs_url_without_fragment(self, caplog, monkeypatch):
+        monkeypatch.setattr("src.scraper.browser.SESSION_CHECK_MS", 1)
+        browser = make_browser()
+        browser.session_loaded = True
+
+        async def goto(target, **kwargs):
+            browser.page.url = "https://account.proton.me/fork?x=1#selector=s&sk=SECRET"
+
+        browser.page.goto = goto
+        assert await browser._reuse_saved_session() is False
+        assert "SECRET" not in caplog.text
+        assert "https://account.proton.me/fork" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_missing_heading_error_has_no_fragment(self):
+        browser = make_browser("https://account.proton.me/u/0/mail/filters#sk=SECRET")
+        with pytest.raises(RuntimeError) as excinfo:
+            await browser._assert_filter_page_structure()
+        assert "SECRET" not in str(excinfo.value)
+        assert "https://account.proton.me/u/0/mail/filters" in str(excinfo.value)

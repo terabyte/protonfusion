@@ -13,7 +13,7 @@ from src.scraper import selectors
 from src.utils.config import (
     Credentials,
     PROTONMAIL_LOGIN_URL, MAIL_HOST, ACCOUNT_HOST, INBOX_PATH, FILTERS_PATH,
-    DEFAULT_ACCOUNT_SLOT, proton_url, slot_from_url, resolve_storage_state_path,
+    DEFAULT_ACCOUNT_SLOT, proton_url, slot_from_url, loggable_url, loggable_text, resolve_storage_state_path,
     LOGIN_TIMEOUT_MS, PAGE_LOAD_TIMEOUT_MS, ELEMENT_TIMEOUT_MS,
 )
 from src.utils.private_files import write_private_file
@@ -225,7 +225,7 @@ class ProtonMailBrowser:
                 f"Timed out after {timeout_ms // 1000}s waiting for the Proton Mail inbox to load. "
                 "Run 'login' again (raise --timeout if you need longer)."
             )
-        logger.info("Signed in (mail app at %s)", page.url)
+        logger.info("Signed in (mail app at %s)", loggable_url(page.url))
         await self._after_login()
 
     async def _prefill_credentials(self):
@@ -255,7 +255,7 @@ class ProtonMailBrowser:
             try:
                 await self.page.wait_for_selector(selectors.COMPOSE_BUTTON, timeout=POST_LOGIN_SETTLE_MS)
             except Exception:
-                logger.debug("Mail app did not finish loading after login (%s)", self.page.url)
+                logger.debug("Mail app did not finish loading after login (%s)", loggable_url(self.page.url))
         await self.dismiss_onboarding_modals()
         if not self.account_email:
             await self._capture_account_email()
@@ -298,7 +298,7 @@ class ProtonMailBrowser:
         page = self.page
         await page.goto(self.mail_url(INBOX_PATH), wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
         if not await self._wait_for_mail_app_or_login(SESSION_CHECK_MS):
-            logger.warning("Saved session did not reach the mail app (ended at %s)", page.url)
+            logger.warning("Saved session did not reach the mail app (ended at %s)", loggable_url(page.url))
             return False
         logger.info("Reused saved session")
         # Proton may rotate tokens during the run; write them back on close so
@@ -344,12 +344,12 @@ class ProtonMailBrowser:
                 lambda url: "/mail/" in url or "/apps" in url,
                 timeout=LOGIN_TIMEOUT_MS,
             )
-            logger.info("Login successful (redirected to: %s)", page.url)
+            logger.info("Login successful (redirected to: %s)", loggable_url(page.url))
             return True
 
         except Exception as e:
             raise RuntimeError(
-                f"Automated login failed: {e}. Check the credentials file. If Proton is "
+                f"Automated login failed: {loggable_text(str(e))}. Check the credentials file. If Proton is "
                 "showing Human Verification (CAPTCHA), run 'python -m src.main login' to "
                 "sign in by hand and save a session."
             )
@@ -365,7 +365,7 @@ class ProtonMailBrowser:
                 lambda url: "/mail/" in url or "/apps" in url,
                 timeout=LOGIN_TIMEOUT_MS,
             )
-            logger.info("Manual login detected (redirected to: %s)", page.url)
+            logger.info("Manual login detected (redirected to: %s)", loggable_url(page.url))
             return True
         except Exception:
             raise RuntimeError("Login timed out. Please try again.")
@@ -380,11 +380,11 @@ class ProtonMailBrowser:
         try:
             await self._open_filters_directly()
         except Exception as e:
-            logger.warning("Direct navigation to filters failed (%s); trying the settings menu", e)
+            logger.warning("Direct navigation to filters failed (%s); trying the settings menu", loggable_text(str(e)))
             await self._navigate_to_filters_via_menu()
             await self._wait_for_filters_page()
             await self._assert_filter_page_structure()
-        logger.info("Navigated to filter settings at %s", self.page.url)
+        logger.info("Navigated to filter settings at %s", loggable_url(self.page.url))
 
     async def _open_filters_directly(self):
         """Load the filters page by URL; raises if it does not render as expected."""
@@ -457,7 +457,7 @@ class ProtonMailBrowser:
         # Page heading
         h1 = await page.query_selector(selectors.PAGE_HEADING)
         if not h1:
-            raise RuntimeError("Filter page missing <h1> heading. URL: " + page.url)
+            raise RuntimeError("Filter page missing <h1> heading. URL: " + loggable_url(page.url))
         h1_text = (await h1.inner_text()).strip()
         if h1_text != "Filters":
             raise RuntimeError(
