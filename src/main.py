@@ -697,12 +697,16 @@ def consolidate(
     write_private_file(out_path, sieve_script)
     console.print(f"[green]Sieve script saved to: {out_path}")
 
-    # Collect all processed filters and write manifest into snapshot dir
-    all_source_names = set()
-    for cf in consolidated:
-        all_source_names.update(cf.source_filters)
-    all_processed = backup_filters + archived_filters
-    processed_filters = [f for f in all_processed if f.name in all_source_names]
+    # The filters that went into the script, by content_hash. Not by name:
+    # a disabled filter sharing a name with an included one would otherwise
+    # be recorded as synced and archived as active, and its rule would come
+    # back live in the next script.
+    processed_filters = []
+    in_script_hashes = set()
+    for f in report.selected:
+        if f.content_hash not in in_script_hashes:
+            in_script_hashes.add(f.content_hash)
+            processed_filters.append(f)
     without_evidence = _without_evidence(processed_filters)
     if without_evidence:
         console.print(
@@ -725,9 +729,12 @@ def consolidate(
     console.print(f"[cyan]Manifest written to snapshot ({len(processed_filters)} filters)")
 
     # Post-consolidation archiving: move included backup filters to archive
+    # (once per hash: identical duplicates in the backup are one rule)
     now_ts = datetime.now(timezone.utc).isoformat()
+    archived_hashes = {e.filter.content_hash for e in archive_entries}
     for f in bkup.filters:
-        if f.name in all_source_names and f.content_hash not in archive_by_hash:
+        if f.content_hash in in_script_hashes and f.content_hash not in archived_hashes:
+            archived_hashes.add(f.content_hash)
             archived_f = f.model_copy(deep=True)
             archived_f.status = FilterStatus.ARCHIVED
             archived_f.enabled = False

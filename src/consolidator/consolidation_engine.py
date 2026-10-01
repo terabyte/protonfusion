@@ -30,6 +30,10 @@ class ConsolidationReport:
     sieve_skipped: int = 0  # Sieve filters, never consolidated
     groups: Dict[str, int] = field(default_factory=dict)  # action -> count of merged filters
     reduction_percent: float = 0.0
+    # Every filter that went into the consolidated rules. Callers track
+    # these by content_hash: names need not be unique, so a disabled filter
+    # sharing a name with a selected one must not be taken for it.
+    selected: List[ProtonMailFilter] = field(default_factory=list)
     # Filters that would have been selected but were not fully read
     # (not is_complete). Left out unless allow_incomplete; listed either way.
     incomplete_excluded: List[ProtonMailFilter] = field(default_factory=list)
@@ -151,6 +155,7 @@ class ConsolidationEngine:
             allow_incomplete=allow_incomplete,
         )
         selected = selection.selected
+        report.selected = list(selected)
         report.enabled_count = len(selected)
         report.disabled_skipped = selection.disabled_skipped
         report.disabled_included = selection.disabled_included

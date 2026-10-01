@@ -149,3 +149,46 @@ def test_engine_excludes_incomplete_by_default():
     consolidated, report = ConsolidationEngine().consolidate([bad, good], allow_incomplete=True)
     assert sorted(n for cf in consolidated for n in cf.source_filters) == ["Bad", "Good"]
     assert report.incomplete_included == [bad]
+
+
+class TestTrackedByContentHash:
+    """P9: the script, archive and manifest follow content_hash, never the name."""
+
+    @pytest.fixture
+    def same_name_snapshot(self, snapshots_dir):
+        """An enabled "News" that labels, and a disabled "News" that deletes."""
+        enabled = _filter("News", [SENDER_A], [LABEL_WORK])
+        disabled = _filter("News", [SENDER_B], [DELETE], enabled=False)
+        BackupManager(snapshots_dir).create_backup([enabled, disabled])
+        result = runner.invoke(app, ["consolidate"])
+        assert result.exit_code == 0, result.output
+        return enabled, disabled
+
+    def test_disabled_namesake_not_in_script(self, snapshots_dir, same_name_snapshot):
+        script = _script(snapshots_dir)
+        assert "a@x.com" in script
+        assert "b@x.com" not in script and "discard" not in script
+
+    def test_disabled_namesake_not_archived(self, snapshots_dir, same_name_snapshot):
+        enabled, disabled = same_name_snapshot
+        archive = BackupManager(snapshots_dir).load_archive(snapshots_dir / "latest")
+        assert [e.filter.content_hash for e in archive] == [enabled.content_hash]
+
+    def test_disabled_namesake_not_in_manifest(self, snapshots_dir, same_name_snapshot):
+        enabled, disabled = same_name_snapshot
+        assert _manifest(snapshots_dir)["filter_hashes"] == [enabled.content_hash]
+
+    def test_disabled_rule_stays_out_on_next_consolidate(self, snapshots_dir, same_name_snapshot):
+        """The panel's repro: the disabled discard rule came back live next time."""
+        manager = BackupManager(snapshots_dir)
+        manager.promote_manifest(snapshots_dir / "latest")  # as a successful sync would
+        result = runner.invoke(app, ["consolidate"])
+        assert result.exit_code == 0, result.output
+        assert "discard" not in _script(snapshots_dir)
+
+    def test_identical_duplicates_archived_once(self, snapshots_dir):
+        twin = _filter("Twin", [SENDER_A], [LABEL_WORK])
+        BackupManager(snapshots_dir).create_backup([twin, twin.model_copy()])
+        runner.invoke(app, ["consolidate"])
+        archive = BackupManager(snapshots_dir).load_archive(snapshots_dir / "latest")
+        assert len(archive) == 1
