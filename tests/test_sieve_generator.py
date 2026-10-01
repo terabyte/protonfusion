@@ -11,6 +11,12 @@ from src.models.filter_models import (
 )
 
 
+# A minimal condition for tests that only exercise actions or comments: the
+# generator refuses a rule without one.
+_ANY_SENDER = [ConditionGroup(conditions=[
+    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="x@example.com")])]
+
+
 class TestSieveGenerator:
     """Test SieveGenerator class."""
 
@@ -28,7 +34,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
-            condition_groups=[],
+            condition_groups=_ANY_SENDER,
             actions=[FilterAction(type=ActionType.DELETE)]
         )
 
@@ -43,7 +49,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
-            condition_groups=[],
+            condition_groups=_ANY_SENDER,
             actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "Test"})]
         )
 
@@ -94,7 +100,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Mark Read",
-            condition_groups=[],
+            condition_groups=_ANY_SENDER,
             actions=[FilterAction(type=ActionType.MARK_READ)]
         )
 
@@ -108,7 +114,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Star",
-            condition_groups=[],
+            condition_groups=_ANY_SENDER,
             actions=[FilterAction(type=ActionType.STAR)]
         )
 
@@ -122,7 +128,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Archive",
-            condition_groups=[],
+            condition_groups=_ANY_SENDER,
             actions=[FilterAction(type=ActionType.ARCHIVE)]
         )
 
@@ -136,7 +142,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Label",
-            condition_groups=[],
+            condition_groups=_ANY_SENDER,
             actions=[FilterAction(type=ActionType.LABEL, parameters={"label": "Important"})]
         )
 
@@ -304,7 +310,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
-            condition_groups=[],
+            condition_groups=_ANY_SENDER,
             actions=[
                 FilterAction(type=ActionType.LABEL, parameters={"label": "Important"}),
                 FilterAction(type=ActionType.MARK_READ),
@@ -323,7 +329,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Consolidated",
-            condition_groups=[],
+            condition_groups=_ANY_SENDER,
             actions=[FilterAction(type=ActionType.DELETE)],
             source_filters=["Filter 1", "Filter 2", "Filter 3"],
             filter_count=3
@@ -339,7 +345,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Consolidated",
-            condition_groups=[],
+            condition_groups=_ANY_SENDER,
             actions=[FilterAction(type=ActionType.DELETE)],
             source_filters=[f"Filter {i}" for i in range(10)],
             filter_count=10
@@ -386,19 +392,38 @@ class TestSieveGenerator:
         assert "Archive News" in script or "Archive" in script
         assert script.count("if ") == 2
 
-    def test_generate_no_conditions(self):
-        """Test generating filter with no conditions."""
-        gen = SieveGenerator()
+    def test_generate_no_conditions_refused(self):
+        """A rule with no conditions would act on every message: refuse it."""
         cf = ConsolidatedFilter(
             name="Unconditional",
             condition_groups=[],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
+        with pytest.raises(SieveGenerationError, match="no conditions"):
+            SieveGenerator().generate([cf])
 
-        script = gen.generate([cf])
+    def test_generate_empty_group_refused(self):
+        """An empty group is an always-true branch of the OR: refuse it too."""
+        cf = ConsolidatedFilter(
+            name="Consolidated",
+            condition_groups=_ANY_SENDER + [ConditionGroup(conditions=[])],
+            actions=[FilterAction(type=ActionType.TRASH)],
+            source_filters=["has sender", "lost its condition"],
+            filter_count=2,
+        )
+        with pytest.raises(SieveGenerationError, match="lost its condition"):
+            SieveGenerator().generate([cf])
 
-        # Should have action without if statement
-        assert 'fileinto "trash";' in script
+    def test_no_top_level_actions_ever(self):
+        """Every generated action sits inside an if block."""
+        cf = ConsolidatedFilter(
+            name="r", condition_groups=_ANY_SENDER,
+            actions=[FilterAction(type=ActionType.TRASH), FilterAction(type=ActionType.MARK_READ)],
+        )
+        script = SieveGenerator().generate([cf])
+        body = [l for l in script.splitlines() if l and not l.startswith(("#", "require"))]
+        assert body[0].startswith("if ")
+        assert all(l.startswith(("if ", "    ", "}")) for l in body)
 
     def test_collect_extensions_fileinto(self):
         """Test that fileinto extension is collected."""
@@ -1016,7 +1041,7 @@ class TestSectionMarkersInFilterText:
     def test_marker_in_folder_is_rejected(self):
         cf = ConsolidatedFilter(
             name="Folder",
-            condition_groups=[],
+            condition_groups=_ANY_SENDER,
             actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": SECTION_END})],
         )
         with pytest.raises(SieveGenerationError):

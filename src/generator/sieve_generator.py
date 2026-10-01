@@ -86,6 +86,7 @@ class SieveGenerator:
 
         for f in filters:
             self._check_no_section_markers(f)
+            self._check_has_conditions(f)
 
         # Collect required extensions
         extensions = self._collect_extensions(filters)
@@ -123,15 +124,11 @@ class SieveGenerator:
             condition_str = self._generate_conditions(f)
             action_lines = self._generate_actions(f)
 
-            if condition_str:
-                lines.append(f"if {condition_str} {{")
-                for action_line in action_lines:
-                    lines.append(f"    {action_line}")
-                lines.append("}")
-            else:
-                # No conditions = unconditional rule (rare)
-                for action_line in action_lines:
-                    lines.append(action_line)
+            # _check_has_conditions guarantees a test, so every rule is an if
+            lines.append(f"if {condition_str} {{")
+            for action_line in action_lines:
+                lines.append(f"    {action_line}")
+            lines.append("}")
 
             first = False
 
@@ -170,6 +167,28 @@ class SieveGenerator:
                     )
 
     @staticmethod
+    def _check_has_conditions(f: ConsolidatedFilter) -> None:
+        """Refuse a rule that would run its actions on every message.
+
+        A rule with no condition groups, or with a group that has no
+        conditions (an original filter with none, which as one branch of an
+        OR matches everything), would become top-level actions or an always
+        true test. With a Trash or folder action that moves all incoming
+        mail. A filter normally has conditions, so this means one was lost
+        upstream (for example, dropped as unreadable); refuse rather than
+        widen the rule to all mail.
+        """
+        if f.condition_groups and all(group.conditions for group in f.condition_groups):
+            return
+        origin = f.name if f.source_filters in ([], [f.name]) else (
+            f"{f.name} (from {', '.join(f.source_filters)})")
+        raise SieveGenerationError(
+            f"Filter {origin!r} has no conditions, so its actions would apply to "
+            "every message. Refusing to generate it. Check the filter in ProtonMail "
+            "and back up again, or exclude it."
+        )
+
+    @staticmethod
     def _comment_text(text: str) -> str:
         """Flatten line breaks so a filter name cannot escape its # comment line."""
         return " ".join(text.splitlines())
@@ -187,46 +206,21 @@ class SieveGenerator:
         return extensions
 
     def _generate_conditions(self, f: ConsolidatedFilter) -> str:
-        """Generate the Sieve condition expression from condition groups."""
-        if not f.condition_groups:
-            return ""
+        """Generate the Sieve condition expression from condition groups.
 
-        # Filter out empty groups
-        non_empty = [g for g in f.condition_groups if g.conditions]
-        if not non_empty:
-            return ""
-
-        if len(non_empty) == 1:
-            return self._generate_group(non_empty[0])
-
-        # Multiple groups - OR them together (any group matching triggers action)
-        parts = []
-        for group in non_empty:
-            part = self._generate_group(group)
-            if part:
-                parts.append(part)
-
-        if not parts:
-            return ""
+        Every group has at least one condition (see _check_has_conditions).
+        """
+        parts = [self._generate_group(group) for group in f.condition_groups]
         if len(parts) == 1:
             return parts[0]
 
+        # Multiple groups - OR them together (any group matching triggers action)
         inner = ",\n    ".join(parts)
         return f"anyof (\n    {inner}\n)"
 
     def _generate_group(self, group: ConditionGroup) -> str:
-        """Generate conditions for a single ConditionGroup."""
-        if not group.conditions:
-            return ""
-
-        parts = []
-        for cond in group.conditions:
-            sieve_cond = self._condition_to_sieve(cond)
-            if sieve_cond:
-                parts.append(sieve_cond)
-
-        if not parts:
-            return ""
+        """Generate conditions for a single, non-empty ConditionGroup."""
+        parts = [self._condition_to_sieve(cond) for cond in group.conditions]
         if len(parts) == 1:
             return parts[0]
 

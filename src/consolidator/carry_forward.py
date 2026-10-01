@@ -27,7 +27,7 @@ from collections import defaultdict
 from typing import AbstractSet, Dict, Iterable, List, Optional, Set, Tuple
 
 from src.generator.sieve_generator import (
-    SieveGenerator, escape_match_literal, unescape_match_literal,
+    SieveGenerationError, SieveGenerator, escape_match_literal, unescape_match_literal,
 )
 from src.generator.sieve_generator import TRASH_FOLDER
 from src.generator.sieve_rules import (
@@ -157,7 +157,13 @@ def _describe_actions(action_texts: Iterable[str]) -> str:
 
 
 def filter_facts(f: ProtonMailFilter) -> Set[Fact]:
-    """The Sieve facts one filter contributes when generated on its own."""
+    """The Sieve facts one filter contributes when generated on its own.
+
+    A filter the generator refuses (no conditions, for example) contributes
+    a single placeholder fact that no Sieve script can contain. So it is
+    never "covered" by a live section (cleanup keeps it) and suppresses no
+    real rule.
+    """
     cf = ConsolidatedFilter(
         name=f.name,
         condition_groups=[ConditionGroup(logic=f.logic, conditions=f.conditions)],
@@ -165,7 +171,10 @@ def filter_facts(f: ProtonMailFilter) -> Set[Fact]:
         source_filters=[f.name],
         filter_count=1,
     )
-    return script_facts(SieveGenerator().generate([cf]))
+    try:
+        return script_facts(SieveGenerator().generate([cf]))
+    except SieveGenerationError as e:
+        return {Fact(frozenset({("ungeneratable", f"cannot generate: {e}")}), frozenset())}
 
 
 def label_targets(filters: Iterable[ProtonMailFilter]) -> Set[str]:

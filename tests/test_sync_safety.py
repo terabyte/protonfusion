@@ -401,8 +401,9 @@ class TestSieveFiltersLeftAlone:
     def test_cleanup_keeps_disabled_protonfusion_filter(self, cli_snapshots_dir, fake_sync, fake_scraper):
         covered = _filter("in-sieve@x.com", enabled=False)
         # The `keep;` an earlier run emitted for a Sieve filter it consolidated
-        earlier_sieve = ProtonMailFilter(name="Earlier Sieve filter")
-        fake_sync.live_script = _section_for([covered, earlier_sieve])
+        # (the generator now refuses a rule with no conditions, so add it by hand)
+        from src.generator.sieve_generator import SECTION_END
+        fake_sync.live_script = _section_for([covered]).replace(SECTION_END, f"keep;\n{SECTION_END}")
         pf = self._protonfusion_filter(fake_sync.live_script)
         fake_scraper.filters = [covered, pf]
         BackupManager(cli_snapshots_dir).create_backup([covered, pf], sieve_script=fake_sync.live_script)

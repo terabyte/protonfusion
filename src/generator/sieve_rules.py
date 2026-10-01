@@ -324,7 +324,7 @@ def describe_atom(atom: Atom) -> str:
     """Render one atom the way it would read in Sieve."""
     if atom[0] == "true":
         return "true"
-    if atom[0] in ("opaque", "rule"):
+    if atom[0] in ("opaque", "rule", "ungeneratable"):
         return atom[1]
     name, match, addrpart, comparator, headers, value = atom
     header_text = ",".join(headers)

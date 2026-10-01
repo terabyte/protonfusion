@@ -102,6 +102,8 @@ if anyof (
 
 When multiple filters are consolidated, their condition groups are OR'd together using `anyof`.
 
+Every generated rule is an `if` block. A filter with no conditions (or one whose conditions were all dropped as unreadable) would apply its actions to every incoming message, so the generator refuses it with an error naming the filter instead of writing top-level actions or an always-true test.
+
 ## Action Mapping
 
 | ProtonMail UI | Sieve Action |

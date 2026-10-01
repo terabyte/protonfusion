@@ -7,7 +7,7 @@ from typer.testing import CliRunner
 
 from src.main import app
 from src.backup.backup_manager import BackupManager
-from src.consolidator.carry_forward import CARRIED_PREFIX, facts_to_filters, label_targets
+from src.consolidator.carry_forward import CARRIED_PREFIX, facts_to_filters, filter_facts, label_targets
 from src.consolidator.consolidation_engine import ConsolidationEngine
 from src.generator.sieve_generator import SECTION_BEGIN, SECTION_END, SieveGenerator
 from src.generator.sieve_rules import compare_sections, script_facts
@@ -299,3 +299,17 @@ class TestLegacyTrashCarryForward:
         filters, unconvertible = facts_to_filters(facts)
         assert filters == []
         assert set(unconvertible) == facts
+
+
+class TestFilterFactsOfUngeneratableFilter:
+    """filter_facts must not raise for a filter the generator refuses."""
+
+    def test_conditionless_filter_is_never_covered(self):
+        empty = ProtonMailFilter(name="lost its condition", actions=[FilterAction(type=ActionType.TRASH)])
+        facts = filter_facts(empty)
+        (fact,) = facts
+        assert "no conditions" in fact.describe()
+        live = script_facts(SieveGenerator.merge_with_existing(
+            SieveGenerator().generate(ConsolidationEngine().consolidate(
+                [_filter("a@x.com")], include_disabled=True)[0]), ""))
+        assert not facts <= live
