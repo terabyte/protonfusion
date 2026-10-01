@@ -436,3 +436,25 @@ def test_candidate_with_extra_facts_is_unconvertible(monkeypatch):
     filters, unconvertible = facts_to_filters(facts)
     assert filters == []
     assert set(unconvertible) == facts
+
+
+def test_carried_key_containing_pipe_survives_archive_round_trip(tmp_path):
+    """V4: a live rule whose single key contains "|" is carried forward as one
+    literal and stays one after archive.json is written and read back, so the
+    regenerated rule is not widened into an OR of "invoice" and "receipt"."""
+    from src.backup.backup_manager import BackupManager
+    from src.consolidator.consolidation_engine import ConsolidationEngine
+    from src.generator.sieve_generator import SieveGenerator
+    from src.generator.sieve_rules import script_facts
+    from src.models.backup_models import ArchiveEntry, BACKUP_FORMAT_VERSION
+    live = ('# === BEGIN ProtonFusion ===\n'
+            'if header :contains "Subject" "invoice|receipt" {\n    fileinto "Bills";\n}\n'
+            '# === END ProtonFusion ===\n')
+    carried, unconvertible = facts_to_filters(script_facts(live), label="snap")
+    assert unconvertible == []
+    manager = BackupManager(tmp_path)
+    manager.write_archive(tmp_path, [ArchiveEntry(filter=f, source_format=BACKUP_FORMAT_VERSION) for f in carried])
+    back = [e.filter for e in manager.load_archive(tmp_path)]
+    assert [c.keys for c in back[0].conditions] == [["invoice|receipt"]]
+    consolidated, _ = ConsolidationEngine().consolidate([], archived_filters=back)
+    assert script_facts(SieveGenerator().generate(consolidated)) == script_facts(live)

@@ -267,10 +267,15 @@ def split_legacy_carried_values(data: dict) -> dict:
     """Turn an older carried-forward filter's "a|b|c" value into a values list.
 
     Before conditions had a values list, carry-forward stored several keys
-    as one "|"-joined value and the generator split it again. Only a
-    carried filter's value is read this way: carry-forward never produced a
-    key containing "|", so there the "|" is always the join. Any other
-    value is a literal.
+    as one "|"-joined value, and that version's generator split every
+    value on "|" again. So in a filter it stored, "|" always acted as the
+    join, and reading it as a list reproduces the rule it generated.
+
+    Only for archive entries written before carry-forward built values
+    lists, i.e. without a source_format (see ArchiveEntry): carry-forward
+    now can store a single key containing "|", which must stay one
+    literal. Never applied to scraped data. Any non-carried value is a
+    literal.
     """
     if not str(data.get("name", "")).startswith(CARRIED_PREFIX):
         return data
@@ -327,7 +332,7 @@ class ProtonMailFilter(BaseModel):
         """
         if not isinstance(data, dict):
             return data
-        data = split_legacy_carried_values(dict(data))
+        data = dict(data)
         issues = []
         for key, kind, enum_fields in (
             ("conditions", "condition", _CONDITION_ENUM_FIELDS),
