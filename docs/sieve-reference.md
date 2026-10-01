@@ -150,6 +150,30 @@ if true {
 }
 ```
 
+## Rule Preservation
+
+After `cleanup` deletes the original UI filters, the live ProtonFusion section is the only copy of their rules. A new section generated from whatever UI filters remain would silently delete the rest, so `sync` compares the two before it changes anything and **refuses** (exit code 1, no filters disabled, nothing uploaded) if the new section drops any rule the live one has. `--allow-rule-removal` overrides the refusal when a removal is intended. `sync --dry-run` (against the script captured in the backup) and `sync --show-diff-only` (against the live script) print the same check and also exit 1 when a real sync would refuse.
+
+`sync` also refuses when the live script reads back empty although the backup shows it had a ProtonFusion section, because an empty read cannot be told apart from a failed one.
+
+### How the comparison works
+
+The comparison is structural (`src/generator/sieve_rules.py`), not a text diff. Each rule is reduced to *condition/action pairs*:
+
+- The test is expanded into OR-of-ANDs form. `anyof` contributes each branch, `allof` takes the cross product, and a key list is one pair per key, because `address :is "From" ["a", "b"]` matches if either key matches.
+- The actions in the rule's block form an unordered set.
+
+So `if address :is "From" ["a", "b"] { discard; }` contributes two pairs: *From is a -> discard* and *From is b -> discard*. The new section drops a pair when that exact pair appears nowhere in it. Regrouping, reordering, or merging senders into bigger arrays is not a drop. Removing a sender, or changing what happens to its mail (a different folder, an added or removed flag), is.
+
+Only the marked section is compared. User rules outside the markers are kept by the merge (see [Section Markers](#section-markers)) and are not checked.
+
+### Limits
+
+- **Order and `stop` between rules are not compared.** Two sections with the same pairs in a different order can behave differently if one rule stops processing before another runs.
+- **Constructs ProtonFusion does not generate are compared by text.** `not`, `size`, `exists`, relational matches, `elsif`/`else` chains and nested `if` blocks become opaque entries that only count as kept if the new section contains the identical construct. This fails closed: hand edits inside the section cause a refusal rather than a silent loss.
+- **Case.** Test values are compared case-insensitively, as the default `i;ascii-casemap` comparator matches them, and are listed lowercased. Action arguments such as folder names are compared exactly.
+- **A section that does not parse** at all causes a refusal.
+
 ## Rule Ordering
 
 ProtonFusion orders rules by action priority:

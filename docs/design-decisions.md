@@ -15,6 +15,7 @@ Every design choice prioritizes reversibility:
 - **Disable, don't delete.** When syncing, old UI filters are disabled rather than deleted. This means you can always re-enable them manually or via the `restore` command.
 - **Snapshot-based operations.** Every action references a snapshot. You never modify filter data in place -- you create a new snapshot directory.
 - **Section markers in Sieve.** Generated Sieve rules are wrapped in `# === BEGIN/END ProtonFusion ===` markers. User-authored Sieve rules outside these markers are preserved during merge. This allows ProtonFusion to coexist with hand-written Sieve rules.
+- **Refuse rather than drop.** `sync` compares the live ProtonFusion section with the new one and refuses, before disabling or uploading anything, if any rule would disappear. See [Refusing to Drop Live Rules](#refusing-to-drop-live-rules).
 - **Dry-run mode.** The `sync` and `cleanup` commands support `--dry-run` to preview changes before committing.
 - **Checksums.** Every backup includes a SHA-256 checksum so corruption can be detected.
 
@@ -61,6 +62,14 @@ On every `backup`, `archive.json` is copied from the previous snapshot (via the 
 ### Post-Consolidation Auto-Archiving
 
 When `consolidate` runs, backup filters that were included in Sieve generation are automatically moved to `archive.json` as `archived`. This prepares the archive for the next cycle — after `sync` and `cleanup` remove UI filters, the next backup won't find them, but the archive still has them.
+
+### Refusing to Drop Live Rules
+
+The archive only protects rules that went through it. Rules consolidated before the archive system existed, or whose `archive.json` was lost, live only in the ProtonFusion section of the live Sieve script once `cleanup` has deleted their UI filters. The next backup -> consolidate -> sync would regenerate the section from the few surviving UI filters and delete them. For example, a section built from a couple of hundred filters, rebuilt from the handful of UI filters created since the last cleanup.
+
+So `sync` treats the live section as data, not as output to overwrite. It parses both sections into condition/action pairs and refuses if any live pair is missing from the new one (details and limits in [sieve-reference.md](sieve-reference.md#rule-preservation)). The comparison is structural rather than a text diff because consolidation legitimately regroups, reorders and re-merges rules on every run; a text diff would cry wolf on every sync and get overridden by reflex. Anything the parser does not model is compared verbatim, so unfamiliar constructs cause a refusal rather than a silent pass. The check runs before `disable_all_ui_filters`, so a refusal leaves the account untouched.
+
+`--allow-rule-removal` overrides the refusal. Removing a rule therefore takes an explicit act: deprecate it (`snapshot set-status ... deprecated`) or exclude it, then sync with the override.
 
 ### Backward Compatibility
 

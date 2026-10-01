@@ -41,7 +41,8 @@ src/
 │       ├── merge_conditions.py    # Combine compatible single-condition groups
 │       └── optimize_ordering.py   # Sort rules by action priority
 ├── generator/
-│   └── sieve_generator.py    # Generate RFC 5228 Sieve scripts
+│   ├── sieve_generator.py    # Generate RFC 5228 Sieve scripts
+│   └── sieve_rules.py        # Parse/compare the ProtonFusion section structurally
 └── utils/
     └── config.py              # Paths, URLs, timeouts, credential loading
 ```
@@ -182,7 +183,8 @@ The generator converts `ConsolidatedFilter` objects into RFC 5228 Sieve scripts.
 - **Extension collection**: Scans all filters for required Sieve extensions (fileinto, imap4flags, regex) and generates the appropriate `require` statement.
 - **Pipe-delimited arrays**: Values like `"alice|bob"` expand to Sieve arrays `["alice", "bob"]`.
 - **Section markers**: Generated rules are wrapped in `# === BEGIN ProtonFusion ===` / `# === END ProtonFusion ===` markers.
-- **Merging**: When uploading to an account that already has a Sieve script, content outside the markers is preserved. Require statements are deduplicated.
+- **Merging**: When uploading to an account that already has a Sieve script, content outside the markers is preserved in place (above the section stays above, below stays below). Require statements are deduplicated.
+- **Rule preservation**: `sieve_rules.py` parses a section into condition/action pairs. `sync` refuses if the new section drops a pair present in the live one. See [sieve-reference.md](sieve-reference.md#rule-preservation).
 
 ### Sieve Mapping
 

@@ -147,7 +147,7 @@ A GitHub Actions workflow runs unit + integration tests on every push and pull r
 | `analyze` | View filter statistics and consolidation opportunities |
 | `consolidate` | Generate optimized Sieve script from a backup |
 | `diff` | Compare two backups or a backup vs current state |
-| `sync` | Upload Sieve script and disable old UI filters |
+| `sync` | Upload Sieve script and disable old UI filters; refuses if the new script drops live rules (`--allow-rule-removal` to override) |
 | `sync --show-diff-only` | Preview Sieve changes against the live script (no upload) |
 | `restore` | Restore filters to a previous backup state |
 | `cleanup` | Delete disabled filters (with confirmation) |
@@ -220,6 +220,7 @@ ProtonFusion is designed to be non-destructive:
 
 - **Backup first**: Every operation starts from a backup. Your original filter state is always preserved.
 - **Disable, don't delete**: When syncing, old UI filters are disabled (not deleted). You can re-enable them anytime.
+- **Refuse rather than drop**: `sync` refuses to upload a ProtonFusion section that would lose any rule in the live one.
 - **Dry-run mode**: Preview what `sync` and `cleanup` will do before committing.
 - **Checksums**: Backups include SHA256 checksums to detect corruption.
 - **Restore**: One command to roll back to any previous backup.

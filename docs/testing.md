@@ -28,6 +28,8 @@ python -m pytest tests/test_sieve_generator.py::test_generate_basic_rule -v
 | `test_backup.py` | Backup creation, loading, listing, checksum verification, manifests, archive I/O, carry-forward |
 | `test_consolidator.py` | All three consolidation strategies, the engine pipeline, and status-based filter selection |
 | `test_sieve_generator.py` | Sieve script generation, extension collection, merging with existing scripts |
+| `test_sieve_rules.py` | Structural Sieve section parsing and live-vs-new rule comparison |
+| `test_sync_safety.py` | `sync` refusal and dry-run/show-diff surfacing (ProtonMail client faked) |
 | `test_diff.py` | Filter comparison (added, removed, modified, state_changed, unchanged), status-aware diffing |
 | `test_snapshot.py` | Snapshot CLI commands: view, set-status, remove (using Typer CliRunner) |
 | `test_config.py` | Configuration loading, credential parsing |

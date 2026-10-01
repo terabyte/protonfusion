@@ -14,6 +14,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from rich import print as rprint
+from rich.markup import escape
 
 from src.utils.config import (
     load_credentials, SNAPSHOTS_DIR, TOOL_VERSION,
@@ -25,6 +26,7 @@ from src.backup.diff_engine import DiffEngine
 from src.parser.filter_parser import parse_scraped_filters
 from src.consolidator.consolidation_engine import ConsolidationEngine
 from src.generator.sieve_generator import SieveGenerator, SECTION_BEGIN
+from src.generator.sieve_rules import SieveParseError, compare_sections
 
 SIEVE_FILTER_NAME = "ProtonFusion Consolidated"
 
@@ -571,6 +573,86 @@ def _display_diff(diff_result, diff_engine: DiffEngine, title: str):
             console.print(f"  [blue]  {old.name} -> {state}")
 
 
+def _rule_preservation_check(
+    live_script: str,
+    new_script: str,
+    allow_rule_removal: bool,
+    backup_script: str = "",
+    live_label: str = "live",
+) -> bool:
+    """Compare the live ProtonFusion section with the new one and print the result.
+
+    Returns True if it is safe to replace the live section, False if sync must
+    refuse. After `cleanup`, the live section is the only copy of rules whose UI
+    filters were deleted, so replacing it with a section rebuilt from fewer
+    filters would silently delete them. Also refuses when the live script reads
+    back empty although the backup shows it had a ProtonFusion section, since an
+    empty read is indistinguishable from a failed one.
+
+    `allow_rule_removal` turns a refusal into a warning.
+    """
+    if not live_script and backup_script and SECTION_BEGIN in backup_script:
+        console.print(Panel(
+            f"[bold red]The {live_label} Sieve script read back empty, but the backup "
+            "shows it contained a ProtonFusion section.[/]\n"
+            "Either the read failed or the script was removed. Replacing it now could "
+            "delete rules that exist nowhere else.",
+            title="Rule Preservation Check", border_style="red",
+        ))
+        if allow_rule_removal:
+            console.print("[yellow]--allow-rule-removal given: proceeding anyway.")
+            return True
+        return False
+
+    try:
+        result = compare_sections(live_script, new_script)
+    except SieveParseError as e:
+        console.print(Panel(
+            f"[bold red]Could not parse the ProtonFusion section: {escape(str(e))}[/]\n"
+            "Without a structural comparison there is no way to tell whether the new "
+            "section drops rules.",
+            title="Rule Preservation Check", border_style="red",
+        ))
+        if allow_rule_removal:
+            console.print("[yellow]--allow-rule-removal given: proceeding anyway.")
+            return True
+        return False
+
+    summary = (
+        f"{live_label.capitalize()} ProtonFusion section: {result.live_rule_count} rules "
+        f"({result.live_fact_count} condition/action pairs)\n"
+        f"New ProtonFusion section: {result.new_rule_count} rules "
+        f"({result.new_fact_count} condition/action pairs)\n"
+        f"Added: {len(result.added)}   Dropped: {len(result.dropped)}"
+    )
+    if result.is_safe:
+        console.print(Panel(
+            f"[bold green]No rules dropped.[/]\n\n{summary}",
+            title="Rule Preservation Check", border_style="green",
+        ))
+        return True
+
+    lines = [f"[bold red]The new section would drop {len(result.dropped)} "
+             f"condition/action pairs present in the {live_label} section.[/]\n", summary, ""]
+    for actions, conditions in result.dropped_by_action().items():
+        lines.append(f"[bold]{escape(actions)}[/]  ({len(conditions)} dropped)")
+        for cond in conditions:
+            lines.append(f"  [red]- {escape(cond)}[/]")
+    if result.opaque_live_rules:
+        lines.append("")
+        lines.append("[yellow]Note: some live rules use constructs ProtonFusion does not "
+                     "generate; they only count as kept if copied verbatim.[/]")
+    console.print(Panel("\n".join(lines), title="Rule Preservation Check", border_style="red"))
+
+    if allow_rule_removal:
+        console.print("[yellow]--allow-rule-removal given: these rules will be removed.")
+        return True
+    console.print(
+        "[yellow]If removing them is intended, re-run sync with --allow-rule-removal."
+    )
+    return False
+
+
 @app.command()
 def sync(
     sieve_file: str = typer.Option("", "--sieve", help="Path to Sieve script to upload (default: from snapshot)"),
@@ -579,8 +661,16 @@ def sync(
     credentials_file: str = typer.Option("", "--credentials-file", help="Credentials file"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview changes without applying"),
     show_diff_only: bool = typer.Option(False, "--show-diff-only", help="Log in, fetch live Sieve, show diff, change nothing"),
+    allow_rule_removal: bool = typer.Option(
+        False, "--allow-rule-removal",
+        help="Proceed even if the new ProtonFusion section drops rules present in the live one",
+    ),
 ):
-    """Upload Sieve script and disable old UI filters (reversible)."""
+    """Upload Sieve script and disable old UI filters (reversible).
+
+    Refuses (exit 1, nothing changed) if the new ProtonFusion section would drop
+    any rule present in the live section, unless --allow-rule-removal is given.
+    """
     from src.scraper.protonmail_sync import ProtonMailSync
 
     manager = BackupManager()
@@ -607,6 +697,14 @@ def sync(
         console.print(f"\nWould upload Sieve script ({len(sieve_script)} chars)")
         console.print(f"Would disable {bkup.metadata.enabled_count} UI filters")
 
+        console.print(
+            f"\n[cyan]Comparing against the Sieve script captured in backup '{backup_id}'. "
+            "Use --show-diff-only to compare against the live script.[/]"
+        )
+        safe = _rule_preservation_check(
+            bkup.sieve_script, sieve_script, allow_rule_removal, live_label="backed-up",
+        )
+
         # Show merge preview if backup has an existing sieve script
         if bkup.sieve_script:
             merged = SieveGenerator.merge_with_existing(sieve_script, bkup.sieve_script)
@@ -618,6 +716,9 @@ def sync(
             else:
                 preview = "\n".join(merged.split("\n")[:40])
                 console.print(Panel(preview + "\n...", title="Merged Script Preview (first 40 lines)", border_style="cyan"))
+        if not safe:
+            console.print("[bold red]A real sync would REFUSE and change nothing.")
+            raise typer.Exit(1)
         return
 
     if show_diff_only:
@@ -636,11 +737,18 @@ def sync(
                 if not existing_script:
                     existing_script = ""
 
+                safe = _rule_preservation_check(
+                    existing_script, sieve_script, allow_rule_removal,
+                    backup_script=bkup.sieve_script,
+                )
+                if not safe:
+                    console.print("[bold red]A real sync would REFUSE and change nothing.")
+
                 merged_script = SieveGenerator.merge_with_existing(sieve_script, existing_script)
 
                 if existing_script == merged_script:
                     console.print(Panel("[bold green]No changes — live script already matches."))
-                    return
+                    return safe
 
                 diff_lines = list(difflib.unified_diff(
                     existing_script.splitlines(keepends=True),
@@ -651,7 +759,7 @@ def sync(
 
                 if not diff_lines:
                     console.print(Panel("[bold green]No changes — live script already matches."))
-                    return
+                    return safe
 
                 colored = []
                 for line in diff_lines:
@@ -672,10 +780,12 @@ def sync(
                     title="Sieve Diff (live vs would-upload)",
                     border_style="cyan",
                 ))
+                return safe
             finally:
                 await sync_client.close()
 
-        asyncio.run(_show_diff())
+        if not asyncio.run(_show_diff()):
+            raise typer.Exit(1)
         return
 
     async def _run():
@@ -693,6 +803,17 @@ def sync(
 
             if existing_script:
                 console.print(f"[cyan]Found existing Sieve script ({len(existing_script)} chars)")
+
+            # Must run before anything is disabled or uploaded: a refusal
+            # leaves the account exactly as it was.
+            if not _rule_preservation_check(
+                existing_script or "", sieve_script, allow_rule_removal,
+                backup_script=bkup.sieve_script,
+            ):
+                console.print("[bold red]Sync refused. No filters were disabled and nothing was uploaded.")
+                return False
+
+            if existing_script:
                 merged_script = SieveGenerator.merge_with_existing(sieve_script, existing_script)
                 if SECTION_BEGIN not in existing_script:
                     console.print("[yellow]User rules detected — preserving outside ProtonFusion section")
@@ -718,7 +839,7 @@ def sync(
                     f"{disabled} UI filters were disabled.\n"
                     f"[yellow]To re-enable them, run: restore --backup {backup_id}"
                 )
-                return
+                return False
 
             if manager.promote_manifest(snapshot_dir):
                 console.print("[cyan]Sync manifest updated")
@@ -730,10 +851,12 @@ def sync(
                 f"[yellow]To rollback, run: restore --backup {backup_id}",
                 title="Sync Complete",
             ))
+            return True
         finally:
             await sync_client.close()
 
-    asyncio.run(_run())
+    if not asyncio.run(_run()):
+        raise typer.Exit(1)
 
 
 @app.command()
