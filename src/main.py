@@ -25,7 +25,7 @@ from src.backup.backup_manager import BackupManager, unverified_for_deletion
 from src.backup.diff_engine import DiffEngine
 from src.parser.filter_parser import parse_scraped_filters
 from src.consolidator.consolidation_engine import ConsolidationEngine
-from src.generator.sieve_generator import SieveGenerator, SECTION_BEGIN
+from src.generator.sieve_generator import SieveGenerator, SieveGenerationError, SECTION_BEGIN
 from src.generator.sieve_rules import SieveParseError, compare_sections, extract_section, script_facts
 from src.consolidator.carry_forward import facts_to_filters, filter_facts
 
@@ -546,7 +546,11 @@ def consolidate(
         )
         return consolidated, report, generator.generate(consolidated)
 
-    consolidated, report, sieve_script = _consolidate()
+    try:
+        consolidated, report, sieve_script = _consolidate()
+    except SieveGenerationError as e:
+        console.print(f"[red]{escape(str(e))}")
+        raise typer.Exit(1)
 
     # Compare against the live ProtonFusion section captured at backup time.
     # After `cleanup` it may be the only copy of some rules.
@@ -839,6 +843,18 @@ def _rule_preservation_check(
         f"({result.new_fact_count} condition/action pairs)\n"
         f"Added: {len(result.added)}   Dropped: {len(result.dropped)}"
     )
+    if result.wildcard_fixes:
+        fix_lines = [
+            "",
+            f"[yellow]Corrected: {len(result.wildcard_fixes)} begins-with/ends-with conditions.[/]",
+            "Older ProtonFusion versions wrote these without the * wildcard, so they "
+            "only matched the exact value. The new section adds the wildcard; these "
+            "are not dropped rules.",
+        ]
+        for old, new in result.wildcard_fixes:
+            fix_lines.append(f"  [yellow]~ {escape(old.describe())}[/]")
+            fix_lines.append(f"    [green]{escape(new.describe())}[/]")
+        summary += "\n" + "\n".join(fix_lines)
     if result.is_safe:
         console.print(Panel(
             f"[bold green]No rules dropped.[/]\n\n{summary}",

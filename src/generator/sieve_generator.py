@@ -2,7 +2,7 @@
 
 import logging
 import re
-from typing import List, Set
+from typing import List, Optional, Set
 
 from src.models.filter_models import (
     ConsolidatedFilter, ConditionGroup, FilterCondition, FilterAction,
@@ -26,12 +26,61 @@ EXTENSION_MAP = {
 }
 
 
+class SieveGenerationError(ValueError):
+    """Raised when a filter cannot be written into the ProtonFusion section safely."""
+
+
+# Characters with special meaning in a :matches pattern (RFC 5228 section
+# 2.7.1): "*" and "?" are wildcards and backslash escapes the next character.
+_MATCH_SPECIAL = ("\\", "*", "?")
+
+
+def escape_match_literal(value: str) -> str:
+    """Escape a literal value so a :matches pattern matches it verbatim.
+
+    Used for begins-with / ends-with, whose values are plain text that the
+    generator wraps in a "*" wildcard. Without this, a "*" or "?" typed in the
+    value would act as a wildcard. The result still needs the usual Sieve
+    string escaping when it is written into a quoted string.
+    """
+    out = []
+    for ch in value:
+        if ch in _MATCH_SPECIAL:
+            out.append("\\")
+        out.append(ch)
+    return "".join(out)
+
+
+def unescape_match_literal(pattern: str) -> Optional[str]:
+    """Inverse of escape_match_literal, or None if the pattern has a live wildcard.
+
+    A trailing lone backslash is kept as a literal backslash, matching how
+    Sieve implementations treat it.
+    """
+    out = []
+    i = 0
+    while i < len(pattern):
+        ch = pattern[i]
+        if ch == "\\" and i + 1 < len(pattern):
+            out.append(pattern[i + 1])
+            i += 2
+            continue
+        if ch in ("*", "?"):
+            return None
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 class SieveGenerator:
     """Generate Sieve scripts from consolidated filters."""
 
     def generate(self, filters: List[ConsolidatedFilter]) -> str:
         """Generate a complete Sieve script from consolidated filters."""
         lines = []
+
+        for f in filters:
+            self._check_no_section_markers(f)
 
         # Collect required extensions
         extensions = self._collect_extensions(filters)
@@ -57,12 +106,13 @@ class SieveGenerator:
             # Add comment with source filter info
             if f.source_filters:
                 if f.filter_count > 1:
-                    lines.append(f"# {f.name}")
-                    lines.append(f"# Source filters: {', '.join(f.source_filters[:5])}")
+                    lines.append(f"# {self._comment_text(f.name)}")
+                    sources = ", ".join(f.source_filters[:5])
+                    lines.append(f"# Source filters: {self._comment_text(sources)}")
                     if len(f.source_filters) > 5:
                         lines.append(f"#   ... and {len(f.source_filters) - 5} more")
                 else:
-                    lines.append(f"# {f.source_filters[0]}")
+                    lines.append(f"# {self._comment_text(f.source_filters[0])}")
 
             # Generate the rule
             condition_str = self._generate_conditions(f)
@@ -86,6 +136,38 @@ class SieveGenerator:
         script = "\n".join(lines)
         logger.info("Generated Sieve script: %d lines, %d rules", len(lines), len(filters))
         return script
+
+    @staticmethod
+    def _check_no_section_markers(f: ConsolidatedFilter) -> None:
+        """Refuse a filter whose text contains a ProtonFusion section marker.
+
+        merge_with_existing and extract_section find the section with a plain
+        substring search, so a marker inside a value, folder or filter name
+        would end (or start) the section early on the next sync and corrupt
+        the merge. Only the user's own filter text can do this, so a clear
+        refusal is enough.
+        """
+        texts = [f.name, *f.source_filters]
+        for group in f.condition_groups:
+            texts.extend(cond.value for cond in group.conditions)
+        for action in f.actions:
+            texts.extend(str(v) for v in action.parameters.values())
+        for text in texts:
+            for marker in (SECTION_BEGIN, SECTION_END):
+                if marker in text:
+                    # A consolidated rule's name is synthetic; name the UI filters too
+                    origin = f.name if f.source_filters in ([], [f.name]) else (
+                        f"{f.name} (from {', '.join(f.source_filters)})")
+                    raise SieveGenerationError(
+                        f"Filter {origin!r} contains the ProtonFusion section marker "
+                        f"{marker!r}, which would corrupt the Sieve section on the next "
+                        "sync. Rename or edit that filter in ProtonMail and back up again."
+                    )
+
+    @staticmethod
+    def _comment_text(text: str) -> str:
+        """Flatten line breaks so a filter name cannot escape its # comment line."""
+        return " ".join(text.splitlines())
 
     def _collect_extensions(self, filters: List[ConsolidatedFilter]) -> Set[str]:
         """Determine which Sieve extensions are needed."""
@@ -164,6 +246,13 @@ class SieveGenerator:
             else:
                 values.append(v)
 
+        # begins-with / ends-with become a :matches pattern around the literal
+        # value, so the value's own wildcard characters must be escaped first.
+        if cond.operator == Operator.STARTS_WITH:
+            values = [escape_match_literal(v) + "*" for v in values]
+        elif cond.operator == Operator.ENDS_WITH:
+            values = ["*" + escape_match_literal(v) for v in values]
+
         if len(values) == 1:
             value_str = f'"{self._escape_sieve(values[0])}"'
         else:
@@ -188,9 +277,9 @@ class SieveGenerator:
         mapping = {
             Operator.CONTAINS: ":contains",
             Operator.IS: ":is",
-            Operator.MATCHES: ":matches",
-            Operator.STARTS_WITH: ":matches",  # Uses wildcard pattern
-            Operator.ENDS_WITH: ":matches",    # Uses wildcard pattern
+            Operator.MATCHES: ":matches",      # value is the user's own pattern
+            Operator.STARTS_WITH: ":matches",  # value* (see _condition_to_sieve)
+            Operator.ENDS_WITH: ":matches",    # *value
             Operator.HAS: ":contains",
         }
         return mapping.get(op, ":contains")

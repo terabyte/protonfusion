@@ -234,3 +234,56 @@ class TestCompareSections:
     def test_unparseable_live_raises(self):
         with pytest.raises(SieveParseError):
             compare_sections(_wrap("if true {"), "keep;")
+
+
+class TestLegacyWildcardForm:
+    """Older versions wrote begins/ends-with as :matches without the wildcard."""
+
+    def _new(self, op, value, folder="Spam"):
+        return SieveGenerator().generate([_sender_rule([value], folder=folder, op=op)])
+
+    def test_generated_begins_with_has_wildcard(self):
+        (fact,) = script_facts(self._new(Operator.STARTS_WITH, "News"))
+        (atom,) = fact.conditions
+        assert atom[1] == ":matches"
+        assert atom[5] == "news*"
+
+    @pytest.mark.parametrize("op, new_value", [
+        (Operator.STARTS_WITH, "news*"),
+        (Operator.ENDS_WITH, "*news"),
+    ])
+    def test_old_form_reported_as_correction_not_drop(self, op, new_value):
+        live = _wrap('if address :matches "From" "news" { fileinto "Spam"; }')
+        result = compare_sections(live, self._new(op, "news"))
+        assert result.is_safe
+        assert result.dropped == []
+        assert result.added == []
+        ((old, new),) = result.wildcard_fixes
+        assert '"news"' in old.describe()
+        assert f'"{new_value}"' in new.describe()
+
+    def test_old_form_with_backslash_pairs_with_escaped_pattern(self):
+        live = _wrap('if address :matches "From" "a\\\\b" { fileinto "Spam"; }')
+        result = compare_sections(live, self._new(Operator.STARTS_WITH, "a\\b"))
+        assert result.is_safe
+        assert len(result.wildcard_fixes) == 1
+
+    def test_old_form_with_different_action_is_still_a_drop(self):
+        live = _wrap('if address :matches "From" "news" { fileinto "Spam"; }')
+        result = compare_sections(live, self._new(Operator.STARTS_WITH, "news", folder="Work"))
+        assert not result.is_safe
+        assert result.wildcard_fixes == []
+        assert len(result.dropped) == 1
+
+    def test_old_form_without_replacement_is_still_a_drop(self):
+        live = _wrap('if address :matches "From" "news" { fileinto "Spam"; }\n'
+                     'if address :is "From" "a" { fileinto "Spam"; }')
+        result = compare_sections(live, self._new(Operator.IS, "a"))
+        assert not result.is_safe
+        assert len(result.dropped) == 1
+
+    def test_correction_does_not_hide_a_real_drop(self):
+        live = _wrap('if address :matches "From" ["news", "gone"] { fileinto "Spam"; }')
+        result = compare_sections(live, self._new(Operator.STARTS_WITH, "news"))
+        assert len(result.wildcard_fixes) == 1
+        assert [d.describe() for d in result.dropped] == ['address from :matches "gone"  ->  fileinto "Spam";']

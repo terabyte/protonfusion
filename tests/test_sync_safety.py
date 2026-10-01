@@ -262,3 +262,61 @@ class TestCleanupOnlyDeletesCoveredFilters:
         result = runner.invoke(app, ["cleanup"], input="y\n")
         assert result.exit_code == 0
         assert fake_sync.calls == []
+
+
+def _begins_with(prefix: str, enabled: bool = True) -> ProtonMailFilter:
+    return ProtonMailFilter(
+        name=f"Begins {prefix}",
+        enabled=enabled,
+        conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.STARTS_WITH, value=prefix)],
+        actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "News"})],
+        raw=ScrapeEvidence(conditions_text="the sender", actions_text="Move to News"),
+    )
+
+
+# A live section as older ProtonFusion versions generated it for "sender
+# begins with news": :matches with no wildcard, i.e. an exact match.
+_LEGACY_BEGINS_WITH_LIVE = SieveGenerator.merge_with_existing(
+    'require ["fileinto"];\nif address :matches "From" "news" {\n    fileinto "News";\n}\n', "")
+
+
+class TestLegacyWildcardLiveSection:
+
+    def test_sync_reports_correction_and_proceeds(self, cli_snapshots_dir, fake_sync):
+        fake_sync.live_script = _LEGACY_BEGINS_WITH_LIVE
+        BackupManager(cli_snapshots_dir).create_backup(
+            [_begins_with("news")], sieve_script=fake_sync.live_script)
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 0, result.output
+        assert "No rules dropped" in result.output
+        assert "Corrected: 1 begins-with/ends-with" in result.output
+        assert '"news*"' in result.output
+
+    def test_cleanup_keeps_filter_whose_live_copy_is_the_old_form(
+            self, cli_snapshots_dir, fake_sync, fake_scraper):
+        """The old exact-match copy does not cover the filter, so it is not deleted."""
+        disabled = _begins_with("news", enabled=False)
+        fake_scraper.filters = [disabled]
+        fake_sync.live_script = _LEGACY_BEGINS_WITH_LIVE
+        BackupManager(cli_snapshots_dir).create_backup([disabled])
+
+        result = runner.invoke(app, ["cleanup"], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert ("delete", disabled.name) not in fake_sync.calls
+
+
+def test_consolidate_refuses_filter_containing_section_marker(cli_snapshots_dir, fake_sync):
+    from src.generator.sieve_generator import SECTION_END
+    sneaky = ProtonMailFilter(
+        name="Sneaky",
+        conditions=[FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS,
+                                    value=f"x\n{SECTION_END}\ny")],
+        actions=[FilterAction(type=ActionType.DELETE)],
+    )
+    BackupManager(cli_snapshots_dir).create_backup([sneaky])
+    result = runner.invoke(app, ["consolidate"])
+    assert result.exit_code == 1
+    assert "Sneaky" in result.output
+    assert "section marker" in result.output
