@@ -127,6 +127,38 @@ class TestRestoreEngine:
         assert sync.calls == []
         assert len(report["ambiguous"]) == 1 and "cannot tell which is which" in report["ambiguous"][0]
 
+    @staticmethod
+    def _subject(kind, enabled, priority) -> ProtonMailFilter:
+        """Filter "N" (Trash) on subject "a, b": one literal value, or the two chips a and b.
+
+        Different filters (different content_hash) that share a legacy_identity."""
+        cond = {"type": "subject", "operator": "contains"}
+        cond.update({"value": "a, b"} if kind == "literal" else {"values": ["a", "b"]})
+        return ProtonMailFilter(
+            name="N", enabled=enabled, priority=priority, conditions=[cond],
+            actions=[{"type": "trash"}], raw={"conditions_text": "c", "actions_text": "a"},
+        )
+
+    def test_exact_content_pairs_before_legacy_identity(self):
+        """W2: a literal "a, b" and the chips [a, b] are different filters; after a reorder
+        each still pairs with itself, so nothing is toggled."""
+        lit, chips = self._subject("literal", True, 0), self._subject("chips", False, 1)
+        backup = Backup(version="1.3", filters=[lit, chips])
+        live = [self._subject("chips", False, 0), self._subject("literal", True, 1)]
+        plan = RestoreEngine.plan(backup, live)
+        assert plan.to_enable == [] and plan.to_disable == []
+        assert plan.ambiguous == [] and plan.already_correct == ["N", "N"]
+
+    def test_legacy_group_of_different_filters_is_ambiguous(self):
+        """W2: in a backup older than 1.3 a literal may be a legacy encoding of chips, so
+        exact content proves nothing; a legacy group of differing filters is never paired
+        by row order."""
+        backup = Backup(version="1.2", filters=[self._subject("literal", True, 0), self._subject("chips", False, 1)])
+        live = [self._subject("chips", False, 0), self._subject("literal", True, 1)]
+        plan = RestoreEngine.plan(backup, live)
+        assert plan.to_enable == [] and plan.to_disable == []
+        assert len(plan.ambiguous) == 2 and "cannot tell which is which" in plan.ambiguous[0]
+
     def test_sieve_filter_matched_by_name_and_script_change_reported(self):
         report, sync = _restore(
             [_sieve(SIEVE_FILTER_NAME, "keep;", enabled=False, priority=0)],

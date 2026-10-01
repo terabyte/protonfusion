@@ -11,6 +11,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Tuple
 
+from src.backup.backup_manager import format_predates_strict_parser
 from src.consolidator.carry_forward import filter_facts
 from src.generator.sieve_rules import Fact, compare_sections, current_forms
 from src.models.backup_models import Backup
@@ -24,28 +25,11 @@ logger = logging.getLogger(__name__)
 Pair = Tuple[ProtonMailFilter, ProtonMailFilter]
 
 
-def _identity(f: ProtonMailFilter) -> Tuple[str, str]:
-    """The key a live filter must share with its backup copy to be the same filter.
-
-    A wizard filter is its content (content_hash covers name, logic,
-    conditions and actions), so a filter edited since the backup, or a
-    different filter that happens to share the name, never matches. A
-    Sieve filter is matched by name: its script may legitimately differ
-    (ProtonFusion's own is rewritten by every sync), and that must not make
-    it unfindable.
-    """
-    if f.is_sieve:
-        return ("sieve", f.name)
-    # legacy_identity, not content_hash: a backup from before a format fix
-    # (", "-joined chips, unescaped "/") must still match its live filter.
-    return ("content", legacy_identity(f))
-
-
-def _by_identity(filters: List[ProtonMailFilter]) -> Dict[Tuple[str, str], List[ProtonMailFilter]]:
-    """Group filters by _identity, each group in row (priority) order."""
-    groups: Dict[Tuple[str, str], List[ProtonMailFilter]] = defaultdict(list)
+def _group(filters: Iterable[ProtonMailFilter], key) -> Dict[str, List[ProtonMailFilter]]:
+    """Group filters by key(filter), each group in row (priority) order."""
+    groups: Dict[str, List[ProtonMailFilter]] = defaultdict(list)
     for f in sorted(filters, key=lambda f: f.priority):
-        groups[_identity(f)].append(f)
+        groups[key(f)].append(f)
     return groups
 
 
@@ -110,10 +94,26 @@ class RestoreEngine:
     def plan(backup: Backup, current_filters: List[ProtonMailFilter]) -> RestorePlan:
         """Match each backed-up filter to a live row and decide what to toggle.
 
-        Pairs by _identity. Identical copies (same content) pair in row
-        order when the backup and the account hold the same number of
-        them; any other mismatch in count is ambiguous and nothing in that
-        group is touched, as is a Sieve name shared by several filters.
+        A wizard filter is its content, so a filter edited since the backup,
+        or a different filter that shares the name, never matches. Matching
+        runs in two passes:
+
+        1. By content_hash. Identical copies (same hash) are interchangeable,
+           so equal counts pair in row order; unequal counts are ambiguous.
+           Only for a backup in format 1.3 or later: older ones may store
+           a filter in a legacy encoding, so they go straight to pass 2.
+        2. Only for backed-up filters with no exact match, by
+           legacy_identity, so a backup from before a format fix (", "-joined
+           chips, unescaped "/", an old action type) still finds its live
+           filter. That identity is coarser than content_hash (a literal
+           "a, b" and the chips [a, b] share it), so a group is paired only
+           when its members on each side all share one content_hash and the
+           counts are equal. Anything else is ambiguous: pairing different
+           filters by row order would toggle the wrong one after a reorder.
+
+        A Sieve filter is matched by name: its script may legitimately differ
+        (ProtonFusion's own is rewritten by every sync), and that must not
+        make it unfindable. A name shared by several is ambiguous.
         """
         plan = RestorePlan()
         eligible = []
@@ -124,33 +124,81 @@ class RestoreEngine:
             else:
                 eligible.append(f)
 
-        current_groups = _by_identity(current_filters)
-        for key, backed_up in _by_identity(eligible).items():
-            live = current_groups.get(key, [])
+        def ambiguous(backed_up: List[ProtonMailFilter], reason: str) -> None:
+            for f in backed_up:
+                plan.ambiguous.append(f"{f.name}: {reason}")
+
+        def count_mismatch(backed_up: List[ProtonMailFilter], live: List[ProtonMailFilter]) -> str:
+            return (
+                f"{len(backed_up)} in the backup and {len(live)} in the account with the "
+                "same identity; cannot tell which is which"
+            )
+
+        pairs: List[Pair] = []
+
+        # Sieve filters, by name
+        live_sieve = _group((f for f in current_filters if f.is_sieve), lambda f: f.name)
+        for name, backed_up in _group((f for f in eligible if f.is_sieve), lambda f: f.name).items():
+            live = live_sieve.get(name, [])
             if not live:
                 for f in backed_up:
                     plan.not_found.append(f"{f.name}: not in the account, or changed since the backup")
+            elif len(live) > 1 or len(backed_up) > 1:
+                ambiguous(backed_up, count_mismatch(backed_up, live))
+            else:
+                pairs.append((backed_up[0], live[0]))
+
+        # Wizard filters, pass 1: exact content. Skipped for a backup older
+        # than format 1.3, whose stored form may be a legacy encoding: its
+        # literal "a, b" may be what are now the chips [a, b], so an exact
+        # match with a live literal proves nothing.
+        live_wizard = [f for f in current_filters if not f.is_sieve]
+        live_by_hash = _group(live_wizard, lambda f: f.content_hash)
+        claimed = set()  # ids of live filters an exact match took (or made ambiguous)
+        unmatched: List[ProtonMailFilter] = []
+        backed_wizard = [f for f in eligible if not f.is_sieve]
+        if format_predates_strict_parser(backup.version):
+            unmatched, backed_wizard = backed_wizard, []
+        for h, backed_up in _group(backed_wizard, lambda f: f.content_hash).items():
+            live = live_by_hash.get(h, [])
+            if not live:
+                unmatched.extend(backed_up)
                 continue
-            # A Sieve filter is matched by name alone, so pairing several by
-            # order would be a guess; identical wizard filters are
-            # interchangeable, so equal counts pair safely.
-            if len(live) != len(backed_up) or (key[0] == "sieve" and len(live) > 1):
-                reason = (
-                    f"{len(backed_up)} in the backup and {len(live)} in the account with the "
-                    "same identity; cannot tell which is which"
-                )
+            claimed |= {id(f) for f in live}
+            if len(live) != len(backed_up):
+                ambiguous(backed_up, count_mismatch(backed_up, live))
+            else:
+                pairs.extend(zip(backed_up, live))
+
+        # Pass 2: legacy identity, for what had no exact match
+        live_by_legacy = _group((f for f in live_wizard if id(f) not in claimed), legacy_identity)
+        for key, backed_up in _group(unmatched, legacy_identity).items():
+            live = live_by_legacy.get(key, [])
+            if not live:
                 for f in backed_up:
-                    plan.ambiguous.append(f"{f.name}: {reason}")
-                continue
-            for backed, current in zip(backed_up, live):
-                if backed.is_sieve and backed.content_hash != current.content_hash:
-                    plan.script_differs.append(backed.name)
-                if backed.enabled == current.enabled:
-                    plan.already_correct.append(backed.name)
-                elif backed.enabled:
-                    plan.to_enable.append((backed, current))
-                else:
-                    plan.to_disable.append((backed, current))
+                    plan.not_found.append(f"{f.name}: not in the account, or changed since the backup")
+            elif len(live) != len(backed_up):
+                ambiguous(backed_up, count_mismatch(backed_up, live))
+            elif len({f.content_hash for f in backed_up}) > 1 or len({f.content_hash for f in live}) > 1:
+                ambiguous(
+                    backed_up,
+                    "several different filters in the backup or the account read the same once older "
+                    "formats are normalised (a literal \", \" and separate value chips, for example); "
+                    "cannot tell which is which",
+                )
+            else:
+                pairs.extend(zip(backed_up, live))
+
+        # In backup row order, the order the toggles are clicked in
+        for backed, current in sorted(pairs, key=lambda pair: pair[0].priority):
+            if backed.is_sieve and backed.content_hash != current.content_hash:
+                plan.script_differs.append(backed.name)
+            if backed.enabled == current.enabled:
+                plan.already_correct.append(backed.name)
+            elif backed.enabled:
+                plan.to_enable.append((backed, current))
+            else:
+                plan.to_disable.append((backed, current))
         return plan
 
     async def apply(self, pairs: List[Pair], enabled: bool) -> Tuple[List[str], List[str]]:
