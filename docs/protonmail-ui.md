@@ -70,19 +70,30 @@ Clicking "Edit" opens a multi-step wizard modal:
   - Type dropdown: Move to, Label as, Mark as read, Star, Archive, Permanently delete
   - Parameter (folder/label selector, when applicable)
 
-The scraper reads three rows by `data-testid`: `filter-modal:folder-row`,
-`filter-modal:label-row` and `filter-modal:mark-as-row`. Any other visible
-`filter-modal:*-row` in the Actions step marks the filter incomplete.
+Every filter's Actions step has four rows, identified by `data-testid`
+(checked against the live UI on 2026-09-30): `filter-modal:folder-row`,
+`filter-modal:label-row`, `filter-modal:mark-as-row` and
+`filter-modal:auto-reply-row`. Any other visible `filter-modal:*-row` marks the
+filter incomplete, and so does a missing one of the four. An "Apply filter to existing emails" checkbox sits outside
+the rows; it is a one-time action on save, not part of the filter, and is
+ignored.
 
-**"Label as" row (unverified).** The label reader
-(`ProtonMailScraper._read_label_row`) was written without access to the live
-DOM. It assumes selected labels appear either as chips
-(`.label-stack-item-text`, or `.label-stack-item [title]`) or in the dropdown
-button's `aria-label`/text as a comma-separated list, with "Do not label" (and
-similar placeholders) meaning none. Any text in the row it cannot account for,
-or a button showing a count such as "2 labels", is reported as a scrape issue
-rather than read as "no labels". Check this against the live UI and adjust
-`FILTER_LABEL_CHIPS` / `FILTER_LABEL_BUTTONS` in `selectors.py` if it differs.
+- **Collapse toggles.** The first `<button>` in the folder, label and mark-as
+  rows is a section collapse toggle ("Move to", "Label as", "Mark as"), not a
+  dropdown. The folder dropdown is `button.select` (`id="move-to-select"`), whose
+  `aria-label` is the selected folder ("Do not move" when none).
+- **"Label as" row.** It lists **every label on the account**, each as
+  `<label class="checkbox-container" title="NAME">` holding an
+  `input.checkbox-input` and a `label-stack` chip with the name. Applied labels
+  are the ticked ones. Row chrome is "Label as" and "Create label".
+- **Checked is a property.** Ticking a box sets the DOM `checked` property only;
+  the HTML attribute never changes, so the serialized HTML looks the same
+  whether a box is ticked or not. The scraper reads `el => el.checked`.
+- **Auto-reply row.** "Send auto-reply" with a toggle switch, off by default. On
+  means an action ProtonFusion cannot express, so the filter is flagged.
+- **Escape closes the wizard.** Building the folder path map opens the folder
+  dropdown and presses Escape, which closes the whole modal, so the scraper
+  reads the folder row last.
 
 Dropdowns use `button.select` to open and `li.dropdown-item` for options (not native `<select>` elements).
 

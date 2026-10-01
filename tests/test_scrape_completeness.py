@@ -43,21 +43,31 @@ def test_clean_filter_not_flagged(edge_filters):
     assert {"type": "label", "parameters": {"label": "Work"}} in f["actions"]
 
 
-def test_unknown_action_row_flagged(edge_filters):
+def test_auto_reply_on_flagged(edge_filters):
     issues = edge_filters["Has Autoreply"]["scrape_issues"]
-    assert any("filter-modal:autoreply-row" in i for i in issues)
+    assert "auto-reply action not supported" in issues
+
+
+def test_auto_reply_off_not_flagged(edge_filters):
+    """The auto-reply row is on every filter; off is the normal case."""
+    assert edge_filters["Clean Labelled"]["scrape_issues"] == []
+
+
+def test_unknown_action_row_flagged(edge_filters):
+    f = edge_filters["Unknown Row"]
+    assert any("filter-modal:forward-row" in i for i in f["scrape_issues"])
     # The raw evidence still records what the unknown row showed.
-    assert "Send auto-reply" in edge_filters["Has Autoreply"]["raw"]["actions_text"]
+    assert "Forward to" in f["raw"]["actions_text"]
 
 
-def test_unrecognised_label_layout_flagged(edge_filters):
-    issues = edge_filters["Plain Label Text"]["scrape_issues"]
-    assert any("Receipts" in i for i in issues)
+def test_unnamed_label_option_flagged(edge_filters):
+    issues = edge_filters["Unnamed Label Option"]["scrape_issues"]
+    assert any("no readable name" in i for i in issues)
 
 
-def test_label_count_flagged(edge_filters):
-    issues = edge_filters["Label Count Only"]["scrape_issues"]
-    assert any("count" in i for i in issues)
+def test_unexplained_label_text_flagged(edge_filters):
+    issues = edge_filters["Unexplained Label Text"]["scrape_issues"]
+    assert any("Applied: Receipts" in i for i in issues)
 
 
 def test_unknown_operator_flagged(edge_filters):

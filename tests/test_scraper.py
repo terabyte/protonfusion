@@ -101,66 +101,44 @@ class TestResolveFolderPath:
 
 
 class TestParseLabelRow:
-    """Tests for _parse_label_row, the pure half of the "Label as" reader."""
+    """Tests for _parse_label_row, the pure half of the "Label as" reader.
 
-    def test_chips(self):
-        labels, issue = _parse_label_row(["Work", "On Call"], "", "Choose labels", "Label as\nWork\nOn Call\nChoose labels")
-        assert labels == ["Work", "On Call"]
+    The live row lists every account label as a checkbox; options are
+    (name, ticked) pairs and only ticked ones are applied.
+    """
+
+    ROW = "Label as\npf-test-label\nWork\nFinance\nCreate label"
+
+    def test_only_ticked_labels(self):
+        options = [("pf-test-label", False), ("Work", True), ("Finance", True)]
+        labels, issue = _parse_label_row(options, self.ROW)
+        assert labels == ["Work", "Finance"]
         assert issue is None
 
-    def test_chip_keeps_comma_in_name(self):
-        labels, issue = _parse_label_row(["Smith, John"], "", "", "Smith, John")
+    def test_nothing_ticked_is_no_labels_not_an_issue(self):
+        options = [("pf-test-label", False), ("Work", False), ("Finance", False)]
+        assert _parse_label_row(options, self.ROW) == ([], None)
+
+    def test_account_with_no_labels(self):
+        assert _parse_label_row([], "Label as\nCreate label") == ([], None)
+
+    def test_label_name_with_comma(self):
+        labels, issue = _parse_label_row([("Smith, John", True)], "Label as\nSmith, John\nCreate label")
         assert labels == ["Smith, John"]
         assert issue is None
 
-    def test_chip_remove_glyph_stripped(self):
-        labels, issue = _parse_label_row(["Work ×"], "", "", "Work ×")
-        assert labels == ["Work"]
-        assert issue is None
-
-    def test_button_aria_label_comma_separated(self):
-        labels, issue = _parse_label_row([], "Finance, Taxes", "Finance, Taxes", "Label as\nFinance, Taxes")
-        assert labels == ["Finance", "Taxes"]
-        assert issue is None
-
-    def test_button_text_when_no_aria_label(self):
-        labels, issue = _parse_label_row([], "", "Work", "Work")
-        assert labels == ["Work"]
-        assert issue is None
-
-    @pytest.mark.parametrize("placeholder", ["Do not label", "Choose labels", "", "None"])
-    def test_placeholder_means_no_label(self, placeholder):
-        labels, issue = _parse_label_row([], placeholder, placeholder, f"Label as\n{placeholder}")
-        assert labels == []
-        assert issue is None
-
-    def test_duplicates_removed(self):
-        labels, issue = _parse_label_row(["Work", "Work"], "", "", "Work\nWork")
-        assert labels == ["Work"]
-        assert issue is None
-
-    def test_count_summary_is_an_issue(self):
-        labels, issue = _parse_label_row([], "2 labels", "2 labels", "2 labels")
-        assert labels == []
-        assert "count" in issue
-
-    def test_unexplained_text_is_an_issue(self):
-        """Labels rendered in a shape the reader does not know must not read as none."""
-        labels, issue = _parse_label_row([], "Do not label", "Do not label", "Label as\nWork\nDo not label")
-        assert labels == []
-        assert "Work" in issue
-
-    def test_unexplained_text_alongside_parsed_labels(self):
-        labels, issue = _parse_label_row(["Work"], "", "", "Work\nPersonal")
-        assert labels == ["Work"]
-        assert "Personal" in issue
-
     def test_inline_text_run_together(self):
         """innerText joins inline elements with no separator."""
-        labels, issue = _parse_label_row([], "Do not label", "Do not label", "Label asDo not label")
-        assert labels == []
+        labels, issue = _parse_label_row([("Work", True)], "Label asWorkCreate label")
+        assert labels == ["Work"]
         assert issue is None
 
-    def test_inline_unexplained_text_still_flagged(self):
-        labels, issue = _parse_label_row([], "Do not label", "Do not label", "Label asReceiptsDo not label")
-        assert "Receipts" in issue
+    def test_unnamed_option_is_an_issue(self):
+        labels, issue = _parse_label_row([("Work", False), ("", True)], "Label as\nWork")
+        assert "no readable name" in issue
+
+    def test_unexplained_text_is_an_issue(self):
+        """A layout change must not read as "no labels"."""
+        labels, issue = _parse_label_row([("Work", False)], "Label as\nWork\nApplied: Receipts\nCreate label")
+        assert labels == []
+        assert "Applied: Receipts" in issue

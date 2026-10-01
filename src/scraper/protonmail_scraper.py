@@ -47,10 +47,16 @@ KNOWN_ACTION_ROW_SELECTORS = [
     selectors.FILTER_ACTION_FOLDER_ROW,
     selectors.FILTER_ACTION_LABEL_ROW,
     selectors.FILTER_ACTION_MARK_AS_ROW,
+    selectors.FILTER_ACTION_AUTO_REPLY_ROW,
 ]
 KNOWN_ACTION_ROW_TESTIDS = {
-    "filter-modal:folder-row", "filter-modal:label-row", "filter-modal:mark-as-row",
+    "filter-modal:folder-row", "filter-modal:label-row",
+    "filter-modal:mark-as-row", "filter-modal:auto-reply-row",
 }
+
+# A checkbox's live state. `checked` is a DOM property that the UI sets
+# without touching the HTML attribute, so attribute reads always say "off".
+CHECKED_JS = "el => el.checked"
 
 # Mark-as checkboxes we model (mark_read, star), by their label text.
 KNOWN_MARK_AS_LABELS = {"read", "starred"}
@@ -85,72 +91,47 @@ STEP_TEXT_JS = """
 }
 """
 
-# Label-row text that means "no label selected" rather than naming a label.
-LABEL_PLACEHOLDERS = {
-    "", "do not label", "no label", "no labels", "none",
-    "choose label", "choose labels", "choose label(s)",
-    "select label", "select labels", "select label(s)", "add label",
-}
-
-# Label-row text that is UI chrome (headings), not a label name.
-LABEL_ROW_CHROME = LABEL_PLACEHOLDERS | {"label as", "label", "labels", "apply label", "apply labels"}
-
-# Glyphs a chip may render for its remove button, stripped from chip text.
-CHIP_REMOVE_GLYPHS = "×✕✖"
-
-# A dropdown button summarising the selection as a count ("2 labels")
-# instead of naming the labels; the names cannot be recovered from it.
-LABEL_COUNT_PATTERN = re.compile(r"^\d+\s+labels?\b", re.IGNORECASE)
+# Label-row text that is UI chrome, not a label: the row's collapse toggle
+# and its "Create label" button.
+LABEL_ROW_CHROME = {"label as", "create label"}
 
 
 def _parse_label_row(
-    chip_texts: List[str], button_label: str, button_text: str, row_text: str,
+    options: List[Tuple[str, bool]], row_text: str,
 ) -> Tuple[List[str], Optional[str]]:
-    """Turn what the "Label as" row shows into label names.
+    """Turn the "Label as" row's checkbox options into applied label names.
 
     Pure function so the rules can be unit-tested without a browser; the
     DOM reading lives in ProtonMailScraper._read_label_row.
 
-    Chips win when present (one chip per selected label, so a label name
-    containing a comma survives). Otherwise the dropdown button's
-    aria-label (then its text) is split on commas. Placeholders such as
-    "Do not label" mean no label.
+    `options` is one (name, ticked) pair per label checkbox. The row lists
+    EVERY label on the account, so only ticked ones are applied; unticked
+    ones are the normal case and not an issue.
 
-    Returns (labels, issue). issue is None when the row was fully
-    accounted for. It is set when the row cannot be read reliably: the
-    button shows a count instead of names, or the row contains text that
-    is neither a parsed label nor known chrome. That last check is the
-    guard against a UI shape this reader does not know about silently
-    reading as "no labels".
+    Returns (labels, issue). issue is set when the row cannot be read
+    reliably: an option with no readable name, or visible row text that is
+    neither a label name nor known chrome. That last check is the guard
+    against a layout change silently reading as "no labels".
     """
     labels: List[str] = []
+    for name, ticked in options:
+        name = name.strip()
+        if not name:
+            return labels, "label row has a checkbox with no readable name"
+        if ticked and name not in labels:
+            labels.append(name)
 
-    def _add(name: str):
-        name = name.strip().strip(CHIP_REMOVE_GLYPHS).strip()
-        if name.lower() in LABEL_PLACEHOLDERS or name in labels:
-            return
-        labels.append(name)
-
-    if chip_texts:
-        for text in chip_texts:
-            _add(text)
-    else:
-        summary = (button_label or button_text or "").strip()
-        if LABEL_COUNT_PATTERN.match(summary):
-            return [], f"label row shows a count ({summary!r}), not label names"
-        for part in summary.split(","):
-            _add(part)
-
-    # Every piece of visible text must be a label we parsed or known chrome.
-    # Inline elements run together in innerText ("Label asDo not label"),
-    # so known tokens are cut out of each line rather than matched whole.
-    known_tokens = sorted((set(labels) | LABEL_ROW_CHROME) - {""}, key=len, reverse=True)
+    # Every piece of visible text must be a label name or known chrome.
+    # Inline elements run together in innerText, so known tokens are cut
+    # out of each line rather than matched whole.
+    names = {name.strip() for name, _ in options}
+    known_tokens = sorted((names | LABEL_ROW_CHROME) - {""}, key=len, reverse=True)
     unexplained = []
     for line in row_text.splitlines():
         rest = line
         for token in known_tokens:
             rest = re.sub(re.escape(token), " ", rest, flags=re.IGNORECASE)
-        if rest.strip(" ,;\t" + CHIP_REMOVE_GLYPHS):
+        if rest.strip(" ,;\t"):
             unexplained.append(line.strip())
     if unexplained:
         return labels, f"label row has text the reader did not account for: {unexplained!r}"
@@ -439,13 +420,15 @@ class ProtonMailScraper(ProtonMailBrowser):
                         else:
                             await next_btn.click()
                             await page.wait_for_timeout(MODAL_TRANSITION_MS)
-                            actions, action_issues = await self._scrape_actions(page=page)
-                            issues.extend(action_issues)
+                            # Evidence first: reading the actions can close
+                            # the wizard (see _scrape_actions).
                             raw["actions_text"] = await self._read_step_text(
                                 page, KNOWN_ACTION_ROW_SELECTORS + [selectors.FILTER_MODAL_NEXT],
                             )
                             if not raw["actions_text"]:
                                 issues.append("could not capture the Actions step's raw text")
+                            actions, action_issues = await self._scrape_actions(page=page)
+                            issues.extend(action_issues)
         except Exception as e:
             issues.append(f"error while reading the filter wizard: {e}")
 
@@ -453,7 +436,9 @@ class ProtonMailScraper(ProtonMailBrowser):
             close_btn = await page.query_selector(
                 f'{selectors.FILTER_MODAL_CLOSE}, {selectors.CANCEL_BUTTON}'
             )
-            if close_btn:
+            # The folder map build presses Escape, which already closed it;
+            # clicking a hidden button would wait out Playwright's timeout.
+            if close_btn and await close_btn.is_visible():
                 await close_btn.click()
                 await page.wait_for_timeout(DROPDOWN_MS)
         except Exception as e:
@@ -570,10 +555,15 @@ class ProtonMailScraper(ProtonMailBrowser):
     async def _scrape_actions(self, page: Page = None) -> Tuple[List[dict], List[str]]:
         """Scrape actions from the Actions step of the filter wizard.
 
-        Returns (actions, issues). Understood rows are folder, label and
-        mark-as. Any other visible action row is an issue, as is a known row
-        that cannot be read: an action the scraper does not record would be
-        missing from the Sieve script and lost when the filter is deleted.
+        Returns (actions, issues). Understood rows are folder, label,
+        mark-as and auto-reply (read only to confirm it is off). Any other
+        visible action row is an issue, as is a known row that cannot be
+        read: an action the scraper does not record would be missing from
+        the Sieve script and lost when the filter is deleted.
+
+        The folder row is read LAST. Building the folder path map opens the
+        folder dropdown and presses Escape, which in the live UI closes the
+        whole wizard, so nothing in this step can be read after it.
         """
         if page is None:
             page = self.page
@@ -586,102 +576,134 @@ class ProtonMailScraper(ProtonMailBrowser):
             if testid not in KNOWN_ACTION_ROW_TESTIDS and await row.is_visible():
                 issues.append(f"unsupported action row {testid!r}")
 
-        # Check "Move to" folder selection
+        # Read the folder selection now, but resolve it (which may open the
+        # dropdown and close the wizard) only after the other rows.
         folder_row = await page.query_selector(selectors.FILTER_ACTION_FOLDER_ROW)
+        folder_btn = None
+        folder_label = None
         if folder_row:
-            folder_btn = await folder_row.query_selector(selectors.CUSTOM_SELECT_BUTTON)
-            raw_label = await folder_btn.get_attribute("aria-label") if folder_btn else None
-            if not raw_label:
+            # button.select, not the row's first button: that one is the
+            # "Move to" collapse toggle.
+            folder_btn = await folder_row.query_selector(selectors.FOLDER_SELECT_BUTTON)
+            folder_label = await folder_btn.get_attribute("aria-label") if folder_btn else None
+            if not folder_label:
                 issues.append("folder row has no readable dropdown")
-            elif raw_label.strip() != "Do not move":
-                # Build folder path map on first encounter
-                if self._folder_path_map is None:
-                    await self._build_folder_path_map(folder_btn, page=page)
-
-                folder = self._resolve_folder_path(raw_label)
-                folder_map = {
-                    "Trash": "delete",
-                    "Archive": "archive",
-                    "Spam": "move_to",
-                    "Inbox - Default": "move_to",
-                }
-                action_type = folder_map.get(folder, "move_to")
-                if action_type in ("delete", "archive"):
-                    actions.append({"type": action_type, "parameters": {}})
-                else:
-                    actions.append({"type": "move_to", "parameters": {"folder": folder}})
 
         # Check "Label as" selection (a filter can apply several labels)
         label_row = await page.query_selector(selectors.FILTER_ACTION_LABEL_ROW)
+        label_actions = []
         if label_row:
             labels, issue = await self._read_label_row(label_row)
             if issue:
                 issues.append(issue)
             for label in labels:
-                actions.append({"type": "label", "parameters": {"label": label}})
+                label_actions.append({"type": "label", "parameters": {"label": label}})
 
         # Check "Mark as" checkboxes
         mark_row = await page.query_selector(selectors.FILTER_ACTION_MARK_AS_ROW)
+        mark_actions = []
         if mark_row:
             read_cb = await mark_row.query_selector(selectors.MARK_READ_CHECKBOX)
-            if read_cb and await read_cb.is_checked():
-                actions.append({"type": "mark_read", "parameters": {}})
+            if read_cb and await read_cb.evaluate(CHECKED_JS):
+                mark_actions.append({"type": "mark_read", "parameters": {}})
             star_cb = await mark_row.query_selector(selectors.MARK_STARRED_CHECKBOX)
-            if star_cb and await star_cb.is_checked():
-                actions.append({"type": "star", "parameters": {}})
+            if star_cb and await star_cb.evaluate(CHECKED_JS):
+                mark_actions.append({"type": "star", "parameters": {}})
             # Any other ticked box in the row is a mark-as we do not model
             for checkbox in await mark_row.query_selector_all('input[type="checkbox"]'):
                 box_label = await checkbox.evaluate(CHECKBOX_LABEL_JS)
-                if box_label.lower() not in KNOWN_MARK_AS_LABELS and await checkbox.is_checked():
+                if box_label.lower() not in KNOWN_MARK_AS_LABELS and await checkbox.evaluate(CHECKED_JS):
                     issues.append(f"unsupported mark-as option {box_label!r} is checked")
 
-        if not (folder_row or label_row or mark_row):
-            issues.append("Actions step has no folder, label or mark-as row")
+        # Auto-reply: on every filter, off by default. We cannot express it
+        # in Sieve, so a filter using it must not be treated as fully read.
+        auto_reply_row = await page.query_selector(selectors.FILTER_ACTION_AUTO_REPLY_ROW)
+        if auto_reply_row:
+            toggle = await auto_reply_row.query_selector('input[type="checkbox"]')
+            if not toggle:
+                issues.append("auto-reply row has no readable toggle")
+            elif await toggle.evaluate(CHECKED_JS):
+                issues.append("auto-reply action not supported")
 
-        return actions, issues
+        # The live UI renders all four rows on every filter, so a missing one
+        # means the step did not render as expected (or the wizard closed);
+        # treating it as "no such action" is how labels were lost before.
+        for row, row_name in (
+            (folder_row, "folder"), (label_row, "label"),
+            (mark_row, "mark-as"), (auto_reply_row, "auto-reply"),
+        ):
+            if not row:
+                issues.append(f"Actions step has no {row_name} row")
+
+        # Folder last (see docstring)
+        if folder_label and folder_label.strip() != "Do not move":
+            if self._folder_path_map is None:
+                await self._build_folder_path_map(folder_btn, page=page)
+
+            folder = self._resolve_folder_path(folder_label)
+            folder_map = {
+                "Trash": "delete",
+                "Archive": "archive",
+                "Spam": "move_to",
+                "Inbox - Default": "move_to",
+            }
+            action_type = folder_map.get(folder, "move_to")
+            if action_type in ("delete", "archive"):
+                actions.append({"type": action_type, "parameters": {}})
+            else:
+                actions.append({"type": "move_to", "parameters": {"folder": folder}})
+
+        return actions + label_actions + mark_actions, issues
 
     async def _read_label_row(self, label_row) -> Tuple[List[str], Optional[str]]:
-        """Read the selected labels from the Actions step's "Label as" row.
+        """Read the applied labels from the Actions step's "Label as" row.
 
-        The only DOM-reading code for labels; adjust here after a live check.
-        UNVERIFIED against the live ProtonMail UI. Assumed shape:
+        The only DOM-reading code for labels. Shape captured from the live
+        UI on 2026-09-30 (Add/Edit filter wizard, Actions step):
 
             <div data-testid="filter-modal:label-row">
-              ...optional heading text such as "Label as"...
-              <!-- selected labels as chips, one per label: -->
-              <li class="label-stack-item"><span class="label-stack-item-text">Work</span></li>
-              <!-- and/or a dropdown button naming the selection: -->
-              <button class="select" aria-label="Work, Personal">Work, Personal</button>
+              <button type="button">...<span>Label as</span></button>   <- collapse toggle
+              <div class="w-full"><div class="w-full">
+                <div class="mb-2 inline-block text-ellipsis">
+                  <label class="checkbox-container ..." title="NAME">
+                    <input type="checkbox" class="checkbox-input">
+                    ...<ul class="label-stack"><li class="label-stack-item">
+                         <span class="label-stack-item-text">NAME</span></li></ul>
+                  </label>
+                </div>
+                ... one per label that EXISTS on the account ...
+              </div>
+              <button type="button">Create label</button></div>
             </div>
 
-        Chips are read from FILTER_LABEL_CHIPS (their title attribute, else
-        their text). With no chips, the first button matched by
-        FILTER_LABEL_BUTTONS is read (aria-label, else text) and split on
-        commas. "Do not label" and similar placeholders mean no label.
-        The row's full visible text is passed along so _parse_label_row can
-        flag anything it could not account for.
+        Every account label is listed, each with a chip, so chips say
+        nothing about what is applied. Applied = options whose checkbox
+        has the live `checked` PROPERTY set (the HTML attribute never
+        changes). Name = the <label>'s title, else its chip text.
         """
-        chip_texts = []
-        for chip in await label_row.query_selector_all(selectors.FILTER_LABEL_CHIPS):
-            text = await chip.get_attribute("title") or await chip.inner_text()
-            chip_texts.append(text)
+        options = []
+        option_elements = await label_row.query_selector_all(selectors.FILTER_LABEL_OPTION)
+        for option in option_elements:
+            name = await option.get_attribute("title")
+            if not name:
+                chip = await option.query_selector(selectors.FILTER_LABEL_OPTION_TEXT)
+                name = await chip.inner_text() if chip else ""
+            checkbox = await option.query_selector('input[type="checkbox"]')
+            if not checkbox:
+                return [], f"label option {name!r} has no checkbox"
+            options.append((name, await checkbox.evaluate(CHECKED_JS)))
 
-        button = None
-        button_label = ""
-        button_text = ""
-        for button_selector in selectors.FILTER_LABEL_BUTTONS:
-            button = await label_row.query_selector(button_selector)
-            if button:
-                button_label = await button.get_attribute("aria-label") or ""
-                button_text = await button.inner_text()
-                break
+        # A checkbox outside the known option shape could be a selected
+        # label we would otherwise never see.
+        all_checkboxes = await label_row.query_selector_all('input[type="checkbox"]')
+        if len(all_checkboxes) != len(option_elements):
+            return [], (
+                f"label row has {len(all_checkboxes)} checkboxes but "
+                f"{len(option_elements)} label options"
+            )
 
         row_text = await label_row.inner_text()
-        if not chip_texts and button is None:
-            # The row must offer some way to pick labels; with neither chips
-            # nor a button this is a layout the reader does not know.
-            return [], "label row has no label chips and no dropdown button"
-        return _parse_label_row(chip_texts, button_label, button_text, row_text)
+        return _parse_label_row(options, row_text)
 
     async def _build_folder_path_map(self, folder_btn, page: Page = None):
         """Build a map from dropdown display text to full folder path.
@@ -726,7 +748,9 @@ class ProtonMailScraper(ProtonMailBrowser):
                 self._folder_path_map[text] = full_path
                 self._folder_path_map[clean] = full_path
 
-            # Close the dropdown by pressing Escape
+            # Close the dropdown by pressing Escape. In the live UI this
+            # closes the whole filter wizard too, so callers must read
+            # everything else in the step first (see _scrape_actions).
             await page.keyboard.press("Escape")
             await page.wait_for_timeout(DROPDOWN_MS)
 

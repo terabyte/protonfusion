@@ -55,12 +55,16 @@ FILTER_ACTION_MARK_AS_ROW = '[data-testid="filter-modal:mark-as-row"]'
 # Every action row, used to spot rows the scraper does not understand
 FILTER_ACTION_ANY_ROW = '[data-testid^="filter-modal:"][data-testid$="-row"]'
 
-# "Label as" row internals. UNVERIFIED against the live UI: these are the
-# shapes ProtonFusion's label reader assumes (see
-# ProtonMailScraper._read_label_row). Selected labels are read from chips
-# first, then from the dropdown button's aria-label/text.
-FILTER_LABEL_CHIPS = '.label-stack-item-text, .label-stack-item [title]'
-FILTER_LABEL_BUTTONS = ['button.select', 'button[aria-haspopup]', 'button']
+FILTER_ACTION_AUTO_REPLY_ROW = '[data-testid="filter-modal:auto-reply-row"]'
+
+# "Label as" row internals, from the live UI (2026-09-30). The row lists
+# every account label as one of these options; applied = checkbox ticked.
+FILTER_LABEL_OPTION = 'label.checkbox-container'
+FILTER_LABEL_OPTION_TEXT = '.label-stack-item-text'
+
+# Folder dropdown inside the folder row (id="move-to-select" in the live
+# UI). The row's first button is a collapse toggle, not this.
+FOLDER_SELECT_BUTTON = 'button.select'
 
 # Sieve editor modal - opened by "Add sieve filter" button or editing an existing sieve filter
 ADD_SIEVE_FILTER_BUTTON = 'button:has-text("Add sieve filter")'

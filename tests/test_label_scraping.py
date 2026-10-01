@@ -1,10 +1,10 @@
 """Integration tests for reading "Label as" actions from the mock filters page.
 
 These launch a real Chromium browser via Playwright against the synthetic
-fixture in tests/fixtures/mock_filters_page.html. The fixture's label row is
-a guess at the live DOM (see ProtonMailScraper._read_label_row), so these
-tests prove the reader handles the shapes it claims to, not that the live
-ProtonMail UI looks like this.
+fixture in tests/fixtures/mock_filters_page.html, whose Actions step copies
+the label row captured from the live UI on 2026-09-30: every account label
+is a checkbox (with a label chip) and the applied ones are ticked through
+the `checked` property only.
 """
 
 from pathlib import Path
@@ -37,13 +37,21 @@ def _labels(filter_data: dict) -> list:
 
 
 @pytest.mark.asyncio
-async def test_label_shapes():
-    """Chips, comma-separated button label, and "Do not label" all read correctly."""
+async def test_only_ticked_labels_read():
+    """Only ticked label checkboxes count; the unticked account labels do not."""
     filters = await _scrape_mock()
 
-    assert _labels(filters["Work Emails"]) == ["Work"]  # one chip
-    assert _labels(filters["Finance Reports"]) == ["Finance", "Taxes"]  # button aria-label
-    assert _labels(filters["Newsletter Trash"]) == []  # "Do not label"
+    assert _labels(filters["Work Emails"]) == ["Work"]
+    assert _labels(filters["Finance Reports"]) == ["Finance", "Taxes"]
+    assert _labels(filters["VIP Senders"]) == []  # every label listed, none ticked
+
+    # The first filter with a folder is where the folder map gets built
+    # (which presses Escape and closes the wizard); its label and the
+    # rest of its Actions step must still be read.
+    newsletter = filters["Newsletter Trash"]
+    assert _labels(newsletter) == ["pf-test-label"]
+    assert any(a["type"] == "delete" for a in newsletter["actions"])
+    assert newsletter["scrape_issues"] == []
 
     # A filter that moves, labels twice, marks read and stars keeps every action.
     multi = filters["Multi-tag Filter"]
@@ -67,5 +75,6 @@ async def test_default_filters_complete_with_evidence():
     # The raw text holds what the parser reads, and form state innerText omits.
     finance = filters["Finance Reports"]["raw"]
     assert "finance@company.com" in finance["conditions_text"]
-    assert "Finance, Taxes" in finance["actions_text"]
+    assert "[checkbox] Finance: checked" in finance["actions_text"]
+    assert "[checkbox] Work: unchecked" in finance["actions_text"]
     assert "[checkbox] Starred: checked" in finance["actions_text"]

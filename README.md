@@ -59,8 +59,8 @@ python -m src.main backup
 
 Each backup creates a snapshot at `snapshots/<timestamp>/backup.json`.
 
-If any filter could not be fully read (an action row ProtonFusion does not
-understand, a label row it cannot parse, an unknown condition operator),
+If any filter could not be fully read (an action it cannot express such as
+auto-reply, a row it cannot parse, an unknown condition operator),
 `backup` lists each one with the reason and exits with status 1 without
 saving. Pass `--allow-incomplete` to save anyway; those filters are flagged in
 `backup.json` and `cleanup` will not delete them.
