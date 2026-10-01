@@ -4,7 +4,7 @@ ProtonFusion has two testing layers: a comprehensive unit test suite that runs o
 
 ## Unit Tests
 
-307 tests across 8 test files, plus a shared `conftest.py` with 23 fixtures.
+The suite runs offline (fake browsers, plus headless Chromium against local mock pages for the integration tests) and finishes in a minute or two. Run `python -m pytest -q` for the current count; it is not recorded here because it goes stale with every PR.
 
 ### Running
 
@@ -42,6 +42,9 @@ python -m pytest tests/test_sieve_generator.py::test_generate_basic_rule -v
 | `test_label_scraping.py` | Integration: ticked-checkbox label reading (live DOM shape) and raw evidence against the mock page |
 | `test_scrape_completeness.py` | Integration: filters the scraper cannot fully read are flagged (mock page `?set=edge`) |
 | `test_cli_safety.py` | `backup` refusing incomplete scrapes and `cleanup` refusing unverified deletions (fake browser) |
+| `test_delete_filter.py` | `delete_filter` only ever deletes a single, disabled row in the Custom filters section (fake page) |
+| `test_private_files.py` | `write_private_file`: owner-only, atomic, never follows a planted temp path |
+| `test_step_text.py` | Integration: raw step evidence comes only from the wizard modal, never the whole page |
 
 ### Key Fixtures (`conftest.py`)
 
