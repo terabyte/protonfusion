@@ -14,7 +14,7 @@ from typing import Dict, Iterable, List, Tuple
 from src.consolidator.carry_forward import filter_facts
 from src.generator.sieve_rules import Fact, compare_sections, current_forms
 from src.models.backup_models import Backup
-from src.models.filter_models import ProtonMailFilter, FilterStatus
+from src.models.filter_models import ProtonMailFilter, FilterStatus, legacy_identity
 from src.scraper.protonmail_sync import ProtonMailSync
 from src.utils.config import loggable_text
 
@@ -36,7 +36,9 @@ def _identity(f: ProtonMailFilter) -> Tuple[str, str]:
     """
     if f.is_sieve:
         return ("sieve", f.name)
-    return ("content", f.content_hash)
+    # legacy_identity, not content_hash: a backup from before a format fix
+    # (", "-joined chips, unescaped "/") must still match its live filter.
+    return ("content", legacy_identity(f))
 
 
 def _by_identity(filters: List[ProtonMailFilter]) -> Dict[Tuple[str, str], List[ProtonMailFilter]]:

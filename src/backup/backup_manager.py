@@ -38,6 +38,16 @@ def _version_tuple(version: str) -> Tuple[int, ...]:
         return (0,)
 
 
+def format_predates_strict_parser(version: Optional[str]) -> bool:
+    """True if data in backup format `version` may come from the old, misreading parser.
+
+    None (format not recorded) counts as old: nothing shows it is not.
+    """
+    if version is None:
+        return True
+    return _version_tuple(version) < _version_tuple(STRICT_PARSER_FORMAT_VERSION)
+
+
 def predates_strict_parser(backup: Backup) -> bool:
     """True if the backup was written before the parser matched values exactly.
 
@@ -45,18 +55,63 @@ def predates_strict_parser(backup: Backup) -> bool:
     STRICT_PARSER_FORMAT_VERSION), so building a script from it can widen
     or invert rules.
     """
-    return _version_tuple(backup.version) < _version_tuple(STRICT_PARSER_FORMAT_VERSION)
+    return format_predates_strict_parser(backup.version)
+
+
+def unverified_old_entries(entries: List[ArchiveEntry], backup: Backup) -> List[ArchiveEntry]:
+    """The archive entries that may hold a misread rule, so must not feed a script.
+
+    An entry predates the strict parser when its source_format does (or is
+    unrecorded). It is still trusted when `backup` is itself strict and
+    holds a filter with the same content_hash: the fresh, strict scrape
+    read exactly the same rule, so it was not misread. archive.json is
+    carried from snapshot to snapshot, so without this check a misread
+    filter archived from an old backup would outlive the re-backup that
+    the old-snapshot warning asks for.
+    """
+    strict_hashes = set()
+    if not predates_strict_parser(backup):
+        strict_hashes = {f.content_hash for f in backup.filters}
+    return [
+        e for e in entries
+        if format_predates_strict_parser(e.source_format) and e.filter.content_hash not in strict_hashes
+    ]
+
+
+def _checksum_of(filter_data: list, sieve_script: str) -> str:
+    """SHA-256 over already-serialized filters and the Sieve script."""
+    checksum_data = {"filters": filter_data, "sieve_script": sieve_script}
+    checksum_json = json.dumps(checksum_data, sort_keys=True, default=str)
+    return "sha256:" + hashlib.sha256(checksum_json.encode()).hexdigest()
 
 
 def compute_checksum(filters: List[ProtonMailFilter], sieve_script: str, version: str) -> str:
-    """SHA-256 over the filters and Sieve script, in the layout of `version`."""
+    """SHA-256 over the filters and Sieve script, in the layout of `version`.
+
+    What `create_backup` stores. Verifying a stored backup uses
+    compute_stored_checksum instead, over the JSON as written.
+    """
     exclude = FIELDS_ADDED_AFTER.get(version)
-    checksum_data = {
-        "filters": [f.model_dump(exclude=exclude) for f in filters],
-        "sieve_script": sieve_script,
-    }
-    checksum_json = json.dumps(checksum_data, sort_keys=True, default=str)
-    return "sha256:" + hashlib.sha256(checksum_json.encode()).hexdigest()
+    return _checksum_of([f.model_dump(exclude=exclude) for f in filters], sieve_script)
+
+
+def compute_stored_checksum(data: dict) -> str:
+    """The checksum of a backup.json as loaded, before any model migration.
+
+    Reading a filter into the model rewrites what older versions wrote
+    (action "delete" becomes "trash", folder "Spam" becomes "spam", an
+    empty-value condition is quarantined), so a checksum over the model
+    would refuse every unmodified old backup holding such a filter. The
+    JSON as written is exactly what the checksum covered, minus the fields
+    its format lacked (FIELDS_ADDED_AFTER).
+    """
+    version = data.get("version", Backup.model_fields["version"].default)
+    exclude = FIELDS_ADDED_AFTER.get(version) or set()
+    filter_data = [
+        {key: value for key, value in f.items() if key not in exclude} if isinstance(f, dict) else f
+        for f in data.get("filters", [])
+    ]
+    return _checksum_of(filter_data, data.get("sieve_script", ""))
 
 
 class BackupIntegrityError(Exception):
@@ -218,8 +273,11 @@ class BackupManager:
         with open(filepath, "r") as f:
             data = json.load(f)
 
+        # Verified against the JSON as written, before the model migrates
+        # anything (see compute_stored_checksum)
+        stored_ok = self.verify_stored(data)
         backup = Backup.model_validate(data)
-        if not self.verify_backup(backup):
+        if not stored_ok:
             if ignore_checksum is None:
                 ignore_checksum = self.ignore_checksum
             problem = "has no checksum" if not backup.checksum else "does not match its checksum"
@@ -263,8 +321,25 @@ class BackupManager:
 
         return backups
 
+    def verify_stored(self, data: dict) -> bool:
+        """Verify a backup.json's checksum against its JSON as loaded (what load_backup uses)."""
+        checksum = data.get("checksum") if isinstance(data, dict) else None
+        if not checksum:
+            logger.warning("Backup has no checksum")
+            return False
+        computed = compute_stored_checksum(data)
+        if computed != checksum:
+            logger.error("Checksum mismatch! Expected %s, got %s", checksum, computed)
+            return False
+        return True
+
     def verify_backup(self, backup: Backup) -> bool:
-        """Verify backup integrity using checksum."""
+        """Verify an in-memory backup's checksum against its model.
+
+        For a backup this version wrote. One loaded from an older format
+        may have been migrated on load; load_backup verifies the stored
+        JSON instead (verify_stored).
+        """
         if not backup.checksum:
             logger.warning("Backup has no checksum")
             return False

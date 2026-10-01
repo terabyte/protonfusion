@@ -1,8 +1,8 @@
 from datetime import datetime
 from typing import List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from src.models.filter_models import ProtonMailFilter
+from src.models.filter_models import ProtonMailFilter, split_legacy_carried_values
 
 
 class BackupMetadata(BaseModel):
@@ -45,6 +45,27 @@ class ArchiveEntry(BaseModel):
     filter: ProtonMailFilter
     archived_at: str = ""
     source_snapshot: str = ""
+    # The backup format whose reader produced `filter`: the source backup's
+    # version for a scraped filter, BACKUP_FORMAT_VERSION for one rebuilt
+    # from Sieve (carry-forward) or scraped live (cleanup). None means
+    # unknown: an entry written before this field existed, which is
+    # treated as predating the strict parser (see
+    # backup_manager.entry_predates_strict_parser).
+    source_format: Optional[str] = None
+
+    @model_validator(mode='before')
+    @classmethod
+    def split_legacy_carried(cls, data):
+        """Read an unstamped carried-forward filter's "|"-joined value as a list.
+
+        An entry without source_format was written before carry-forward
+        built values lists, when it stored several keys "|"-joined (see
+        split_legacy_carried_values). A stamped entry's values are taken
+        as stored: today a single carried key may contain "|".
+        """
+        if isinstance(data, dict) and data.get("source_format") is None and isinstance(data.get("filter"), dict):
+            data = dict(data, filter=split_legacy_carried_values(data["filter"]))
+        return data
 
 
 class Archive(BaseModel):

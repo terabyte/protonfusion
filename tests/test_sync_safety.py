@@ -601,6 +601,7 @@ class TestSyncRefusesIncompleteSources:
         manager.write_archive(snapshot_dir, [ArchiveEntry(
             filter=partial.model_copy(update={"scrape_issues": [self.ISSUE], "enabled": False}),
             archived_at="2026-01-01T00:00:00+00:00", source_snapshot=snapshot_dir.name,
+            source_format="1.3",
         )])
         FakeScraper.filters = [good]
         path = tmp_path / "s.sieve"
@@ -1090,3 +1091,86 @@ class TestSyncDisablesOnlyReplacedFilters:
         assert "Would disable 1 UI filters" in result.output
         assert "2 created or changed after backup 'latest' would be left enabled" in result.output
         assert fake_sync.calls == []
+
+
+def test_misread_rule_from_old_snapshot_does_not_survive_rebackup(cli_snapshots_dir, fake_sync):
+    """V1: consolidating an old (pre-1.3) backup must not archive its possibly
+    misread filters, or the fresh backup the old-snapshot warning asks for
+    carries them forward and sync uploads the misread rule.
+
+    The old scraper read "Subject does not contain 'receipt' -> Trash" as
+    "contains", stored complete with evidence.
+    """
+    import json
+    from src.backup.backup_manager import compute_checksum
+    misread = ProtonMailFilter(
+        name="Trash non-receipts from shop", logic="and",
+        conditions=[{"type": "subject", "operator": "contains", "value": "receipt"}],
+        actions=[{"type": "trash"}], raw={"conditions_text": "does not contain receipt", "actions_text": "Trash"})
+    old_dir = cli_snapshots_dir / "2026-09-01_00-00-00"
+    old_dir.mkdir()
+    (old_dir / "backup.json").write_text(json.dumps({
+        "version": "1.2", "timestamp": "2026-09-01T00:00:00", "metadata": {"filter_count": 1},
+        "filters": [misread.model_dump(mode="json")], "sieve_script": "",
+        "checksum": compute_checksum([misread], "", "1.2"),
+    }))
+    (cli_snapshots_dir / "latest").symlink_to(old_dir.name)
+
+    result = runner.invoke(app, ["consolidate"])
+    assert "Old Snapshot" in result.output
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 1 and "--allow-old-snapshot" in result.output
+
+    # The user follows the advice: backup again. The strict scraper flags the operator.
+    correct = ProtonMailFilter(
+        name="Trash non-receipts from shop", logic="and", conditions=[],
+        actions=[{"type": "trash"}], raw={"conditions_text": "does not contain receipt", "actions_text": "Trash"},
+        scrape_issues=["condition 1: unknown operator 'does not contain'"])
+    BackupManager(cli_snapshots_dir).create_backup([correct])
+    result = runner.invoke(app, ["consolidate"])
+    assert result.exit_code == 0, result.output
+    script = (cli_snapshots_dir / "latest" / "consolidated.sieve").read_text()
+    assert '"receipt"' not in script
+    FakeScraper.filters = [correct]
+    result = runner.invoke(app, ["sync"])
+    uploads = [c[1] for c in FakeSync.calls if c[0] == "upload"]
+    assert not any('"receipt"' in u for u in uploads), result.output
+
+
+class TestLeftOutIncompleteFilterDoesNotBlockSync:
+    """V6: an incomplete filter consolidate left out of the script does not block
+    sync because what was read of it equals a complete filter's rule."""
+
+    @pytest.fixture
+    def account(self, cli_snapshots_dir, fake_sync):
+        complete = _filter("a@x.com", folder="News")
+        half_read = ProtonMailFilter(**{
+            **complete.model_dump(), "name": "News from a, no receipts",
+            "scrape_issues": ["condition 2: unknown operator 'does not contain'"],
+        })
+        BackupManager(cli_snapshots_dir).create_backup([complete, half_read])
+        FakeScraper.filters = [complete, half_read]
+        return cli_snapshots_dir
+
+    def test_sync_proceeds_with_manifest(self, account, fake_sync):
+        result = runner.invoke(app, ["consolidate"])
+        assert "Left out of the script: 1" in result.output
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 0, result.output
+        assert "not fully read when backed up" not in result.output
+        assert any(c[0] == "upload" for c in fake_sync.calls)
+        # Left enabled, as consolidate said
+        assert ("disable", "News from a, no receipts") not in fake_sync.calls
+
+    def test_sync_proceeds_without_manifest(self, account, fake_sync, tmp_path):
+        path = tmp_path / "s.sieve"
+        path.write_text(_section_for([_filter("a@x.com", folder="News")]))
+        result = runner.invoke(app, ["sync", "--sieve", str(path)])
+        assert result.exit_code == 0, result.output
+
+    def test_sync_still_refuses_when_included(self, account, fake_sync):
+        assert runner.invoke(app, ["consolidate", "--allow-incomplete"]).exit_code == 0
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        assert "not fully read when backed up" in result.output
+        assert "- News from a, no receipts" in result.output

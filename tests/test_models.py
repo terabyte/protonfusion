@@ -743,13 +743,28 @@ class TestMultiValueConditions:
         assert again.conditions[0].values == ["a", "b"]
         assert again.content_hash == f.content_hash
 
+    OLD_CARRIED = {
+        "name": "Carried forward (2026-01-01): sender is -> discard;",
+        "conditions": [{"type": "sender", "operator": "is", "value": "a|b"}],
+        "actions": [{"type": "delete"}],
+    }
+
     def test_old_carried_filter_pipe_value_becomes_list(self):
-        f = ProtonMailFilter.model_validate({
-            "name": "Carried forward (2026-01-01): sender is -> discard;",
-            "conditions": [{"type": "sender", "operator": "is", "value": "a|b"}],
-            "actions": [{"type": "delete"}],
-        })
-        assert f.conditions[0].values == ["a", "b"]
+        """An archive entry written before source_format existed (V4)."""
+        from src.models.backup_models import ArchiveEntry
+        entry = ArchiveEntry.model_validate({"filter": self.OLD_CARRIED})
+        assert entry.filter.conditions[0].values == ["a", "b"]
+
+    def test_stamped_carried_filter_pipe_value_is_literal(self):
+        """V4: carry-forward today can store one key containing "|"."""
+        from src.models.backup_models import ArchiveEntry, BACKUP_FORMAT_VERSION
+        entry = ArchiveEntry.model_validate({"filter": self.OLD_CARRIED, "source_format": BACKUP_FORMAT_VERSION})
+        assert entry.filter.conditions[0].keys == ["a|b"]
+
+    def test_carried_name_outside_archive_is_literal(self):
+        """V4: the legacy split never applies to a filter read on its own (scraped data)."""
+        f = ProtonMailFilter.model_validate(self.OLD_CARRIED)
+        assert f.conditions[0].keys == ["a|b"]
 
     def test_pipe_in_ordinary_filter_is_literal(self):
         f = ProtonMailFilter.model_validate({

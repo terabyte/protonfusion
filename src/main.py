@@ -23,13 +23,14 @@ from src.utils.config import (
     load_credentials, loggable_text, SNAPSHOTS_DIR, TOOL_VERSION,
 )
 from src.models.filter_models import ProtonMailFilter, FilterStatus
-from src.models.backup_models import Backup, ArchiveEntry
+from src.models.backup_models import Backup, ArchiveEntry, BACKUP_FORMAT_VERSION
 from src.backup.backup_manager import (
     BackupManager, BackupIntegrityError, predates_strict_parser, unverified_for_deletion,
+    unverified_old_entries,
 )
 from src.backup.diff_engine import DiffEngine
 from src.backup.sync_plan import (
-    DisablePlan, carried_hashes, check_disable_candidates, incomplete_in_script,
+    DisablePlan, carried_hashes, check_disable_candidates, incomplete_in_script, old_entries_in_script,
     incompleteness_reasons, plan_disable,
 )
 from src.utils.private_files import write_private_file
@@ -99,6 +100,15 @@ def _without_evidence(filters: List[ProtonMailFilter]) -> List[ProtonMailFilter]
     return [f for f in filters if f.raw is None and not is_carried(f)]
 
 
+# What an old (pre-1.3) backup may hold. Format 1.2 was also written by
+# builds that already parsed strictly, and the file cannot say which build
+# wrote it, so this says "may", never that the backup was misread.
+MISREAD_OPERATORS_NOTE = (
+    '  "is not" stored as "is", "does not contain" as "contains", and "begins with" '
+    'or "ends with" as "contains".\n'
+)
+
+
 def _warn_if_old_snapshot(bkup: Backup, backup_id: str) -> bool:
     """Print a prominent warning if the backup predates the strict parser.
 
@@ -108,16 +118,46 @@ def _warn_if_old_snapshot(bkup: Backup, backup_id: str) -> bool:
     if not predates_strict_parser(bkup):
         return False
     console.print(Panel(
-        f"[bold red]Backup '{escape(backup_id)}' is format {escape(bkup.version)}, written by an older "
-        "ProtonFusion that misread some operators:[/]\n"
-        '  "is not" was stored as "is", "does not contain" as "contains", and "begins with" '
-        'or "ends with" as "contains".\n'
+        f"[bold red]Backup '{escape(backup_id)}' is format {escape(bkup.version)}, older than 1.3. "
+        "It may have been written by a ProtonFusion that misread some operators:[/]\n"
+        + MISREAD_OPERATORS_NOTE +
         "A script built from it can match different (often more) mail than your filters do, and "
-        "nothing in the file shows which conditions were misread.\n\n"
+        "nothing in the file shows whether or which conditions were misread.\n\n"
         "[bold]Run 'backup' again, then 'consolidate', before syncing.[/]",
         title="Old Snapshot", border_style="red",
     ))
     return True
+
+
+def _warn_old_archive_entries(entries: List[ArchiveEntry], left_out: bool) -> None:
+    """Print a prominent warning naming archive entries from pre-1.3 backups.
+
+    These are unverified_old_entries: archived from a backup older than
+    format 1.3 (or by a version that did not record the format), and not
+    confirmed by a filter with the same content in the current backup.
+    `left_out` says whether this consolidation left them out of the script
+    (consolidate) or the script holds them (sync).
+    """
+    if not entries:
+        return
+    names = "\n".join(f"  - {escape(e.filter.name)} (from snapshot {escape(e.source_snapshot or '?')})" for e in entries)
+    where = (
+        "They are left out of this script."
+        if left_out else
+        "This script holds their rules."
+    )
+    console.print(Panel(
+        f"[bold red]archive.json holds {len(entries)} archived filter(s) taken from a backup older than "
+        "format 1.3, or by a version that did not record the format. That backup may have been written "
+        "by a ProtonFusion that misread some operators:[/]\n"
+        + MISREAD_OPERATORS_NOTE +
+        f"{names}\n\n"
+        f"[bold]{where}[/] A filter still in your account comes back from a fresh 'backup': once the "
+        "current backup holds a filter with the same content, its archive copy is used again. A rule whose UI filter "
+        "is gone is still in the live ProtonFusion section: 'consolidate --keep-live-rules' keeps "
+        "it from there. 'snapshot remove <name>' drops an archive copy for good.",
+        title="Old Archive Entries", border_style="red",
+    ))
 
 
 def _get_credentials(credentials_file: str, manual_login: bool):
@@ -613,15 +653,27 @@ def consolidate(
         else:
             console.print(f"[yellow]No consolidation_args.json found in {include_args_from}")
 
-    # Load archive entries and separate by status
+    # Load archive entries and separate by status. Entries archived from a
+    # pre-1.3 backup may hold misread rules, like an old backup itself, so
+    # they are left out unless the current backup confirms them.
     archive_entries = manager.load_archive(snapshot_dir)
+    old_entries = unverified_old_entries(archive_entries, bkup)
+    old_entry_ids = {id(e) for e in old_entries}
+    _warn_old_archive_entries(
+        [e for e in old_entries if e.filter.status == FilterStatus.ARCHIVED], left_out=True,
+    )
     archived_filters = [
         e.filter for e in archive_entries
-        if e.filter.status == FilterStatus.ARCHIVED
+        if e.filter.status == FilterStatus.ARCHIVED and id(e) not in old_entry_ids
     ]
 
-    # Apply archive status overrides to backup filters
-    archive_by_hash = {e.filter.content_hash: e for e in archive_entries}
+    # Apply archive status overrides to backup filters. A left-out old
+    # ARCHIVED entry does not override: that would drop the backup filter
+    # without the archive copy taking its place.
+    archive_by_hash = {
+        e.filter.content_hash: e for e in archive_entries
+        if not (id(e) in old_entry_ids and e.filter.status == FilterStatus.ARCHIVED)
+    }
     backup_filters = []
     for f in bkup.filters:
         if f.content_hash in archive_by_hash:
@@ -699,13 +751,21 @@ def consolidate(
             carried, unconvertible = facts_to_filters(
                 to_carry, label=snapshot_dir.name, label_names=known_labels,
             )
-            known_hashes = {e.filter.content_hash for e in archive_entries}
+            # A left-out old entry does not count as known: the carried copy,
+            # rebuilt from the live script, replaces it.
+            known_hashes = {e.filter.content_hash for e in archive_entries if id(e) not in old_entry_ids}
             now_ts = datetime.now(timezone.utc).isoformat()
             for f in carried:
                 if f.content_hash in known_hashes:
                     continue
+                archive_entries = [
+                    e for e in archive_entries
+                    if not (id(e) in old_entry_ids and e.filter.content_hash == f.content_hash)
+                ]
+                # Rebuilt from Sieve by this version, not by an old parser
                 archive_entries.append(ArchiveEntry(
                     filter=f, archived_at=now_ts, source_snapshot=snapshot_dir.name,
+                    source_format=BACKUP_FORMAT_VERSION,
                 ))
                 archived_filters.append(f)
                 carried_count += 1
@@ -802,10 +862,14 @@ def consolidate(
     console.print(f"[cyan]Manifest written to snapshot ({len(processed_filters)} filters)")
 
     # Post-consolidation archiving: move included backup filters to archive
-    # (once per hash: identical duplicates in the backup are one rule)
+    # (once per hash: identical duplicates in the backup are one rule).
+    # Nothing from a pre-1.3 backup is archived: archive.json outlives the
+    # snapshot, so a misread rule archived now would come back after the
+    # fresh backup the old-snapshot warning asks for.
     now_ts = datetime.now(timezone.utc).isoformat()
     archived_hashes = {e.filter.content_hash for e in archive_entries}
-    for f in bkup.filters:
+    to_archive = [] if predates_strict_parser(bkup) else bkup.filters
+    for f in to_archive:
         if f.content_hash in in_script_hashes and f.content_hash not in archived_hashes:
             archived_hashes.add(f.content_hash)
             archived_f = f.model_copy(deep=True)
@@ -815,6 +879,7 @@ def consolidate(
                 filter=archived_f,
                 archived_at=now_ts,
                 source_snapshot=snapshot_dir.name,
+                source_format=bkup.version,
             ))
     manager.write_archive(snapshot_dir, archive_entries)
 
@@ -1227,8 +1292,8 @@ def _refuse_incomplete_sources(incomplete: List[ProtonMailFilter], allow_incompl
     if not incomplete:
         return
     console.print(
-        f"[bold red]This script holds rules from {len(incomplete)} filter(s) that were not read in "
-        "full; their rules may be wider or narrower than the real filters, or missing labels:"
+        f"[bold red]This script holds rules taken from {len(incomplete)} filter(s) not fully read when "
+        "backed up. Their rules may be wider or narrower than the real filters, or missing labels:"
     )
     for f in incomplete:
         console.print(f"  [red]- {escape(f.name)}")
@@ -1239,7 +1304,8 @@ def _refuse_incomplete_sources(incomplete: List[ProtonMailFilter], allow_incompl
         return
     console.print(
         "[bold red]Sync refused. No filters were disabled and nothing was uploaded.[/]\n"
-        "[yellow]Run 'backup' and 'consolidate' again, or pass --allow-incomplete."
+        "[yellow]Fix the cause and run 'backup' again, then 'consolidate' (which leaves such filters "
+        "out of the script), or pass --allow-incomplete."
     )
     raise typer.Exit(1)
 
@@ -1273,7 +1339,8 @@ def sync(
     ),
     allow_old_snapshot: bool = typer.Option(
         False, "--allow-old-snapshot",
-        help="Sync from a backup written before the strict parser (format < 1.3), which may hold misread operators",
+        help="Sync from a backup written before the strict parser (format < 1.3), or a script drawing on "
+             "archive entries taken from one; either may hold misread operators",
     ),
     workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
 ):
@@ -1292,9 +1359,12 @@ def sync(
     Also refuses if the script holds rules from filters in the backup or
     archive that were not read in full (scrape issues, or no raw evidence
     because they were backed up before format 1.1), unless --allow-incomplete
-    is given.
+    is given. A filter the manifest says consolidate left out is exempt, as
+    is one whose rules a fully read filter also generates.
     It also refuses a backup that predates the strict parser (format before
-    1.3, which may hold misread operators), unless --allow-old-snapshot is given.
+    1.3, which may hold misread operators), and a script holding rules from
+    archive entries taken from such a backup, unless --allow-old-snapshot
+    is given.
     """
     from src.scraper.protonmail_scraper import ProtonMailScraper
     from src.scraper.protonmail_sync import ProtonMailSync, normalize_script
@@ -1334,16 +1404,47 @@ def sync(
     # archive so a filter the script leaves out on purpose (deprecated) is
     # reported as such rather than as new since the backup.
     carried, from_manifest = carried_hashes(manifest, sieve_path, bkup.filters)
-    reference = list(bkup.filters) + [e.filter for e in manager.load_archive(snapshot_dir)]
+    archive_entries = manager.load_archive(snapshot_dir)
+    reference = list(bkup.filters) + [e.filter for e in archive_entries]
+
+    # Archive entries from a pre-1.3 backup may hold misread rules, the same
+    # hazard as an old backup, and archive.json survives a fresh backup.
+    # Refused the same way when the script draws on one.
+    old_entries = unverified_old_entries(archive_entries, bkup)
+    old_entry_filter_ids = {id(e.filter) for e in old_entries}
+    # Complete filters not from an old archive entry: a rule one of them
+    # generates is in the script on its account
+    trusted = [f for f in reference if id(f) not in old_entry_filter_ids and not incompleteness_reasons(f)]
+    script_facts_uploaded = _uploaded_facts(sieve_script)
+    # What a manifest describing this script says went into it, and which
+    # incomplete filters consolidate left out of it
+    in_script_hashes: set = set()
+    left_out_hashes: set = set()
+    if from_manifest:
+        in_script_hashes = set(manifest.get("filter_hashes", []))
+        in_script_hashes |= {d.get("content_hash") for d in manifest.get("incomplete_included", [])}
+        left_out_hashes = {d.get("content_hash") for d in manifest.get("incomplete_excluded", [])}
+    old_in_script = old_entries_in_script(old_entries, trusted, script_facts_uploaded, in_script_hashes)
+    if old_in_script:
+        _warn_old_archive_entries(old_in_script, left_out=False)
+        if allow_old_snapshot:
+            console.print("[yellow]--allow-old-snapshot given: proceeding anyway.")
+        else:
+            console.print(
+                "[bold red]Sync refused. No filters were disabled and nothing was uploaded.[/]\n"
+                "[yellow]Run 'backup' and 'consolidate' again, or pass --allow-old-snapshot."
+            )
+            raise typer.Exit(1)
 
     # A rule taken from a filter the scraper could not fully read (or one
     # backed up before format 1.1, which may be missing its labels) may be
     # wider or narrower than the real filter. Checked against the script
-    # itself, from the backup and archive, so it holds for any script.
+    # itself, from the backup and archive, so it holds for any script; a
+    # filter consolidate left out of this script (per its manifest) is
+    # exempt, so sync agrees with what consolidate reported.
     _refuse_incomplete_sources(
         incomplete_in_script(
-            reference, _uploaded_facts(sieve_script),
-            set(manifest.get("filter_hashes", [])) if from_manifest else set(),
+            reference, script_facts_uploaded, in_script_hashes, left_out_hashes, trusted=trusted,
         ),
         allow_incomplete,
     )
@@ -2364,8 +2465,10 @@ def _archive_before_deletion(
         archived_f = f.model_copy(deep=True)
         archived_f.status = status
         archived_f.enabled = False
+        # Scraped live by this version, so read by the strict parser
         archive_entries.append(ArchiveEntry(
             filter=archived_f, archived_at=now_ts, source_snapshot=latest_dir.name,
+            source_format=BACKUP_FORMAT_VERSION,
         ))
         added[status] += 1
     if any(added.values()):
@@ -2535,6 +2638,7 @@ def snapshot_set_status(
             filter=archived_filter,
             archived_at=datetime.now(timezone.utc).isoformat(),
             source_snapshot=snapshot_dir.name,
+            source_format=bkup.version,
         )
         archive_entries.append(entry)
         console.print(f"[green]Created archive entry '{name}' -> {status.value}")

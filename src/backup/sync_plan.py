@@ -20,6 +20,7 @@ from typing import AbstractSet, Iterable, List, Optional, Set
 
 from src.consolidator.carry_forward import filter_facts, is_carried
 from src.generator.sieve_rules import Fact
+from src.models.backup_models import ArchiveEntry
 from src.models.filter_models import ProtonMailFilter
 
 logger = logging.getLogger(__name__)
@@ -139,22 +140,99 @@ def incomplete_in_script(
     source_filters: Iterable[ProtonMailFilter],
     script_fact_set: AbstractSet[Fact],
     manifest_hashes: AbstractSet[str] = frozenset(),
+    excluded_hashes: AbstractSet[str] = frozenset(),
+    trusted: Optional[Iterable[ProtonMailFilter]] = None,
 ) -> List[ProtonMailFilter]:
-    """The incomplete filters (backup or archive) whose rule is in the script being uploaded.
+    """The incomplete filters (backup or archive) whose rule the script being uploaded draws on.
 
-    A filter's rule counts as in the script when its generated facts are,
-    or when a manifest that describes this script lists its content_hash
-    (which catches a rule the current generator would no longer produce).
+    `manifest_hashes` and `excluded_hashes` come from a manifest that
+    describes this script: the filters consolidate put in it (including
+    any it put in under --allow-incomplete), and the incomplete ones it
+    left out. A listed filter always counts, which catches a rule the
+    current generator would no longer produce. A left-out one never does:
+    consolidate did not use what was read of it, so a matching rule in the
+    script came from somewhere else. Any other incomplete filter counts
+    when taking it out would change the script's facts
+    (adds_rules_to_script): if a complete filter (`trusted`, by default the
+    complete filters among `source_filters`) generates the same rules,
+    the script holds them on that filter's account.
     Each filter is listed once, however many times it appears.
     """
+    source_filters = list(source_filters)
+    if trusted is None:
+        trusted = [f for f in source_filters if not incompleteness_reasons(f)]
+    justified = justified_facts(trusted, script_fact_set)
     found: List[ProtonMailFilter] = []
     seen: Set[str] = set()
     for f in source_filters:
         if f.content_hash in seen or not incompleteness_reasons(f):
             continue
-        if f.content_hash in manifest_hashes or rules_in_script(f, script_fact_set):
+        if f.content_hash in manifest_hashes:
+            in_script = True
+        elif f.content_hash in excluded_hashes:
+            in_script = False
+        else:
+            in_script = adds_rules_to_script(f, script_fact_set, justified)
+        if in_script:
             seen.add(f.content_hash)
             found.append(f)
+    return found
+
+
+def justified_facts(
+    trusted: Iterable[ProtonMailFilter], script_fact_set: AbstractSet[Fact],
+) -> Set[Fact]:
+    """The script facts that some trusted filter generates in full.
+
+    Such a fact is in the script on that filter's account, so it says
+    nothing about whether a suspect filter with the same rule was read
+    correctly: removing the suspect would leave the script unchanged.
+    """
+    facts: Set[Fact] = set()
+    for f in trusted:
+        if f.is_sieve or not rules_in_script(f, script_fact_set):
+            continue
+        facts |= filter_facts(f)
+    return facts
+
+
+def adds_rules_to_script(
+    f: ProtonMailFilter, script_fact_set: AbstractSet[Fact], justified: AbstractSet[Fact],
+) -> bool:
+    """True if `f`'s rules are in the script and at least one is there only through `f`.
+
+    That is, taking `f` out of the sources would change the script's
+    facts. A filter whose every rule a trusted filter also generates is
+    not counted, whatever was read of it.
+    """
+    if not rules_in_script(f, script_fact_set):
+        return False
+    return bool(filter_facts(f) - justified)
+
+
+def old_entries_in_script(
+    old_entries: Iterable[ArchiveEntry],
+    trusted: Iterable[ProtonMailFilter],
+    script_fact_set: AbstractSet[Fact],
+    manifest_hashes: AbstractSet[str] = frozenset(),
+) -> List[ArchiveEntry]:
+    """The unverified pre-1.3 archive entries (unverified_old_entries) the script draws on.
+
+    An entry counts when a manifest that describes this script lists its
+    content_hash, or when its rules are in the script and some are there
+    only through it (adds_rules_to_script against the `trusted` filters'
+    facts). Each content_hash is listed once.
+    """
+    justified = justified_facts(trusted, script_fact_set)
+    found: List[ArchiveEntry] = []
+    seen: Set[str] = set()
+    for e in old_entries:
+        f = e.filter
+        if f.content_hash in seen or f.is_sieve:
+            continue
+        if f.content_hash in manifest_hashes or adds_rules_to_script(f, script_fact_set, justified):
+            seen.add(f.content_hash)
+            found.append(e)
     return found
 
 

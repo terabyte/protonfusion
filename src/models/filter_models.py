@@ -267,10 +267,15 @@ def split_legacy_carried_values(data: dict) -> dict:
     """Turn an older carried-forward filter's "a|b|c" value into a values list.
 
     Before conditions had a values list, carry-forward stored several keys
-    as one "|"-joined value and the generator split it again. Only a
-    carried filter's value is read this way: carry-forward never produced a
-    key containing "|", so there the "|" is always the join. Any other
-    value is a literal.
+    as one "|"-joined value, and that version's generator split every
+    value on "|" again. So in a filter it stored, "|" always acted as the
+    join, and reading it as a list reproduces the rule it generated.
+
+    Only for archive entries written before carry-forward built values
+    lists, i.e. without a source_format (see ArchiveEntry): carry-forward
+    now can store a single key containing "|", which must stay one
+    literal. Never applied to scraped data. Any non-carried value is a
+    literal.
     """
     if not str(data.get("name", "")).startswith(CARRIED_PREFIX):
         return data
@@ -327,7 +332,7 @@ class ProtonMailFilter(BaseModel):
         """
         if not isinstance(data, dict):
             return data
-        data = split_legacy_carried_values(dict(data))
+        data = dict(data)
         issues = []
         for key, kind, enum_fields in (
             ("conditions", "condition", _CONDITION_ENUM_FIELDS),
@@ -415,6 +420,53 @@ class ProtonMailFilter(BaseModel):
             parts.append(f"sieve={self.raw.sieve_text if self.raw else ''}")
         raw = "\n".join(parts)
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+# The separator older scrapers joined a condition's value chips with.
+LEGACY_CHIP_SEPARATOR = ", "
+
+# Action parameters holding a folder or label path, whose "/" inside a
+# name older scrapers did not escape.
+FOLDER_PATH_PARAMETERS = ("folder", "label")
+
+
+def legacy_identity(f: ProtonMailFilter) -> str:
+    """A content identity that reads older backups' encodings as the scraper writes them now.
+
+    content_hash changes when the stored form of the same filter changes,
+    so a backup written before a format fix no longer matches the live
+    scrape of the unchanged filter. This normalises both sides the same
+    way before hashing:
+
+    - a single value is split on ", " (older scrapers joined the wizard's
+      value chips that way; now each chip is an entry of `values`);
+    - a backslash-escaped "/" in a folder or label path is read as "/" (older scrapers did
+      not escape a "/" inside a name, see escape_folder_segment);
+    - action types and system-folder targets older versions wrote are
+      mapped to their current form (migrate_legacy_action).
+
+    Only for matching a backed-up filter to its live row (restore). It is
+    coarser than content_hash: a literal containing ", " and the same
+    words as separate chips share an identity, so a caller pairing
+    several filters with one identity must treat that as ambiguous.
+    """
+    parts = [f"name={f.name}", f"logic={f.logic.value}"]
+    for c in f.conditions:
+        if c.values:
+            keys = list(c.values)
+        else:
+            keys = c.value.split(LEGACY_CHIP_SEPARATOR)
+        parts.append(f"cond:{c.type.value}|{c.operator.value}|{json.dumps(keys)}")
+    for a in f.actions:
+        action = migrate_legacy_action(a.model_dump(mode="json"))
+        params = dict(action.get("parameters") or {})
+        for key in FOLDER_PATH_PARAMETERS:
+            if isinstance(params.get(key), str):
+                params[key] = params[key].replace("\\/", "/")
+        parts.append(f"act:{action['type']}|{json.dumps(params, sort_keys=True, default=str)}")
+    if f.is_sieve:
+        parts.append(f"sieve={f.raw.sieve_text if f.raw else ''}")
+    return "legacy:" + hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
 
 
 class ConditionGroup(BaseModel):
