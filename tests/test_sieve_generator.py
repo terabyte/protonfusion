@@ -820,3 +820,72 @@ class TestMergeWithExisting:
 
         assert result2.count(SECTION_BEGIN) == 1
         assert result2.count(SECTION_END) == 1
+
+    def test_user_rule_above_section_stays_above(self):
+        """A user exception with `stop;` above the section must keep running first."""
+        generated = self._make_generated()
+        existing = (
+            'require ["fileinto"];\n'
+            "\n"
+            "# Never filter mail from my boss\n"
+            'if address :is "From" "boss@example.com" {\n'
+            "    keep;\n"
+            "    stop;\n"
+            "}\n"
+            "\n"
+            f"{SECTION_BEGIN}\n"
+            'if address :contains "From" "old@example.com" {\n'
+            "    discard;\n"
+            "}\n"
+            f"{SECTION_END}\n"
+        )
+        result = SieveGenerator.merge_with_existing(generated, existing)
+
+        stop_pos = result.index("stop;")
+        begin_pos = result.index(SECTION_BEGIN)
+        assert stop_pos < begin_pos
+        # Nothing but whitespace after the section
+        assert result.split(SECTION_END)[1].strip() == ""
+        # The require line is still the first line, and there is only one
+        assert result.startswith('require ["fileinto"];')
+        assert result.count("require [") == 1
+
+    def test_user_rules_before_and_after_keep_their_sides(self):
+        generated = self._make_generated()
+        existing = (
+            'require ["imap4flags"];\n'
+            "\n"
+            'if header :contains "Subject" "BEFORE-RULE" { keep; stop; }\n'
+            "\n"
+            f"{SECTION_BEGIN}\n"
+            "# old\n"
+            f"{SECTION_END}\n"
+            "\n"
+            'require ["vacation"];\n'
+            'if header :contains "Subject" "AFTER-RULE" { addflag "\\\\Seen"; }\n'
+        )
+        result = SieveGenerator.merge_with_existing(generated, existing)
+
+        before_pos = result.index("BEFORE-RULE")
+        begin_pos = result.index(SECTION_BEGIN)
+        end_pos = result.index(SECTION_END)
+        after_pos = result.index("AFTER-RULE")
+        assert before_pos < begin_pos < end_pos < after_pos
+
+        # Requires from both sides and the generated script merged at the top
+        first_line = result.split("\n")[0]
+        assert first_line == 'require ["fileinto", "imap4flags", "vacation"];'
+        assert result.count("require [") == 1
+
+    def test_position_stable_across_repeated_merges(self):
+        generated = self._make_generated()
+        existing = (
+            'if address :is "From" "boss@example.com" { keep; stop; }\n'
+            f"{SECTION_BEGIN}\n"
+            f"{SECTION_END}\n"
+            'if true { keep; }\n'
+        )
+        once = SieveGenerator.merge_with_existing(generated, existing)
+        twice = SieveGenerator.merge_with_existing(generated, once)
+        assert once == twice
+        assert twice.index("boss@example.com") < twice.index(SECTION_BEGIN)
