@@ -176,7 +176,7 @@ class TestConsolidateKeepLiveRules:
 
         result = runner.invoke(app, ["sync"])
         assert result.exit_code == 0, result.output
-        assert "disable_all" in fake_sync.calls
+        assert ("disable", "Filter s0@x.com") in fake_sync.calls
 
     def test_rerun_is_idempotent(self, shrunk_account, cli_snapshots_dir):
         runner.invoke(app, ["consolidate", "--keep-live-rules"])

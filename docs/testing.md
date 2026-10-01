@@ -29,7 +29,7 @@ python -m pytest tests/test_sieve_generator.py::test_generate_basic_rule -v
 | `test_consolidator.py` | All three consolidation strategies, the engine pipeline, and status-based filter selection |
 | `test_sieve_generator.py` | Sieve script generation, extension collection, merging with existing scripts |
 | `test_sieve_rules.py` | Structural Sieve section parsing and live-vs-new rule comparison |
-| `test_sync_safety.py` | `sync` refusal, dry-run/show-diff surfacing, and `cleanup` coverage guard (ProtonMail clients faked) |
+| `test_sync_safety.py` | `sync` refusal, dry-run/show-diff surfacing, which filters `sync` disables and re-enables after a failed upload, and `cleanup` coverage guard (ProtonMail clients faked) |
 | `test_carry_forward.py` | Rebuilding live Sieve rules as archived filters, `consolidate --keep-live-rules` |
 | `test_diff.py` | Filter comparison (added, removed, modified, state_changed, unchanged), status-aware diffing |
 | `test_snapshot.py` | Snapshot CLI commands: view, set-status, remove (using Typer CliRunner) |
@@ -43,6 +43,7 @@ python -m pytest tests/test_sieve_generator.py::test_generate_basic_rule -v
 | `test_scrape_completeness.py` | Integration: filters the scraper cannot fully read are flagged (mock page `?set=edge`) |
 | `test_cli_safety.py` | `backup` refusing incomplete scrapes and `cleanup` refusing unverified deletions (fake browser) |
 | `test_delete_filter.py` | `delete_filter` only ever deletes a single, disabled row in the Custom filters section (fake page) |
+| `test_toggle_row.py` | `set_row_enabled` toggles the row `sync` matched, by position and name, and clicks nothing when unsure (fake page) |
 | `test_private_files.py` | `write_private_file`: owner-only, atomic, never follows a planted temp path |
 | `test_step_text.py` | Integration: raw step evidence comes only from the wizard modal, never the whole page |
 

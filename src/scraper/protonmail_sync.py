@@ -41,6 +41,11 @@ logger = logging.getLogger(__name__)
 class ProtonMailSync(ProtonMailBrowser):
     """Handles sync operations: create/delete/toggle filters, upload Sieve."""
 
+    # Set by upload_sieve when it could not create the Sieve filter because
+    # the "Add sieve filter" button was gone, which is how ProtonMail shows
+    # an account at its active-filter limit. Lets the caller say so.
+    upload_hit_filter_limit = False
+
     async def upload_sieve(
         self, sieve_script: str, filter_name: str = "ProtonFusion Consolidated",
     ) -> bool:
@@ -50,6 +55,7 @@ class ProtonMailSync(ProtonMailBrowser):
         Uses CodeMirror 5 JavaScript API for reliable content setting.
         """
         page = self.page
+        self.upload_hit_filter_limit = False
 
         try:
             # Try to find and edit an existing filter with this name
@@ -60,9 +66,10 @@ class ProtonMailSync(ProtonMailBrowser):
                 add_btn = await page.query_selector(selectors.ADD_SIEVE_FILTER_BUTTON)
                 if not add_btn or not await add_btn.is_visible():
                     logger.error(
-                        "'Add sieve filter' button not available. "
-                        "On free tier, delete existing filters first."
+                        "'Add sieve filter' button not available; the account "
+                        "is probably at its active-filter limit."
                     )
+                    self.upload_hit_filter_limit = True
                     return False
 
                 await add_btn.click()
@@ -345,26 +352,45 @@ class ProtonMailSync(ProtonMailBrowser):
         logger.warning("Filter '%s' not found", name)
         return False
 
-    async def disable_all_ui_filters(self) -> int:
-        """Disable all enabled filters. Returns count disabled."""
+    async def set_row_enabled(self, index: int, name: str, enabled: bool) -> bool:
+        """Set the toggle of one Custom filters row, identified by position and name.
+
+        `index` is the row's position when it was scraped (the filter's
+        priority) and `name` its name then. Rows can share a name, so the
+        position picks the row and the name confirms it is still the same
+        one. If the row at `index` has a different name (the list moved),
+        a row is used only if it is the single row with that name. Anything
+        else returns False without clicking, so a filter is never toggled
+        on a guess. Returns True once the row is in the requested state.
+        """
         page = self.page
-        disabled = 0
         section = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
         if not section:
-            logger.warning("Custom filters section not found")
-            return 0
+            logger.warning("Custom filters section not found; not toggling '%s'", name)
+            return False
         rows = await section.query_selector_all(selectors.FILTER_TABLE_ROWS)
 
-        for row in rows:
-            toggle_input = await row.query_selector(selectors.FILTER_TOGGLE)
-            toggle_label = await row.query_selector(selectors.FILTER_TOGGLE_LABEL)
-            if toggle_input and toggle_label and await toggle_input.is_checked():
-                await toggle_label.click()
-                await page.wait_for_timeout(1000)
-                disabled += 1
+        row = None
+        if 0 <= index < len(rows) and await self._get_filter_name(rows[index]) == name:
+            row = rows[index]
+        else:
+            same_name = [r for r in rows if await self._get_filter_name(r) == name]
+            if len(same_name) == 1:
+                row = same_name[0]
+        if row is None:
+            logger.warning("Filter '%s' (row %d) not found unambiguously; not toggling it", name, index)
+            return False
 
-        logger.info("Disabled %d filters", disabled)
-        return disabled
+        toggle_input = await row.query_selector(selectors.FILTER_TOGGLE)
+        toggle_label = await row.query_selector(selectors.FILTER_TOGGLE_LABEL)
+        if not toggle_input or not toggle_label:
+            logger.warning("No toggle for filter '%s'", name)
+            return False
+        if await toggle_input.is_checked() != enabled:
+            await toggle_label.click()
+            await page.wait_for_timeout(1000)
+        logger.info("%s filter: %s", "Enabled" if enabled else "Disabled", name)
+        return True
 
     async def delete_filter(self, name: str) -> bool:
         """Delete one disabled filter by name from the Custom filters section.

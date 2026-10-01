@@ -12,7 +12,7 @@ The downside is fragility -- ProtonMail can change their UI at any time and brea
 
 Every design choice prioritizes reversibility:
 
-- **Disable, don't delete.** When syncing, old UI filters are disabled rather than deleted. This means you can always re-enable them manually or via the `restore` command.
+- **Disable, don't delete.** When syncing, old UI filters are disabled rather than deleted. This means you can always re-enable them manually or via the `restore` command. See [Which Filters Sync Disables](#which-filters-sync-disables).
 - **Snapshot-based operations.** Every action references a snapshot. You never modify filter data in place -- you create a new snapshot directory.
 - **Section markers in Sieve.** Generated Sieve rules are wrapped in `# === BEGIN/END ProtonFusion ===` markers. User-authored Sieve rules outside these markers are preserved during merge. This allows ProtonFusion to coexist with hand-written Sieve rules.
 - **Refuse rather than drop.** `sync` compares the live ProtonFusion section with the new one and refuses, before disabling or uploading anything, if any rule would disappear. See [Refusing to Drop Live Rules](#refusing-to-drop-live-rules).
@@ -69,7 +69,7 @@ When `consolidate` runs, backup filters that were included in Sieve generation a
 
 The archive only protects rules that went through it. Rules consolidated before the archive system existed, or whose `archive.json` was lost, live only in the ProtonFusion section of the live Sieve script once `cleanup` has deleted their UI filters. The next backup -> consolidate -> sync would regenerate the section from the few surviving UI filters and delete them. For example, a section built from a couple of hundred filters, rebuilt from the handful of UI filters created since the last cleanup.
 
-So `sync` treats the live section as data, not as output to overwrite. It parses both sections into condition/action pairs and refuses if any live pair is missing from the new one (details and limits in [sieve-reference.md](sieve-reference.md#rule-preservation)). The comparison is structural rather than a text diff because consolidation legitimately regroups, reorders and re-merges rules on every run; a text diff would cry wolf on every sync and get overridden by reflex. Anything the parser does not model is compared verbatim, so unfamiliar constructs cause a refusal rather than a silent pass. The check runs before `disable_all_ui_filters`, so a refusal leaves the account untouched, and `cleanup` independently checks each disabled filter against the live section before deleting it, so a refused or failed sync can never be followed by deleting the only copy.
+So `sync` treats the live section as data, not as output to overwrite. It parses both sections into condition/action pairs and refuses if any live pair is missing from the new one (details and limits in [sieve-reference.md](sieve-reference.md#rule-preservation)). The comparison is structural rather than a text diff because consolidation legitimately regroups, reorders and re-merges rules on every run; a text diff would cry wolf on every sync and get overridden by reflex. Anything the parser does not model is compared verbatim, so unfamiliar constructs cause a refusal rather than a silent pass. The check runs before any filter is disabled, so a refusal leaves the account untouched, and `cleanup` independently checks each disabled filter against the live section before deleting it, so a refused or failed sync can never be followed by deleting the only copy.
 
 `--allow-rule-removal` overrides the refusal. Removing a rule therefore takes an explicit act: deprecate it (`snapshot set-status ... deprecated`) or exclude it, then sync with the override.
 
@@ -138,9 +138,17 @@ Only read-only operations are parallelized. Write operations (disable, delete, u
 
 ProtonMail's dropdown UI displays subfolder names with a bullet prefix (`• Child Folder`), but Sieve `fileinto` requires the full path (`Parent/Child`). The scraper builds a path map by reading dropdown items in display order -- non-bulleted items are tracked as the current parent, and bulleted items are mapped to `Parent/Child` paths. This map is cached per scraper instance and built lazily on the first folder action encounter.
 
+## Which Filters Sync Disables
+
+ProtonMail limits active filters per plan, so `sync` disables UI filters before uploading the Sieve filter. It used to disable every enabled row, which turned off other Sieve filters (and ProtonFusion's own, leaving nothing filtering mail if the upload then failed) and silently stopped any filter created after the backup, whose rule was never consolidated.
+
+Now `sync` scrapes the live filters and disables only wizard filters whose `content_hash` (name, logic, conditions, actions) is in the set the script was built from: the snapshot manifest's `filter_hashes`, or every wizard filter in the `--backup` snapshot when `--sieve` names a script with no manifest. Matching by content rather than name means a filter edited since the backup stays on. Sieve filters, unmatched filters, and rows the scraper could not read in full are left enabled and listed, so a mismatch errs toward a rule running twice, never toward a rule not running. `--dry-run` shows the plan from the backup and `--show-diff-only` from the live account.
+
+Rows are toggled by scraped position, confirmed by name (`set_row_enabled`), since names need not be unique. If the upload fails, every row this run disabled is re-enabled; any that cannot be are listed with the `restore` command. A missing "Add sieve filter" button is reported as the probable active-filter limit, with the filters left enabled as the ones to disable or fold in. `sync` never falls back to disabling everything.
+
 ## Free Tier Limitations
 
-ProtonMail's free tier allows only 1 custom filter at a time. Both the "Add filter" and "Add sieve filter" buttons disappear once a filter exists. The sync workflow accounts for this by disabling existing UI filters before creating the Sieve filter, freeing the slot.
+ProtonMail's free tier allows only 1 custom filter at a time. Both the "Add filter" and "Add sieve filter" buttons disappear once a filter exists. The sync workflow accounts for this by disabling the UI filters the script replaces before creating the Sieve filter, freeing the slot.
 
 ## CodeMirror 5 Integration
 

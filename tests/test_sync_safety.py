@@ -42,6 +42,10 @@ class FakeSync:
     live_script = ""
     calls: list = []
     read_error = None  # set to a SieveReadError to make the live read fail
+    upload_result = True  # False, or an exception instance to raise
+    hit_limit = False  # what upload_hit_filter_limit reports after a failed upload
+    toggle_fails: set = set()  # (name, enabled) pairs set_row_enabled refuses
+    upload_hit_filter_limit = False
 
     def __init__(self, *args, **kwargs):
         pass
@@ -60,13 +64,19 @@ class FakeSync:
             raise type(self).read_error
         return type(self).live_script
 
-    async def disable_all_ui_filters(self):
-        type(self).calls.append("disable_all")
-        return 3
+    async def set_row_enabled(self, index, name, enabled):
+        if (name, enabled) in type(self).toggle_fails:
+            return False
+        type(self).calls.append(("enable" if enabled else "disable", name))
+        return True
 
     async def upload_sieve(self, script, filter_name=""):
         type(self).calls.append(("upload", script))
-        return True
+        result = type(self).upload_result
+        if isinstance(result, Exception):
+            raise result
+        self.upload_hit_filter_limit = not result and type(self).hit_limit
+        return result
 
     async def delete_filter(self, name):
         type(self).calls.append(("delete", name))
@@ -74,6 +84,15 @@ class FakeSync:
 
     async def close(self):
         pass
+
+
+class FakeScraper(FakeSync):
+    """Stand-in for ProtonMailScraper; returns already-parsed filters."""
+
+    filters: list = []
+
+    async def scrape_all_filters(self, workers=1):
+        return list(type(self).filters)
 
 
 @pytest.fixture(autouse=True)
@@ -95,12 +114,26 @@ def cli_snapshots_dir(tmp_path, monkeypatch):
 
 @pytest.fixture
 def fake_sync(monkeypatch):
+    """Fake both browser classes: sync scrapes with one and writes with the other."""
+    import src.main
+    import src.scraper.protonmail_scraper
     import src.scraper.protonmail_sync
     FakeSync.live_script = ""
     FakeSync.calls = []
     FakeSync.read_error = None
+    FakeSync.upload_result = True
+    FakeSync.hit_limit = False
+    FakeSync.toggle_fails = set()
+    FakeScraper.filters = []
     monkeypatch.setattr(src.scraper.protonmail_sync, "ProtonMailSync", FakeSync)
+    monkeypatch.setattr(src.scraper.protonmail_scraper, "ProtonMailScraper", FakeScraper)
+    monkeypatch.setattr(src.main, "parse_scraped_filters", lambda raw: raw)
     return FakeSync
+
+
+@pytest.fixture
+def fake_scraper(fake_sync):
+    return FakeScraper
 
 
 @pytest.fixture
@@ -117,6 +150,7 @@ def shrunk_account(cli_snapshots_dir, fake_sync):
 
     manager = BackupManager(cli_snapshots_dir)
     manager.create_backup(all_filters[:2], sieve_script=live)
+    FakeScraper.filters = all_filters[:2]
     result = runner.invoke(app, ["consolidate"])
     assert result.exit_code == 0, result.output
     return live
@@ -135,7 +169,7 @@ class TestSyncRefusesToDropRules:
     def test_sync_with_override_proceeds(self, shrunk_account, fake_sync):
         result = runner.invoke(app, ["sync", "--allow-rule-removal"])
         assert result.exit_code == 0, result.output
-        assert "disable_all" in fake_sync.calls
+        assert ("disable", "Filter s0@x.com") in fake_sync.calls
         assert any(c[0] == "upload" for c in fake_sync.calls if isinstance(c, tuple))
 
     def test_dry_run_reports_refusal(self, shrunk_account, fake_sync):
@@ -171,21 +205,24 @@ class TestSyncAllowsSafeChanges:
     def test_superset_sync_proceeds(self, cli_snapshots_dir, fake_sync):
         filters = [_filter("a@x.com"), _filter("b@x.com")]
         fake_sync.live_script = _section_for(filters[:1])
+        FakeScraper.filters = filters
         BackupManager(cli_snapshots_dir).create_backup(filters, sieve_script=fake_sync.live_script)
         assert runner.invoke(app, ["consolidate"]).exit_code == 0
 
         result = runner.invoke(app, ["sync"])
         assert result.exit_code == 0, result.output
         assert "No rules dropped" in result.output
-        assert "disable_all" in fake_sync.calls
+        assert ("disable", "Filter a@x.com") in fake_sync.calls
+        assert ("disable", "Filter b@x.com") in fake_sync.calls
 
     def test_first_sync_without_live_section_proceeds(self, cli_snapshots_dir, fake_sync):
+        FakeScraper.filters = [_filter("a@x.com")]
         BackupManager(cli_snapshots_dir).create_backup([_filter("a@x.com")])
         assert runner.invoke(app, ["consolidate"]).exit_code == 0
 
         result = runner.invoke(app, ["sync"])
         assert result.exit_code == 0, result.output
-        assert "disable_all" in fake_sync.calls
+        assert ("disable", "Filter a@x.com") in fake_sync.calls
 
 
 def test_dropped_listing_escapes_rich_markup(cli_snapshots_dir, fake_sync):
@@ -202,25 +239,6 @@ def test_dropped_listing_escapes_rich_markup(cli_snapshots_dir, fake_sync):
     result = runner.invoke(app, ["sync"])
     assert result.exit_code == 1
     assert '"[spam]"' in result.output
-
-
-class FakeScraper(FakeSync):
-    """Stand-in for ProtonMailScraper; returns already-parsed filters."""
-
-    filters: list = []
-
-    async def scrape_all_filters(self, workers=1):
-        return list(type(self).filters)
-
-
-@pytest.fixture
-def fake_scraper(monkeypatch, fake_sync):
-    import src.main
-    import src.scraper.protonmail_scraper
-    FakeScraper.filters = []
-    monkeypatch.setattr(src.scraper.protonmail_scraper, "ProtonMailScraper", FakeScraper)
-    monkeypatch.setattr(src.main, "parse_scraped_filters", lambda raw: raw)
-    return FakeScraper
 
 
 class TestCleanupOnlyDeletesCoveredFilters:
@@ -499,7 +517,7 @@ class TestFiltersWithoutEvidence:
     def test_allow_incomplete_proceeds(self, legacy_snapshot, fake_sync):
         result = runner.invoke(app, ["sync", "--allow-incomplete"])
         assert result.exit_code == 0, result.output
-        assert "disable_all" in fake_sync.calls
+        assert any(c[0] == "upload" for c in fake_sync.calls)
 
     def test_explicit_other_script_not_checked(self, legacy_snapshot, fake_sync, tmp_path):
         """The manifest describes the snapshot's own script, not one given with --sieve."""
@@ -575,3 +593,120 @@ class TestTruncatedLiveSection:
         result = runner.invoke(app, ["consolidate"])
         assert result.exit_code == 0, result.output
         assert "Could not parse the ProtonFusion section" in result.output
+
+
+class TestSyncDisablesOnlyReplacedFilters:
+    """sync disables only wizard filters whose rules are in the uploaded script (S1)."""
+
+    @staticmethod
+    def _sieve(name: str) -> ProtonMailFilter:
+        return ProtonMailFilter(name=name, is_sieve=True, raw=ScrapeEvidence(sieve_text="keep;"))
+
+    @pytest.fixture
+    def account(self, cli_snapshots_dir, fake_sync):
+        """Backup of two wizard filters and two Sieve filters, consolidated.
+
+        The live account also has a filter created after the backup and one
+        edited since (same name, different sender). Returns the backed-up
+        wizard filters.
+        """
+        backed_up = [_filter("a@x.com"), _filter("b@x.com")]
+        sieves = [self._sieve(SIEVE_FILTER_NAME), self._sieve("Hand-written")]
+        BackupManager(cli_snapshots_dir).create_backup(backed_up + sieves)
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+
+        edited = _filter("b-changed@x.com").model_copy(update={"name": "Filter b@x.com"})
+        FakeScraper.filters = [backed_up[0], edited, *sieves, _filter("new@x.com")]
+        return backed_up
+
+    @staticmethod
+    def _toggled(fake_sync, verb):
+        return [c[1] for c in fake_sync.calls if c[0] == verb]
+
+    def test_only_backed_up_wizard_filters_are_disabled(self, account, fake_sync):
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 0, result.output
+        assert self._toggled(fake_sync, "disable") == ["Filter a@x.com"]
+        # New and edited filters stay on, and are named as such
+        assert "2 created or changed after backup 'latest' were left enabled" in result.output
+        assert "Filter new@x.com" in result.output
+        assert "Run 'backup' and 'consolidate' to fold them in" in result.output
+        assert "2 Sieve filters were left enabled" in result.output
+
+    def test_sieve_filters_never_disabled(self, account, fake_sync):
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 0, result.output
+        disabled = self._toggled(fake_sync, "disable")
+        assert SIEVE_FILTER_NAME not in disabled
+        assert "Hand-written" not in disabled
+
+    def test_excluded_filter_left_enabled(self, cli_snapshots_dir, fake_sync):
+        kept, excluded = _filter("a@x.com"), _filter("b@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([kept, excluded])
+        assert runner.invoke(app, ["consolidate", "--exclude", excluded.name]).exit_code == 0
+        FakeScraper.filters = [kept, excluded]
+
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 0, result.output
+        assert self._toggled(fake_sync, "disable") == [kept.name]
+        assert "left out of this script" in result.output
+
+    def test_unreadable_row_left_enabled(self, cli_snapshots_dir, fake_sync):
+        f = _filter("a@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([f])
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        FakeScraper.filters = [f.model_copy(update={"scrape_issues": ["condition 0: no value found"]})]
+
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 0, result.output
+        assert self._toggled(fake_sync, "disable") == []
+        assert "could not be read in full" in result.output
+
+    @pytest.mark.parametrize("failure", [False, RuntimeError("editor crashed")])
+    def test_failed_upload_reenables_exactly_what_was_disabled(self, account, fake_sync, failure):
+        fake_sync.upload_result = failure
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        assert self._toggled(fake_sync, "enable") == self._toggled(fake_sync, "disable") == ["Filter a@x.com"]
+        assert "Re-enabled 1 of the 1 filters" in result.output
+        assert "Could not re-enable" not in result.output
+
+    def test_filter_limit_named_on_failure(self, account, fake_sync):
+        fake_sync.upload_result = False
+        fake_sync.hit_limit = True
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        assert "active-filter limit" in result.output
+        # Never falls back to disabling everything
+        assert self._toggled(fake_sync, "disable") == ["Filter a@x.com"]
+
+    def test_partial_reenable_failure_reported(self, cli_snapshots_dir, fake_sync):
+        a, b = _filter("a@x.com"), _filter("b@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([a, b])
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        FakeScraper.filters = [a, b]
+        fake_sync.upload_result = False
+        fake_sync.toggle_fails = {(b.name, True)}
+
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        assert self._toggled(fake_sync, "enable") == [a.name]
+        assert "Re-enabled 1 of the 2 filters" in result.output
+        assert "Could not re-enable 1 filter(s)" in result.output
+        assert f"- {b.name}" in result.output
+        assert "restore --backup latest" in result.output
+
+    def test_dry_run_lists_plan(self, account, fake_sync):
+        result = runner.invoke(app, ["sync", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert "Would disable 2 UI filters" in result.output
+        assert "2 Sieve filters would be left enabled" in result.output
+        assert "--show-diff-only lists them" in result.output
+        assert fake_sync.calls == []
+
+    def test_show_diff_only_lists_plan_from_live_account(self, account, fake_sync):
+        result = runner.invoke(app, ["sync", "--show-diff-only"])
+        assert result.exit_code == 0, result.output
+        assert "Would disable 1 UI filters" in result.output
+        assert "2 created or changed after backup 'latest' would be left enabled" in result.output
+        assert fake_sync.calls == []
