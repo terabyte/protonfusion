@@ -7,6 +7,8 @@ import src.utils.config
 from src.main import app, SIEVE_FILTER_NAME
 from src.backup.backup_manager import BackupManager
 from src.generator.sieve_generator import SieveGenerator
+# The real class, imported before the fixtures below replace it with FakeSync
+from src.scraper.protonmail_sync import ProtonMailSync as RealProtonMailSync
 from src.models.filter_models import (
     ScrapeEvidence,
     ProtonMailFilter, FilterCondition, FilterAction,
@@ -48,6 +50,7 @@ class FakeSync:
     toggle_raises: set = set()  # (name, enabled) pairs set_row_enabled raises on
     row_enabled: dict = {}  # name -> live toggle state, for require_current; default enabled
     upload_hit_filter_limit = False
+    last_toggle_refused = False
 
     def __init__(self, *args, **kwargs):
         pass
@@ -665,13 +668,16 @@ class TestSyncUnchangedScript:
             raw=ScrapeEvidence(sieve_text="keep;"),
         )
 
-    def test_no_upload_and_filters_still_disabled(self, account, fake_sync):
+    def test_no_upload_and_filters_still_disabled(self, account, fake_sync, cli_snapshots_dir):
         FakeScraper.filters = [account, self._pf_row(enabled=True)]
         result = runner.invoke(app, ["sync"])
         assert result.exit_code == 0, result.output
         assert fake_sync.calls == [("disable", account.name)]
         assert "nothing to upload" in result.output
         assert "Sieve uploaded: No (already up to date)" in result.output
+        # V8: the rollback command names the snapshot, not 'latest', which moves
+        snapshot = BackupManager(cli_snapshots_dir).snapshot_dir_for("latest").name
+        assert f"'restore --backup {snapshot}'" in result.output
 
     def test_switched_off_script_filter_is_switched_on(self, account, fake_sync):
         FakeScraper.filters = [account, self._pf_row(enabled=False)]
@@ -686,6 +692,46 @@ class TestSyncUnchangedScript:
         assert result.exit_code == 1, result.output
         assert f"Failed to switch on the '{SIEVE_FILTER_NAME}' filter" in result.output
         assert fake_sync.calls == [("disable", account.name), ("enable", account.name)]
+
+    def test_swallowed_switch_on_click_is_a_failure(self, account, fake_sync, monkeypatch):
+        """V5: the real set_row_enabled, over a page whose ProtonFusion switch ignores clicks.
+
+        Before the read-back, the click "succeeded", the UI filter stayed off
+        and sync reported success with nothing filtering that mail.
+        """
+        import src.scraper.protonmail_sync
+        from src.scraper import selectors
+        from tests.test_toggle_row import TogglePage
+
+        page = TogglePage([(account.name, True), (SIEVE_FILTER_NAME, False)], stuck={1})
+
+        class PageSync(RealProtonMailSync):
+            """ProtonMailSync with its browser steps stubbed and `page` as the filters page."""
+
+            def __init__(self, *args, **kwargs):
+                self.page = page
+
+            async def initialize(self):
+                pass
+
+            async def login(self):
+                return True
+
+            async def navigate_to_filters(self):
+                pass
+
+            async def close(self):
+                pass
+
+        monkeypatch.setattr(src.scraper.protonmail_sync, "ProtonMailSync", PageSync)
+        FakeScraper.filters = [account, self._pf_row(enabled=False)]
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        assert f"Failed to switch on the '{SIEVE_FILTER_NAME}' filter" in result.output
+        assert "Re-enabled 1 of the 1 filters this sync disabled" in result.output
+        assert "active-filter limit" in result.output
+        toggles = [row.children[selectors.FILTER_TOGGLE].checked for row in page.rows]
+        assert toggles == [True, False]
 
     def test_script_filter_not_found_refuses(self, account, fake_sync):
         FakeScraper.filters = [account]
@@ -909,7 +955,10 @@ class TestSyncDisablesOnlyReplacedFilters:
         assert "Re-enabled 1 of the 2 filters" in result.output
         assert "Could not re-enable 1 filter(s)" in result.output
         assert f"- {b.name}" in result.output
-        assert "restore --backup latest" in result.output
+        # V8: the resolved snapshot, since the next backup moves 'latest'
+        snapshot = BackupManager(cli_snapshots_dir).snapshot_dir_for("latest").name
+        assert f"restore --backup {snapshot}" in result.output
+        assert "restore --backup latest" not in result.output
 
     def test_reenable_continues_after_exception(self, cli_snapshots_dir, fake_sync):
         a, b, c = _filter("a@x.com"), _filter("b@x.com"), _filter("c@x.com")

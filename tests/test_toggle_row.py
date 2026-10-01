@@ -13,13 +13,33 @@ from src.scraper.protonmail_sync import ProtonMailSync
 from tests.test_delete_filter import FakeElement, FakePage
 
 
-class TogglePage(FakePage):
-    """FakePage whose rows also have the toggle switch label sync clicks."""
+class SwitchLabel(FakeElement):
+    """A row's switch label: clicking it flips the row's toggle, unless the switch is stuck."""
 
-    def __init__(self, rows):
+    def __init__(self, page, label, toggle, stuck=False):
+        super().__init__(page, label)
+        self.toggle = toggle
+        self.stuck = stuck
+
+    async def click(self):
+        await super().click()
+        if not self.stuck:
+            self.toggle.checked = not self.toggle.checked
+
+
+class TogglePage(FakePage):
+    """FakePage whose rows also have the toggle switch label sync clicks.
+
+    `stuck` holds the row indexes whose switch ignores clicks, as ProtonMail's
+    does when it refuses an enable at the active-filter limit.
+    """
+
+    def __init__(self, rows, stuck=()):
         super().__init__(rows)
         for i, row in enumerate(self.rows):
-            row.children[selectors.FILTER_TOGGLE_LABEL] = FakeElement(self, f"switch{i}")
+            row.children[selectors.FILTER_TOGGLE_LABEL] = SwitchLabel(
+                self, f"switch{i}", row.children[selectors.FILTER_TOGGLE], stuck=i in stuck,
+            )
 
 
 def _toggle(rows, index, name, enabled):
@@ -134,3 +154,33 @@ def test_row_not_in_required_state_is_refused():
     result, clicks = _toggle_with([("A", False)], 0, "A", False, require_current=True)
     assert result is False
     assert clicks == []
+
+
+def test_click_that_does_not_change_the_switch_is_a_failure():
+    """V5: the click is swallowed (a modal, or Proton refusing at the filter limit).
+
+    sync's unchanged-script path takes True as proof ProtonFusion's filter is
+    on after the UI filters are off, so a switch still off must read as False.
+    """
+    sync = ProtonMailSync()
+    sync.page = TogglePage([("ProtonFusion Consolidated", False)], stuck={0})
+    result = asyncio.run(sync.set_row_enabled(0, "ProtonFusion Consolidated", True))
+    assert sync.page.clicks == ["switch0"]
+    assert result is False
+    assert sync.last_toggle_refused is True
+
+
+def test_click_that_changes_the_switch_is_confirmed():
+    sync = ProtonMailSync()
+    sync.page = TogglePage([("A", False)])
+    assert asyncio.run(sync.set_row_enabled(0, "A", True)) is True
+    assert sync.page.rows[0].children[selectors.FILTER_TOGGLE].checked is True
+    assert sync.last_toggle_refused is False
+
+
+def test_toggle_by_name_reads_the_switch_back():
+    """enable_filter / disable_filter share the read-back."""
+    sync = ProtonMailSync()
+    sync.page = TogglePage([("A", True)], stuck={0})
+    assert asyncio.run(sync.disable_filter("A")) is False
+    assert sync.last_toggle_refused is True
