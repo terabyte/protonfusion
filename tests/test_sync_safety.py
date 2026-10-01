@@ -639,6 +639,62 @@ class TestSyncRefusesUnparsableMergedScript:
         assert fake_sync.calls == []
 
 
+class TestSyncUnchangedScript:
+    """When the live script already is the merged one, sync does not upload.
+
+    Proton keeps Save disabled for an unchanged script, so an upload would
+    be reported as failed. Sync still disables the replaced filters and
+    makes sure ProtonFusion's own filter is on.
+    """
+
+    @pytest.fixture
+    def account(self, cli_snapshots_dir, fake_sync):
+        f = _filter("a@x.com")
+        manager = BackupManager(cli_snapshots_dir)
+        manager.create_backup([f])
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        generated = (manager.snapshot_dir_for("latest") / "consolidated.sieve").read_text()
+        # Trailing whitespace only: still "the same script".
+        fake_sync.live_script = SieveGenerator.merge_with_existing(generated, "") + "  \n\n"
+        return f
+
+    @staticmethod
+    def _pf_row(enabled: bool) -> ProtonMailFilter:
+        return ProtonMailFilter(
+            name=SIEVE_FILTER_NAME, enabled=enabled, priority=1, is_sieve=True,
+            raw=ScrapeEvidence(sieve_text="keep;"),
+        )
+
+    def test_no_upload_and_filters_still_disabled(self, account, fake_sync):
+        FakeScraper.filters = [account, self._pf_row(enabled=True)]
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 0, result.output
+        assert fake_sync.calls == [("disable", account.name)]
+        assert "nothing to upload" in result.output
+        assert "Sieve uploaded: No (already up to date)" in result.output
+
+    def test_switched_off_script_filter_is_switched_on(self, account, fake_sync):
+        FakeScraper.filters = [account, self._pf_row(enabled=False)]
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 0, result.output
+        assert fake_sync.calls == [("disable", account.name), ("enable", SIEVE_FILTER_NAME)]
+
+    def test_failed_switch_on_reenables_disabled_filters(self, account, fake_sync):
+        FakeScraper.filters = [account, self._pf_row(enabled=False)]
+        fake_sync.toggle_fails = {(SIEVE_FILTER_NAME, True)}
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        assert f"Failed to switch on the '{SIEVE_FILTER_NAME}' filter" in result.output
+        assert fake_sync.calls == [("disable", account.name), ("enable", account.name)]
+
+    def test_script_filter_not_found_refuses(self, account, fake_sync):
+        FakeScraper.filters = [account]
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        assert "Sync refused" in result.output
+        assert fake_sync.calls == []
+
+
 class TestSyncKeepsUserVacationRule:
     """A live script with a text: literal (vacation rule) merges, validates and uploads."""
 

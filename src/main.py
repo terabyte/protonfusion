@@ -1273,7 +1273,9 @@ def sync(
     filter 'consolidate' put into it) are disabled. Sieve filters, filters
     created or changed after the backup, and filters that cannot be read in
     full stay enabled. If the upload fails, every filter this run disabled
-    is enabled again.
+    is enabled again. When the live script already matches (ignoring
+    trailing whitespace) nothing is uploaded; the filters are still
+    disabled and ProtonFusion's Sieve filter is switched on if it is off.
 
     Refuses (exit 1, nothing changed) if the new ProtonFusion section would drop
     any rule present in the live section, unless --allow-rule-removal is given.
@@ -1285,7 +1287,7 @@ def sync(
     1.3, which may hold misread operators), unless --allow-old-snapshot is given.
     """
     from src.scraper.protonmail_scraper import ProtonMailScraper
-    from src.scraper.protonmail_sync import ProtonMailSync
+    from src.scraper.protonmail_sync import ProtonMailSync, normalize_script
 
     _workers = max(1, min(workers, 10))
     manager = BackupManager()
@@ -1425,7 +1427,7 @@ def sync(
                     backup_id, preview=True,
                 )
 
-            if existing_script == merged_script:
+            if normalize_script(existing_script) == normalize_script(merged_script):
                 console.print(Panel("[bold green]No changes: the live script already matches."))
                 return safe
 
@@ -1486,6 +1488,25 @@ def sync(
         if existing_script and SECTION_BEGIN not in existing_script:
             console.print("[yellow]User rules detected; preserving them outside ProtonFusion section")
 
+        # Nothing to upload when the live script already is the merged one:
+        # Proton keeps Save disabled for an unchanged script, so upload_sieve
+        # would report a failure. The script's filter must still be on before
+        # the UI filters go off, so it is located now (refusing if it cannot
+        # be) and switched on in place of the upload if needed.
+        unchanged = bool(existing_script) and normalize_script(merged_script) == normalize_script(existing_script)
+        live_pf = None
+        if unchanged:
+            pf_rows = [f for f in live_filters if f.is_sieve and f.name == SIEVE_FILTER_NAME]
+            if len(pf_rows) != 1:
+                console.print(
+                    f"[bold red]The live script already matches, but {len(pf_rows)} Sieve filters named "
+                    f"'{SIEVE_FILTER_NAME}' were read, so there is no telling whether the one holding it "
+                    "is switched on.[/]\n"
+                    "[bold red]Sync refused. No filters were disabled and nothing was uploaded."
+                )
+                return False
+            live_pf = pf_rows[0]
+
         _print_carried_source(from_manifest, backup_id)
         plan = plan_disable(live_filters, carried, reference, SIEVE_FILTER_NAME, _uploaded_facts(merged_script))
         _print_disable_plan(plan, backup_id, preview=False)
@@ -1536,17 +1557,27 @@ def sync(
                 for f in not_disabled:
                     console.print(f"  [yellow]- {escape(f.name)}")
 
-            console.print("[bold green]Uploading merged Sieve script...")
             upload_error = None
             try:
-                success = await sync_client.upload_sieve(merged_script, filter_name=SIEVE_FILTER_NAME)
+                if unchanged:
+                    console.print("[green]The live Sieve script already matches the merged one; nothing to upload.")
+                    # Same end state an upload guarantees: the script's filter is on.
+                    success = live_pf.enabled or await sync_client.set_row_enabled(
+                        live_pf.priority, live_pf.name, True, expected_names=expected_names,
+                    )
+                else:
+                    console.print("[bold green]Uploading merged Sieve script...")
+                    success = await sync_client.upload_sieve(merged_script, filter_name=SIEVE_FILTER_NAME)
             except Exception as e:
                 success = False
                 upload_error = e
 
             if not success:
                 reason = f" ({escape(loggable_text(str(upload_error)))})" if upload_error else ""
-                console.print(f"[bold red]Failed to upload Sieve script{reason}.")
+                if unchanged:
+                    console.print(f"[bold red]Failed to switch on the '{SIEVE_FILTER_NAME}' filter{reason}.")
+                else:
+                    console.print(f"[bold red]Failed to upload Sieve script{reason}.")
                 if sync_client.upload_hit_filter_limit:
                     console.print(
                         "[yellow]The 'Add sieve filter' button was missing, which is how ProtonMail "
@@ -1557,13 +1588,14 @@ def sync(
                 await _reenable_after_failed_upload(sync_client, disabled, backup_id, expected_names)
                 return False
 
-            console.print("[green]Sieve script uploaded successfully!")
+            if not unchanged:
+                console.print("[green]Sieve script uploaded successfully!")
             if manager.promote_manifest(snapshot_dir):
                 console.print("[cyan]Sync manifest updated")
 
             console.print(Panel(
                 f"[bold green]Sync complete![/]\n\n"
-                f"Sieve uploaded: Yes\n"
+                f"Sieve uploaded: {'No (already up to date)' if unchanged else 'Yes'}\n"
                 f"Filters disabled: {len(disabled)}\n"
                 f"Filters left enabled: {len(plan.left_enabled) + len(not_disabled)}\n\n"
                 + _rollback_help(backup_id, snapshot_dir),
@@ -1688,7 +1720,7 @@ def restore(
     script while the account does, unless --allow-empty-script.
     """
     from src.scraper.protonmail_scraper import ProtonMailScraper
-    from src.scraper.protonmail_sync import ProtonMailSync
+    from src.scraper.protonmail_sync import ProtonMailSync, normalize_script
     from src.backup.restore_engine import RestoreEngine
 
     creds = _get_credentials(credentials_file, False)
@@ -1719,8 +1751,10 @@ def restore(
 
         # What to do with the script: nothing, upload the backed-up one, or
         # (backup had none) disable ProtonFusion's filter.
+        # Trailing whitespace is ignored: Proton keeps Save disabled for a
+        # script that has not changed, so uploading it would fail.
         script_action = "none"
-        if target_script and target_script != live_script:
+        if target_script and normalize_script(target_script) != normalize_script(live_script):
             script_action = "upload"
         elif not target_script and live_script:
             console.print(
