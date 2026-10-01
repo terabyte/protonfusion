@@ -96,12 +96,16 @@ class RestoreEngine:
 
     def __init__(self, sync: ProtonMailSync):
         self.sync = sync
-        # Filters whose switch did not turn on when clicked: how ProtonMail
-        # refuses an enable at the account's active-filter limit
+        # Filters whose switch was not seen to turn on after the click: how
+        # ProtonMail refuses an enable at the account's active-filter limit
         self.enable_refused: List[str] = []
         # The pairs the last apply() call confirmed in the requested state, in
         # order: names can repeat, so a rollback needs the rows themselves.
         self.last_done: List[Pair] = []
+        # The pairs the last apply() call may have changed, in order: those
+        # confirmed, plus those clicked whose switch was not seen to change
+        # (it may have changed late). What a rollback has to undo.
+        self.last_touched: List[Pair] = []
 
     @staticmethod
     def plan(backup: Backup, current_filters: List[ProtonMailFilter]) -> RestorePlan:
@@ -218,25 +222,34 @@ class RestoreEngine:
         """Set each matched live row to `enabled`, by row position confirmed by name.
 
         Uses ProtonMailSync.set_row_enabled, so a shared name never toggles
-        the wrong row, and a click that did not change the switch counts as
-        a failure. Carries on past a failure. Returns (names done,
-        error lines naming each failure); the pairs done are in last_done.
+        the wrong row, and a click whose switch was not seen to change counts
+        as a failure, though the row lands in last_touched as possibly
+        changed. Carries on past a failure. Returns (names done, error lines
+        naming each failure); the pairs done are in last_done.
         """
         done, errors = [], []
         self.last_done = []
+        self.last_touched = []
         verb = "enable" if enabled else "disable"
         for backed, live in pairs:
             try:
                 if await self.sync.set_row_enabled(live.priority, live.name, enabled):
                     done.append(backed.name)
                     self.last_done.append((backed, live))
+                    self.last_touched.append((backed, live))
                 elif self.sync.last_toggle_refused:
-                    errors.append(f"{backed.name}: failed to {verb}: its switch did not change when clicked")
+                    errors.append(
+                        f"{backed.name}: failed to {verb}: its switch was clicked but not seen to change "
+                        "(it may have changed after the check)"
+                    )
+                    self.last_touched.append((backed, live))
                     if enabled:
                         self.enable_refused.append(backed.name)
                 else:
                     errors.append(f"{backed.name}: failed to {verb} (row {live.priority} not found unambiguously)")
             except Exception as e:
+                # The click may have happened, so the row may have changed
+                self.last_touched.append((backed, live))
                 # A Playwright error's call log can carry the page URL, whose
                 # fragment holds a session key during Proton's fork.
                 reason = loggable_text(str(e)) or type(e).__name__

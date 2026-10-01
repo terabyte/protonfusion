@@ -1175,7 +1175,9 @@ async def _reenable_after_failed_upload(
     """Turn back on every filter this sync disabled, after its upload failed.
 
     Otherwise a failed upload leaves neither the old UI filters nor the new
-    script handling mail. Every filter is attempted even if an earlier one
+    script handling mail. `disabled` includes rows clicked off without the
+    switch being seen to change, which may be off; one still on is not
+    clicked. Every filter is attempted even if an earlier one
     raised, and each one that is not confirmed back on is listed with why,
     plus the `restore` command that brings it back. `snapshot_name` is the
     resolved snapshot directory name, never 'latest', which moves.
@@ -1195,7 +1197,8 @@ async def _reenable_after_failed_upload(
             if await sync_client.set_row_enabled(f.priority, f.name, True, expected_names=expected_names):
                 continue
             reason = (
-                "its switch did not change when clicked" if sync_client.last_toggle_refused
+                "its switch was clicked but not seen to turn on; check it in ProtonMail"
+                if sync_client.last_toggle_refused
                 else "its row could not be identified with certainty"
             )
         except Exception as e:
@@ -1207,7 +1210,7 @@ async def _reenable_after_failed_upload(
     color = "green" if not failed else "yellow"
     console.print(f"[{color}]Re-enabled {reenabled} of the {len(disabled)} filters this sync disabled.")
     if failed:
-        console.print(f"[bold red]Could not re-enable {len(failed)} filter(s); they are still disabled:")
+        console.print(f"[bold red]Could not re-enable {len(failed)} filter(s); they may still be disabled:")
         for f, reason in failed:
             console.print(f"  [red]- {escape(f.name)}: {escape(reason)}")
         console.print(f"[yellow]To re-enable them, run: restore --backup {snapshot_name}")
@@ -1643,6 +1646,10 @@ def sync(
             expected_names = _scraped_row_names(live_filters)
             disabled: List[ProtonMailFilter] = []
             not_disabled: List[ProtonMailFilter] = []
+            # Clicked, but the switch was not seen to go off: it may have gone
+            # off late, so a failed upload switches these back on with the
+            # rest (a no-op for one still on).
+            unconfirmed: List[ProtonMailFilter] = []
             for f in plan.to_disable:
                 try:
                     # require_current: a row the user switched off since the
@@ -1659,21 +1666,32 @@ def sync(
                         f"({escape(loggable_text(str(e)))}). Nothing was uploaded."
                     )
                     await _reenable_after_failed_upload(
-                        sync_client, disabled + [f], snapshot_dir.name, expected_names,
+                        sync_client, disabled + unconfirmed + [f], snapshot_dir.name, expected_names,
                     )
                     return False
                 if ok:
                     disabled.append(f)
+                elif sync_client.last_toggle_refused:
+                    unconfirmed.append(f)
                 else:
                     not_disabled.append(f)
             console.print(f"[green]Disabled {len(disabled)} filters")
             if not_disabled:
                 console.print(
                     f"[yellow]Could not disable {len(not_disabled)} filter(s): the row could not be "
-                    "identified with certainty, or was already switched off since the scrape. "
-                    "Any still enabled stay enabled alongside the Sieve script:"
+                    "identified with certainty, or was already switched off since the scrape, so it "
+                    "was not clicked. Any still enabled stay enabled alongside the Sieve script:"
                 )
                 for f in not_disabled:
+                    console.print(f"  [yellow]- {escape(f.name)}")
+            if unconfirmed:
+                console.print(
+                    f"[yellow]Could not confirm {len(unconfirmed)} filter(s) off: the switch was clicked "
+                    "but not seen to change, so the click may not have taken, or may have taken late. "
+                    "Either way the Sieve script also holds their rules; if the upload fails they are "
+                    "switched back on with the rest:"
+                )
+                for f in unconfirmed:
                     console.print(f"  [yellow]- {escape(f.name)}")
 
             upload_error = None
@@ -1701,7 +1719,7 @@ def sync(
                 if sync_client.upload_hit_filter_limit:
                     limit_sign = "The 'Add sieve filter' button was missing"
                 elif unchanged and sync_client.last_toggle_refused:
-                    limit_sign = f"The '{SIEVE_FILTER_NAME}' switch did not turn on when clicked"
+                    limit_sign = f"The '{SIEVE_FILTER_NAME}' switch was clicked but not seen to turn on"
                 if limit_sign:
                     console.print(
                         f"[yellow]{limit_sign}, which is how ProtonMail shows an account at its "
@@ -1709,7 +1727,9 @@ def sync(
                         "or delete enough of them by hand (or fold them in with 'backup' and "
                         "'consolidate'), then re-run sync."
                     )
-                await _reenable_after_failed_upload(sync_client, disabled, snapshot_dir.name, expected_names)
+                await _reenable_after_failed_upload(
+                    sync_client, disabled + unconfirmed, snapshot_dir.name, expected_names,
+                )
                 return False
 
             if not unchanged:
@@ -1721,7 +1741,8 @@ def sync(
                 f"[bold green]Sync complete![/]\n\n"
                 f"Sieve uploaded: {'No (already up to date)' if unchanged else 'Yes'}\n"
                 f"Filters disabled: {len(disabled)}\n"
-                f"Filters left enabled: {len(plan.left_enabled) + len(not_disabled)}\n\n"
+                + (f"Filters clicked off but not confirmed off: {len(unconfirmed)}\n" if unconfirmed else "")
+                + f"Filters left enabled: {len(plan.left_enabled) + len(not_disabled)}\n\n"
                 + _rollback_help(snapshot_dir),
                 title="Sync Complete",
             ))
@@ -2087,27 +2108,38 @@ def restore(
                 progress.disabled = [n for n in progress.disabled if n != SIEVE_FILTER_NAME]
                 progress.disable_errors += errors
 
-            async def _undo_enables_then_pf_on(enabled_pairs) -> None:
+            async def _undo_enables_then_pf_on(touched, confirmed_on) -> None:
                 """After a failed enable with ProtonFusion's filter off: get every rule running again.
 
-                The filters this run enabled may hold the active-filter slots
-                ProtonFusion's filter needs, so they go off first, newest
-                first, and then it is switched back on. If it still cannot
-                be, they go back on (they carry some of its rules), and the
-                rules left in no running filter are listed.
+                `touched` is every pair the enable step may have switched on
+                (confirmed, or clicked without the switch being seen to
+                change), `confirmed_on` those confirmed on. They may hold the
+                active-filter slots ProtonFusion's filter needs, so they go
+                off first, newest first (a row already off is not clicked),
+                and then it is switched back on. If it still cannot be, the
+                ones confirmed on before go back on (they carry some of its
+                rules), and the rules left in no running filter are listed.
                 """
-                progress.rolled_back, progress.rollback_errors = await engine.apply(
-                    list(reversed(enabled_pairs)), False,
-                )
-                rolled_back = list(engine.last_done)
+                _, progress.rollback_errors = await engine.apply(list(reversed(touched)), False)
+                maybe_off = list(engine.last_touched)
+                was_on = {id(live) for _, live in confirmed_on}
+                # Reported: only those that had been on. One never seen on is
+                # just confirmed off, as it started.
+                progress.rolled_back = [b.name for b, live in engine.last_done if id(live) in was_on]
                 await _switch_pf_back_on()
                 if progress.pf_back_on:
                     return
-                progress.reenabled, errors = await engine.apply(list(reversed(rolled_back)), True)
+                progress.reenabled, errors = await engine.apply(
+                    [pair for pair in reversed(maybe_off) if id(pair[1]) in was_on], True,
+                )
                 progress.rollback_errors += errors
-                off_again = {id(live) for _, live in rolled_back} - {id(live) for _, live in engine.last_done}
+                on_ids = was_on - {id(live) for _, live in maybe_off} | {id(live) for _, live in engine.last_done}
                 on_now = [f for f in current_filters if f.enabled and not f.is_sieve]
-                on_now += [live for _, live in enabled_pairs if id(live) not in off_again]
+                on_now += [live for _, live in touched if id(live) in on_ids]
+                _record_unfiltered(on_now)
+
+            def _record_unfiltered(on_now) -> None:
+                """With ProtonFusion's filter left off: list its rules no filter in `on_now` carries."""
                 try:
                     progress.unfiltered = [
                         fact.describe() for fact in uncovered_live_rules(live_script, "", on_now)
@@ -2115,12 +2147,19 @@ def restore(
                 except SieveParseError:
                     progress.unfiltered = None
 
-            # 0. ProtonFusion's filter off, when the backup has it off. If that
-            # failed, nothing went off, so there is nothing to switch back on.
+            # 0. ProtonFusion's filter off, when the backup has it off. If its
+            # row could not be identified, nothing was clicked and there is
+            # nothing to switch back on; if it was clicked but not seen to go
+            # off, it may have gone off late, so it is switched back on (a
+            # no-op when it is still on).
             if pf_first:
                 progress.disabled, progress.disable_errors = await engine.apply(pf_off_pairs, False)
                 if progress.disable_errors:
                     progress.stopped_at = "pf-disable"
+                    if engine.last_touched:
+                        await _switch_pf_back_on()
+                        if progress.pf_back_on is False:
+                            _record_unfiltered([f for f in current_filters if f.enabled and not f.is_sieve])
 
             # 1. Enable: only adds filtering
             if progress.stopped_at is None:
@@ -2129,7 +2168,7 @@ def restore(
                 if progress.enable_errors:
                     progress.stopped_at = "enable"
                     if pf_first:
-                        await _undo_enables_then_pf_on(list(engine.last_done))
+                        await _undo_enables_then_pf_on(list(engine.last_touched), list(engine.last_done))
 
             # 2. Replace the script (this switches ProtonFusion's filter on)
             if progress.stopped_at is None and script_action == "upload":
@@ -2182,8 +2221,8 @@ class RestoreState:
     ProtonFusion's filter off first), "enable", "upload", or None.
     pf_back_on says whether ProtonFusion's filter was switched back on
     after such a stop (None when that was not needed). enable_refused names
-    the filters whose switch did not turn on when clicked, which is how
-    ProtonMail refuses at the active-filter limit.
+    the filters whose switch was clicked but not seen to turn on, which is
+    how ProtonMail refuses at the active-filter limit.
 
     After a failed enable with ProtonFusion's filter switched off,
     rolled_back names the filters this run enabled and then switched off
@@ -2282,7 +2321,7 @@ def _print_restore_outcome(
     if state.enable_refused:
         console.print(
             "[yellow]The switch of " + ", ".join(f"'{escape(n)}'" for n in state.enable_refused)
-            + " did not turn on when clicked, which is how ProtonMail refuses a filter when the account "
+            + " was clicked but not seen to turn on, which is how ProtonMail refuses a filter when the account "
             "is at its active-filter limit. The report above is the account's current state. Disable or "
             "delete filters you do not need (or fold them in with 'backup' and 'consolidate'), then run "
             "the same restore again."
