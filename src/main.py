@@ -29,7 +29,7 @@ from src.parser.filter_parser import parse_scraped_filters
 from src.consolidator.consolidation_engine import ConsolidationEngine
 from src.generator.sieve_generator import SieveGenerator, SECTION_BEGIN
 from src.generator.sieve_rules import SieveParseError, compare_sections, extract_section, script_facts
-from src.consolidator.carry_forward import facts_to_filters, filter_facts, is_carried
+from src.consolidator.carry_forward import facts_to_filters, filter_facts, is_carried, label_targets
 
 SIEVE_FILTER_NAME = "ProtonFusion Consolidated"
 STATE_HELP = (
@@ -585,7 +585,11 @@ def consolidate(
                 suppressed |= filter_facts(f)
             to_carry = [fact for fact in comparison.dropped if fact not in suppressed]
 
-            carried, unconvertible = facts_to_filters(to_carry, label=snapshot_dir.name)
+            # The backup and archive say which fileinto targets are labels
+            known_labels = label_targets(list(bkup.filters) + [e.filter for e in archive_entries])
+            carried, unconvertible = facts_to_filters(
+                to_carry, label=snapshot_dir.name, label_names=known_labels,
+            )
             known_hashes = {e.filter.content_hash for e in archive_entries}
             now_ts = datetime.now(timezone.utc).isoformat()
             for f in carried:
