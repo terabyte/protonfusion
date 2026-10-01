@@ -32,6 +32,9 @@ python -m pytest tests/test_sieve_generator.py::test_generate_basic_rule -v
 | `test_snapshot.py` | Snapshot CLI commands: view, set-status, remove (using Typer CliRunner) |
 | `test_config.py` | Configuration loading, credential parsing |
 | `test_scraper.py` | Selector validation (offline, no browser needed) |
+| `test_browser.py` | Session slot, navigation fallback, saved-session load/save/permissions, expired-session errors (fake page, no browser) |
+| `test_login.py` | The `login` command and interactive login (fake browser) |
+| `test_navigation.py` | Integration: direct filters navigation, onboarding-modal dismissal and saved-session loading in headless Chromium, with `account.proton.me` served locally by route interception |
 | `test_parallel_scraping.py` | Worker distribution logic, chunk assignment |
 
 ### Key Fixtures (`conftest.py`)
@@ -50,6 +53,7 @@ The shared fixture file provides sample data for consistent test setup:
 - Backup tests that create time-based directory names need `sleep(1)` between creates to avoid timestamp collisions.
 - The `temp_snapshots_dir` fixture patches `PROTONFUSION_DATA_DIR` to isolate tests from real snapshot data.
 - Snapshot CLI tests require patching `SNAPSHOTS_DIR` in both `src.utils.config` and `src.backup.backup_manager` due to Python's import-time binding.
+- An autouse fixture points `PROTONFUSION_STORAGE_STATE` at a nonexistent temp file for every non-e2e test, so a developer's real saved session is never loaded.
 - Rich console width must be monkeypatched (`Console(width=200)`) for Typer CliRunner tests, since the runner captures output without a real terminal.
 
 ## End-to-End Test

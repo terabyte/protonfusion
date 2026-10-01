@@ -4,15 +4,27 @@ This document describes the ProtonMail web UI structure as it relates to ProtonF
 
 ## Navigation Path
 
-ProtonFusion navigates to the filters page through this sequence:
+ProtonFusion reaches the filters page like this:
 
-1. Login at `account.proton.me/login`
-2. Wait for redirect to inbox (URL contains `/apps` or `/mail`)
-3. Click the settings gear icon
-4. Click "All settings"
-5. Click "Filters" in the sidebar
+1. Reuse the saved session (mail app at `mail.proton.me/u/<slot>/inbox`), or log in at `account.proton.me/login`
+2. Record the session slot from the URL
+3. Go directly to `account.proton.me/u/<slot>/mail/filters` and assert the page structure
 
-Direct navigation to settings URLs (e.g., `mail.proton.me/settings/filters`) no longer works -- ProtonMail moved settings to `account.proton.me`.
+If step 3 fails, it falls back to clicking through the mail app: settings gear icon -> "All settings" -> "Filters" in the sidebar.
+
+The old `mail.proton.me/settings/filters` URLs no longer work -- ProtonMail moved settings to `account.proton.me`.
+
+## Session Slot
+
+Proton addresses each signed-in account by a slot in the path: `/u/0/`, `/u/1/`, and so on. The slot is not always 0; a fresh login has been seen landing on `/u/1/inbox` (2026-09-30). The slot is read from the URL after login and saved alongside the session, and every URL is built from it, so never hardcode `/u/0/`. The sidebar Filters link is matched as `a[href$="/mail/filters"]` for the same reason.
+
+## Human Verification
+
+Proton shows a Human Verification CAPTCHA to automated (headless, credential) logins, so those time out. Sign in by hand with the `login` command, which saves the Playwright storage state for the other commands to reuse.
+
+## Onboarding Modals
+
+A fresh account opens on a "Welcome to Proton Mail" tour: a `div.modal-two` with "Let's get started" and panel dots that intercepts every click. After login, and before clicking around, ProtonFusion tries the modal's close / Skip / "get started" / Next buttons in turn (Escape if none), a few rounds at most, and carries on if no modal is present. The buttons are listed in `selectors.ONBOARDING_DISMISS_BUTTONS`.
 
 ## Filters Page Structure
 
@@ -127,7 +139,7 @@ If any assertion fails, scraping aborts with a clear error message indicating wh
 
 When ProtonMail changes their UI:
 
-1. Open the filters page manually (Settings → All settings → Filters)
+1. Open the filters page manually (`account.proton.me/u/<slot>/mail/filters`, or Settings → All settings → Filters)
 2. Use browser dev tools to inspect the new element structure
 3. Update `src/scraper/selectors.py`
 4. Run the E2E test: `bash test_workflow.sh`

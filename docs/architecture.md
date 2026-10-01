@@ -121,8 +121,10 @@ Archive entries are carried forward automatically: when a new backup is created,
 The scraper uses **Playwright** to automate Chromium. ProtonMail has no public filter management API, so browser automation is the only option.
 
 **`ProtonMailBrowser`** is the base class shared by the scraper and sync engine. It handles:
-- Login (automated via credentials file, or manual with a 2-minute timeout)
-- Navigation to the filters settings page (inbox → gear icon → "All settings" → "Filters" sidebar link)
+- Login: reuse a saved session (Playwright storage state written by the `login` command) when one exists, otherwise automated via credentials file or manual with a 2-minute timeout. Headless runs with an expired session stop with a "run `login`" error instead of stalling on Proton's CAPTCHA.
+- The account's session slot (`/u/<slot>/` in Proton URLs), detected from the URL after login; all app URLs are built from it via `proton_url()` in `config.py`
+- Dismissing first-run onboarding modals (the Welcome tour) best-effort after login
+- Navigation to the filters settings page: directly to `account.proton.me/u/<slot>/mail/filters`, with the inbox → gear icon → "All settings" → "Filters" click path as a fallback; the page structure is asserted either way
 - Reading/writing Sieve scripts via the CodeMirror 5 JavaScript API
 
 **`ProtonMailScraper`** (read-only) scrapes filter details by opening each filter's edit modal and stepping through the wizard (Name → Conditions → Actions). It supports parallel scraping across multiple browser tabs.
@@ -262,7 +264,7 @@ The restore engine takes a backup and the current filter state, then enables or 
 
 ## CLI Layer
 
-The CLI is built with **Typer** and uses **Rich** for terminal output (tables, panels, colored text). All commands that interact with ProtonMail accept `--headless`, `--credentials-file`, `--manual-login`, and `--workers` flags.
+The CLI is built with **Typer** and uses **Rich** for terminal output (tables, panels, colored text). `login` signs in by hand in a visible browser and saves the session. All commands that interact with ProtonMail accept `--state`, `--headless`, and `--credentials-file` (most also `--manual-login` and `--workers`).
 
 Commands are organized by their relationship to the data flow:
 - **Read**: `show`, `show-backup`, `list-snapshots`, `analyze`, `diff`
