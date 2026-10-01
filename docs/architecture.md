@@ -36,12 +36,14 @@ src/
 │   └── restore_engine.py      # Re-enable/disable filters to match a backup state
 ├── consolidator/
 │   ├── consolidation_engine.py  # Main pipeline: strategy composition + reporting
+│   ├── carry_forward.py         # Rebuild live Sieve rules as archived filters
 │   └── strategies/
 │       ├── group_by_action.py     # Merge filters with identical actions
 │       ├── merge_conditions.py    # Combine compatible single-condition groups
 │       └── optimize_ordering.py   # Sort rules by action priority
 ├── generator/
-│   └── sieve_generator.py    # Generate RFC 5228 Sieve scripts
+│   ├── sieve_generator.py    # Generate RFC 5228 Sieve scripts
+│   └── sieve_rules.py        # Parse/compare the ProtonFusion section structurally
 └── utils/
     └── config.py              # Paths, URLs, timeouts, credential loading
 ```
@@ -63,9 +65,20 @@ ProtonMailFilter
 ├── logic: LogicType (AND | OR)
 ├── conditions: List[FilterCondition]
 │   └── FilterCondition { type: ConditionType, operator: Operator, value: str }
-└── actions: List[FilterAction]
-    └── FilterAction { type: ActionType, parameters: dict }
+├── actions: List[FilterAction]
+│   └── FilterAction { type: ActionType, parameters: dict }
+├── raw: ScrapeEvidence | None          # wizard text captured at scrape time
+│   └── { conditions_text, actions_text, sieve_text }
+├── scrape_issues: List[str]            # non-empty = not fully read
+└── is_sieve: bool                      # Edit opened the Sieve editor, not the wizard
 ```
+
+`raw` and `scrape_issues` describe how a filter was read, not what it does, so
+`content_hash` and the diff engine ignore them. The exception is a Sieve filter
+(`is_sieve`): its script is the filter, so `content_hash` includes
+`raw.sieve_text`. Sieve filters have no conditions or actions to work with, so
+`consolidate` skips them and `cleanup` never deletes them. A label action is
+`{"type": "label", "parameters": {"label": "<name>"}}`, one per label.
 
 After consolidation, filters are represented as `ConsolidatedFilter`:
 
@@ -87,7 +100,7 @@ The key insight is the **ConditionGroup** abstraction. When multiple filters are
 |------|--------|
 | `ConditionType` | sender, recipient, subject, attachments, header |
 | `Operator` | contains, is, matches, starts_with, ends_with, has |
-| `ActionType` | move_to, label, mark_read, star, archive, delete |
+| `ActionType` | move_to, label, mark_read, star, archive, trash (old backups' `delete` is read as trash) |
 | `LogicType` | and, or |
 | `FilterStatus` | enabled, disabled, archived, deprecated |
 
@@ -106,7 +119,7 @@ The `enabled: bool` field is kept in sync with `status` via a Pydantic model val
 
 ### Archive System
 
-`ArchiveEntry` wraps a `ProtonMailFilter` with metadata (`archived_at`, `source_snapshot`). The `Archive` model contains a list of entries and is stored as `archive.json` in each snapshot directory.
+`ArchiveEntry` wraps a `ProtonMailFilter` with metadata (`archived_at`, `source_snapshot`, `source_format`). `source_format` is the backup format whose reader produced the filter: the source backup's version for a scraped filter, the current format for one rebuilt from Sieve or scraped live by `cleanup`. An entry without it (written before the field existed) counts as older than 1.3. Entries older than 1.3 may hold misread operators, so `consolidate` and `sync` treat them like an old snapshot (see `unverified_old_entries` in `backup_manager.py`) unless the current backup holds a fully read filter with the same `content_hash`. Such a confirmation is recorded by stamping the entry: `consolidate` stamps an entry the current backup confirms, and `cleanup` one whose fully read filter it deletes, since nothing could confirm it once the filter is gone. A filter `consolidate --keep-live-rules` carries forward from the live section is no better than an unconfirmed old entry whose rule it shares, since the old version generated that live rule from the possibly misread filter: it is recorded with that entry's hash in `matches_unverified` and stays unverified until the entry is confirmed, even if the entry is removed (see `classify_old_entries`). A carried entry without a `source_format` (written by an earlier build) is confirmed instead by finding its rules unchanged in the live section captured in the backup, and is then stamped. The `Archive` model contains a list of entries and is stored as `archive.json` in each snapshot directory.
 
 Archive entries are carried forward automatically: when a new backup is created, the `archive.json` from the previous snapshot (via the `latest` symlink) is copied into the new snapshot directory.
 
@@ -121,11 +134,15 @@ Archive entries are carried forward automatically: when a new backup is created,
 The scraper uses **Playwright** to automate Chromium. ProtonMail has no public filter management API, so browser automation is the only option.
 
 **`ProtonMailBrowser`** is the base class shared by the scraper and sync engine. It handles:
-- Login (automated via credentials file, or manual with a 2-minute timeout)
-- Navigation to the filters settings page (inbox → gear icon → "All settings" → "Filters" sidebar link)
+- Login: reuse a saved session (Playwright storage state written by the `login` command) when one exists, otherwise automated via credentials file or manual with a 2-minute timeout. Headless runs with an expired session stop with a "run `login`" error instead of stalling on Proton's CAPTCHA.
+- The account's session slot (`/u/<slot>/` in Proton URLs), detected from the URL after login; all app URLs are built from it via `proton_url()` in `config.py`
+- Dismissing first-run onboarding modals (the Welcome tour) best-effort after login
+- Navigation to the filters settings page: directly to `account.proton.me/u/<slot>/mail/filters`, with the inbox → gear icon → "All settings" → "Filters" click path as a fallback; the page structure is asserted either way
 - Reading/writing Sieve scripts via the CodeMirror 5 JavaScript API
 
 **`ProtonMailScraper`** (read-only) scrapes filter details by opening each filter's edit modal and stepping through the wizard (Name → Conditions → Actions). It supports parallel scraping across multiple browser tabs.
+
+The scraper never guesses. Anything it sees but cannot parse (an unknown action row, an unreadable dropdown, an unknown condition type or operator, a wizard that will not open) is added to that filter's `scrape_issues`, and a filter that fails outright is kept as a flagged stub instead of dropped. It also stores each step's visible text and form-field state in `raw`. `backup` refuses to save while any filter is incomplete unless given `--allow-incomplete`.
 
 **`ProtonMailSync`** (write operations) handles creating, deleting, enabling, and disabling filters, as well as uploading Sieve scripts.
 
@@ -169,7 +186,7 @@ This preserves exact behavioral equivalence.
 
 ### Strategy 3: Optimize Ordering (`optimize_ordering.py`)
 
-Rules are sorted by action priority (delete > archive > move > label > mark_read > star), with a secondary sort by filter count. This ensures the most impactful rules (like spam deletion) are evaluated first.
+Rules are sorted by action priority (trash > archive > move > label > mark_read > star), with a secondary sort by filter count.
 
 ### Adding New Strategies
 
@@ -179,10 +196,11 @@ Each strategy is a function with the signature `List[ConsolidatedFilter] → Lis
 
 The generator converts `ConsolidatedFilter` objects into RFC 5228 Sieve scripts. Key behaviors:
 
-- **Extension collection**: Scans all filters for required Sieve extensions (fileinto, imap4flags, regex) and generates the appropriate `require` statement.
-- **Pipe-delimited arrays**: Values like `"alice|bob"` expand to Sieve arrays `["alice", "bob"]`.
+- **Extension collection**: Scans all filters for required Sieve extensions (fileinto, imap4flags) and generates the appropriate `require` statement.
+- **Key lists**: A condition's `values` list (several wizard chips, or values merged by consolidation) becomes a Sieve array `["alice", "bob"]`. A single `value` is always one literal, even if it contains ", " or "|".
 - **Section markers**: Generated rules are wrapped in `# === BEGIN ProtonFusion ===` / `# === END ProtonFusion ===` markers.
-- **Merging**: When uploading to an account that already has a Sieve script, content outside the markers is preserved. Require statements are deduplicated.
+- **Merging**: When uploading to an account that already has a Sieve script, content outside the markers is preserved in place (above the section stays above, below stays below). Require statements are deduplicated.
+- **Rule preservation**: `sieve_rules.py` parses a section into condition/action pairs. `sync` refuses if the new section drops a pair present in the live one, and `cleanup` only deletes disabled filters whose pairs are all live. See [sieve-reference.md](sieve-reference.md#rule-preservation).
 
 ### Sieve Mapping
 
@@ -195,8 +213,8 @@ The generator converts `ConsolidatedFilter` objects into RFC 5228 Sieve scripts.
 | label "X" | `fileinto "X";` |
 | mark as read | `addflag "\\Seen";` |
 | star | `addflag "\\Flagged";` |
-| archive | `fileinto "Archive";` |
-| delete | `discard;` |
+| archive | `fileinto "archive";` (a live `"Archive"` compares equal) |
+| trash | `fileinto "trash";` (never `discard;`, which Proton documents as a permanent delete) |
 
 ## Snapshot System
 
@@ -218,6 +236,10 @@ snapshots/
 ### backup.json
 
 Contains the full Pydantic-serialized `Backup` object: metadata (filter counts, account email, tool version), the list of `ProtonMailFilter` objects, the existing Sieve script (captured from the account at backup time), and a SHA-256 checksum for integrity verification.
+
+`version` is `1.3`: each filter carries `raw`, `scrape_issues` (added in 1.1) and `is_sieve` (added in 1.2); 1.3 adds no fields and marks a backup written by the strict parser (older ones may hold misread operators, so `consolidate` warns about them and archives nothing from them, and `sync` refuses them without `--allow-old-snapshot`). Older backups still load, and their checksum is verified against `backup.json` as written, before any older value is migrated (`delete` to `trash`, `Spam` to `spam`, empty values quarantined), leaving out the fields their format lacked (see `compute_stored_checksum`). `restore` matches an older backup's filters (format before 1.3) to the live ones with `legacy_identity`, which reads a ", "-joined value as separate chips and an unescaped "/" in a folder or label name as the escaped form, so a filter written before those fixes still matches. For a backup without `is_sieve`, a filter with a captured `raw.sieve_text` is read as a Sieve filter.
+
+`cleanup` deletes a disabled filter only if the latest snapshot's `backup.json` or `archive.json` holds a copy with the same `content_hash`, no `scrape_issues`, and non-null `raw` (see `unverified_for_deletion` in `backup_manager.py`). Override with `--allow-incomplete`.
 
 ### manifest.json
 
@@ -258,11 +280,11 @@ The diff engine compares two filter states (backup vs. backup, or backup vs. cur
 
 ### Restore Engine
 
-The restore engine takes a backup and the current filter state, then enables or disables filters to match the backup. It reports on filters that were not found (deleted since backup), already correct, successfully toggled, or errored. Archived and deprecated filters are skipped during restore since they don't exist on ProtonMail.
+The restore engine plans and applies the filter half of `restore`: given a backup and the current filter state, it decides which filters to enable or disable to match the backup. The `restore` command handles the script half (uploading the backed-up ProtonFusion script) and the ordering: enable, then upload, then disable (with ProtonFusion's own filter switched off first when the backup has it off, for the active-filter limit, and the enables undone before it is switched back on if one fails). Each backed-up filter is matched to the live filter with the same content hash first, then, only if none has it, by `legacy_identity` (Sieve filters by name, since their script is what restore leaves alone), and toggled by row position plus name, so a shared name never toggles the wrong row; a match it cannot make unambiguously, including a legacy-identity group of filters whose content differs, is reported and left alone. It reports filters not found (deleted or changed since backup), ambiguous, already correct, successfully toggled, or errored. Archived and deprecated filters are skipped during restore since they don't exist on ProtonMail.
 
 ## CLI Layer
 
-The CLI is built with **Typer** and uses **Rich** for terminal output (tables, panels, colored text). All commands that interact with ProtonMail accept `--headless`, `--credentials-file`, `--manual-login`, and `--workers` flags.
+The CLI is built with **Typer** and uses **Rich** for terminal output (tables, panels, colored text). `login` signs in by hand in a visible browser and saves the session. All commands that interact with ProtonMail accept `--state`, `--headless`, and `--credentials-file` (most also `--manual-login` and `--workers`).
 
 Commands are organized by their relationship to the data flow:
 - **Read**: `show`, `show-backup`, `list-snapshots`, `analyze`, `diff`

@@ -12,11 +12,14 @@ The downside is fragility -- ProtonMail can change their UI at any time and brea
 
 Every design choice prioritizes reversibility:
 
-- **Disable, don't delete.** When syncing, old UI filters are disabled rather than deleted. This means you can always re-enable them manually or via the `restore` command.
+- **Disable, don't delete.** When syncing, old UI filters are disabled rather than deleted. This means you can always re-enable them manually or via the `restore` command, which also puts back the ProtonFusion script captured in that backup (see [Restore Is a Full Rollback](#restore-is-a-full-rollback)). See [Which Filters Sync Disables](#which-filters-sync-disables).
 - **Snapshot-based operations.** Every action references a snapshot. You never modify filter data in place -- you create a new snapshot directory.
 - **Section markers in Sieve.** Generated Sieve rules are wrapped in `# === BEGIN/END ProtonFusion ===` markers. User-authored Sieve rules outside these markers are preserved during merge. This allows ProtonFusion to coexist with hand-written Sieve rules.
+- **Refuse rather than drop.** `sync` compares the live ProtonFusion section with the new one and refuses, before disabling or uploading anything, if any rule would disappear. See [Refusing to Drop Live Rules](#refusing-to-drop-live-rules).
+- **Never delete the last copy.** `cleanup` only deletes a disabled UI filter whose rules are all present in the live ProtonFusion section.
 - **Dry-run mode.** The `sync` and `cleanup` commands support `--dry-run` to preview changes before committing.
-- **Checksums.** Every backup includes a SHA-256 checksum so corruption can be detected.
+- **Checksums.** Every backup includes a SHA-256 checksum, and `load_backup` verifies it, so every command refuses a `backup.json` that changed after it was written. A hand edit fails this too, on purpose: it can change what a filter does. The global `--ignore-checksum` (before the command name) loads one anyway, with unknown values flagged incomplete rather than guessed.
+- **Incomplete reads are loud.** The scraper once read only the folder and mark-as rows of the Actions step, so every "Label as" action was silently dropped from backups and Sieve, and `cleanup` then deleted the only copy. Now anything the scraper cannot parse marks the filter incomplete, `backup` refuses to save it without `--allow-incomplete`, `consolidate` leaves it out of the script (what was read of a filter can be wider than the filter: an AND filter missing a condition matches more, and one whose only condition was dropped matches everything) unless given `--allow-incomplete`, each filter keeps the wizard's raw text as evidence, and `cleanup` refuses to delete a filter without a complete, evidence-bearing backup copy.
 
 ## Snapshot Architecture (vs. Single Backup File)
 
@@ -60,7 +63,37 @@ On every `backup`, `archive.json` is copied from the previous snapshot (via the 
 
 ### Post-Consolidation Auto-Archiving
 
-When `consolidate` runs, backup filters that were included in Sieve generation are automatically moved to `archive.json` as `archived`. This prepares the archive for the next cycle — after `sync` and `cleanup` remove UI filters, the next backup won't find them, but the archive still has them.
+When `consolidate` runs, backup filters that were included in Sieve generation are automatically moved to `archive.json` as `archived`. This prepares the archive for the next cycle: after `sync` and `cleanup` remove UI filters, the next backup won't find them, but the archive still has them. Inclusion is tracked by `content_hash`, never by name, so a disabled filter that shares a name with an included one is not archived (and its rule does not reach the next script).
+
+`cleanup` archives too, but only after the deletion is confirmed and only the filters it is deleting: a dry run or a declined prompt writes nothing, and a filter it refuses is not archived (its live copy would otherwise become the "verified backup copy" the next run checks for). A filter deleted with `--include-uncovered` is archived as `deprecated`, not `archived`: its rules are not in the live section and it was disabled, so consolidating it would switch on a rule the user had switched off.
+
+### Refusing to Drop Live Rules
+
+The archive only protects rules that went through it. Rules consolidated before the archive system existed, or whose `archive.json` was lost, live only in the ProtonFusion section of the live Sieve script once `cleanup` has deleted their UI filters. The next backup -> consolidate -> sync would regenerate the section from the few surviving UI filters and delete them. For example, a section built from a couple of hundred filters, rebuilt from the handful of UI filters created since the last cleanup.
+
+So `sync` treats the live section as data, not as output to overwrite. It parses both sections into condition/action pairs and refuses if any live pair is missing from the new one (details and limits in [sieve-reference.md](sieve-reference.md#rule-preservation)). The comparison is structural rather than a text diff because consolidation legitimately regroups, reorders and re-merges rules on every run; a text diff would cry wolf on every sync and get overridden by reflex. Anything the parser does not model is compared verbatim, so unfamiliar constructs cause a refusal rather than a silent pass. The check runs before any filter is disabled, so a refusal leaves the account untouched, and `cleanup` independently checks each disabled filter against the live section before deleting it, so a refused or failed sync can never be followed by deleting the only copy.
+
+`--allow-rule-removal` overrides the refusal. Removing a rule therefore takes an explicit act: deprecate it (`snapshot set-status ... deprecated`) or exclude it, then sync with the override.
+
+### Carrying Forward Live Rules (`consolidate --keep-live-rules`)
+
+Refusing is only half the fix; there must also be a supported way to keep the rules. The options considered:
+
+1. **Splice the live rules into the new section as text.** Simple, but the spliced rules would never re-enter the model: they would not be consolidated with new filters, not be visible in `snapshot view`, not be deprecatable, and would have to be re-spliced from the live script on every run forever.
+2. **Have `sync` merge (union) the live and new sections at upload time.** This hides the problem at the last step, makes the uploaded script differ from the reviewed `consolidated.sieve`, and makes it impossible to ever remove a rule.
+3. **Rebuild the missing rules as filters and store them in the archive.** Chosen.
+
+With `--keep-live-rules`, `consolidate` compares the new section with the live section captured in the backup, converts each dropped condition/action pair back into a `ProtonMailFilter` (the inverse of the generator), and adds them to `archive.json` with status `archived` and a name starting `Carried forward (<snapshot>):`. Consolidation then runs again with them included. The result is a union of the scraped filters and the live section, but the union lives in the model, so:
+
+- the carried rules consolidate with everything else and show up in `snapshot view`;
+- every later backup inherits them through the normal archive carry-forward, so the flag is needed once to repair an account, not on every run;
+- they can be removed the normal way (`snapshot set-status <name> deprecated`, or `snapshot remove`).
+
+Rules the user removed on purpose are not resurrected: pairs belonging to deprecated filters or to filters named by `--exclude` are skipped. Conversion is verified, not trusted: each rebuilt filter is regenerated and must yield exactly the pairs it was built from. Anything that cannot round-trip (`stop`, `redirect`, unmodelled tests) is listed as unconvertible and left out, so `sync` still refuses until the user moves those rules outside the markers by hand.
+
+Carried entries are re-checked rather than trusted forever. Earlier builds wrote them without a `source_format`, and no backup can confirm one (carried filters are not UI filters), so such an entry is confirmed when every rule it generates is in the live section captured in the backup, unchanged, and is then stamped. One that is not gets its own warning, distinct from entries taken from old backups. When `--keep-live-rules` carries the rules of an unverified carried entry again, the new copy replaces it; the match is by rules, since the snapshot label in the name changes the hash on every run. Earlier builds also stored several keys `|`-joined in one value, so an unstamped entry's `|` is read as a join; a stamped one is written with a values list and never split again.
+
+It is opt-in rather than the default because it changes `archive.json`, and because the refusal already makes the default path loud: `consolidate` warns and `sync` refuses, both naming the flag. Test values come back lowercased, which matches Sieve's default case-insensitive comparison.
 
 ### Backward Compatibility
 
@@ -109,9 +142,17 @@ Only read-only operations are parallelized. Write operations (disable, delete, u
 
 ProtonMail's dropdown UI displays subfolder names with a bullet prefix (`• Child Folder`), but Sieve `fileinto` requires the full path (`Parent/Child`). The scraper builds a path map by reading dropdown items in display order -- non-bulleted items are tracked as the current parent, and bulleted items are mapped to `Parent/Child` paths. This map is cached per scraper instance and built lazily on the first folder action encounter.
 
+## Which Filters Sync Disables
+
+ProtonMail limits active filters per plan, so `sync` disables UI filters before uploading the Sieve filter. It used to disable every enabled row, which turned off other Sieve filters (and ProtonFusion's own, leaving nothing filtering mail if the upload then failed) and silently stopped any filter created after the backup, whose rule was never consolidated.
+
+Now `sync` scrapes the live filters and disables only wizard filters whose `content_hash` (name, logic, conditions, actions) is in the set the script was built from: the snapshot manifest's `filter_hashes`, or every wizard filter in the `--backup` snapshot when `--sieve` names a script with no manifest. Matching by content rather than name means a filter edited since the backup stays on. Sieve filters, unmatched filters, and rows the scraper could not read in full are left enabled and listed, so a mismatch errs toward a rule running twice, never toward a rule not running. `--dry-run` shows the plan from the backup and `--show-diff-only` from the live account.
+
+Rows are toggled by scraped position, confirmed by name (`set_row_enabled`), since names need not be unique, and each switch is read back after the click, so a click that did not take counts as a failure rather than a done toggle. The read-back polls for up to 5 seconds, finding the row afresh on every read, since Proton may flip the switch only once its API call returns or re-render the row. A row clicked but not seen to change may still have changed late, so it is treated as possibly changed: if the upload fails, every row this run disabled or clicked is re-enabled (re-enabling a row that is on clicks nothing); any that cannot be are listed with the `restore` command. A missing "Add sieve filter" button is reported as the probable active-filter limit, with the filters left enabled as the ones to disable or fold in. `sync` never falls back to disabling everything.
+
 ## Free Tier Limitations
 
-ProtonMail's free tier allows only 1 custom filter at a time. Both the "Add filter" and "Add sieve filter" buttons disappear once a filter exists. The sync workflow accounts for this by disabling existing UI filters before creating the Sieve filter, freeing the slot.
+ProtonMail's free tier allows only 1 custom filter at a time. Both the "Add filter" and "Add sieve filter" buttons disappear once a filter exists. The sync workflow accounts for this by disabling the UI filters the script replaces before creating the Sieve filter, freeing the slot.
 
 ## CodeMirror 5 Integration
 
@@ -122,3 +163,16 @@ document.querySelector('.CodeMirror').CodeMirror.setValue(script)
 ```
 
 This properly triggers change events and enables the Save button.
+
+## Restore Is a Full Rollback
+
+`restore --backup <snapshot>` puts back both halves of a sync: the UI filters' on/off states and the `ProtonFusion Consolidated` script (`backup.json`'s `sieve_script`). It previews, asks, and saves a safety backup of the current state first (not made `latest`, since after the restore it no longer describes the account), so the restore can itself be undone.
+
+The order is chosen so a failure part-way never leaves mail unfiltered: enable the filters the backup has on, then replace the script, then disable the filters the backup has off. It stops at the first failed enable or a failed upload (an upload that raises is reported as leaving the script in an unknown state) with every rule from before the restore still active, so the worst a failure leaves is a rule applied twice, and reports what was done. The one exception to this order, for the active-filter limit, is below.
+
+That ordering only covers a failure part-way. A completed restore switches off whatever the backed-up state does not have, and after `cleanup` (which deletes UI filters once the live section holds their rules) or an edit since the backup, the backed-up script can lack rules whose filter restore cannot switch back on. So before changing anything restore compares the live ProtonFusion section with the script that will filter mail afterwards (the backed-up one, or none if the backup has ProtonFusion's filter off) plus every wizard filter that will be on, and refuses, listing each rule found in neither, unless `--allow-rule-removal`. The guarantee is therefore: no rule ends up in neither place without that flag, and no failure part-way switches off a rule that was active.
+
+ProtonMail's active-filter limit counts ProtonFusion's own filter. When the backup has that filter off, enabling the UI filters while it is still on can push the account over the limit, so in that case restore switches it off first, then enables, uploads (if the script differs; saving switches the filter on) and disables, the filter included. The trade-off is a window in which its rules run only through the UI filters being enabled. That window is safe because the check above requires every live rule to be carried by a filter that is on afterwards when the backup has the ProtonFusion filter off. If an enable fails, the filters this run enabled (or clicked without seeing the switch change) may hold the slots the ProtonFusion filter needs, so restore switches them back off, newest first, and only then switches the ProtonFusion filter back on. If it still cannot come back on, the filters that were on go back on, since they carry some of its rules, and the report lists exactly which of its rules are then in no running filter. If the first step's click could not be made at all (the row could not be identified), nothing went off and nothing is switched back. When the backup has it on, the order is unchanged, and an enable whose switch is not seen to turn on, which is how ProtonMail refuses at the limit, is reported as the probable limit along with exactly what was enabled and disabled.
+
+Filters are matched by content hash first and toggled by row position confirmed by name, as `sync` does; a Sieve filter is matched by name, since its script is exactly what may differ. Only a backed-up filter with no exact match falls back to `legacy_identity` (older encodings normalised), and a legacy group whose members differ in content hash is ambiguous rather than paired by row order. A backup older than format 1.3 goes straight to the legacy match, since its stored form may itself be a legacy encoding. The rule check counts a legacy form of a rule (the old `discard;` for Trash, a wildcard-less begins-with) in the restored script as carrying the live rule, in either direction. If the backup holds no script while the account has one, restore refuses unless `--allow-empty-script`, which disables the ProtonFusion filter rather than uploading an empty script.
+

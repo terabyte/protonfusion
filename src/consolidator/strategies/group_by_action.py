@@ -96,8 +96,8 @@ def _describe_actions(actions: List[FilterAction]) -> str:
             parts.append("Star")
         elif a.type == ActionType.ARCHIVE:
             parts.append("Archive")
-        elif a.type == ActionType.DELETE:
-            parts.append("Delete")
+        elif a.type == ActionType.TRASH:
+            parts.append("Move to Trash")
         else:
             parts.append(str(a.type.value))
     return " + ".join(parts) if parts else "Unknown action"

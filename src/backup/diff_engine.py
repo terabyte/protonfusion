@@ -9,6 +9,10 @@ from src.models.backup_models import Backup
 
 logger = logging.getLogger(__name__)
 
+# Scrape evidence describes how a filter was read, not what it does, so it
+# must not make two otherwise identical filters compare as "modified".
+_EVIDENCE_FIELDS = ("raw", "scrape_issues")
+
 
 @dataclass
 class FilterDiff:
@@ -71,15 +75,16 @@ class DiffEngine:
         """Check if two filters are identical (status excluded, like enabled)."""
         d1 = f1.model_dump()
         d2 = f2.model_dump()
-        d1.pop("status", None)
-        d2.pop("status", None)
+        for key in ("status",) + _EVIDENCE_FIELDS:
+            d1.pop(key, None)
+            d2.pop(key, None)
         return d1 == d2
 
     def _filters_equal_except_enabled(self, f1: ProtonMailFilter, f2: ProtonMailFilter) -> bool:
         """Check if filters are identical except for enabled/status state."""
         d1 = f1.model_dump()
         d2 = f2.model_dump()
-        for key in ("enabled", "status"):
+        for key in ("enabled", "status") + _EVIDENCE_FIELDS:
             d1.pop(key, None)
             d2.pop(key, None)
         return d1 == d2

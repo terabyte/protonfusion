@@ -4,7 +4,7 @@ ProtonFusion has two testing layers: a comprehensive unit test suite that runs o
 
 ## Unit Tests
 
-307 tests across 8 test files, plus a shared `conftest.py` with 23 fixtures.
+The suite runs offline (fake browsers, plus headless Chromium against local mock pages for the integration tests) and finishes in a minute or two. Run `python -m pytest -q` for the current count; it is not recorded here because it goes stale with every PR.
 
 ### Running
 
@@ -28,11 +28,24 @@ python -m pytest tests/test_sieve_generator.py::test_generate_basic_rule -v
 | `test_backup.py` | Backup creation, loading, listing, checksum verification, manifests, archive I/O, carry-forward |
 | `test_consolidator.py` | All three consolidation strategies, the engine pipeline, and status-based filter selection |
 | `test_sieve_generator.py` | Sieve script generation, extension collection, merging with existing scripts |
+| `test_sieve_rules.py` | Structural Sieve section parsing and live-vs-new rule comparison |
+| `test_sync_safety.py` | `sync` refusal, dry-run/show-diff surfacing, which filters `sync` disables and re-enables after a failed upload, and `cleanup` coverage guard (ProtonMail clients faked) |
+| `test_carry_forward.py` | Rebuilding live Sieve rules as archived filters, `consolidate --keep-live-rules` |
 | `test_diff.py` | Filter comparison (added, removed, modified, state_changed, unchanged), status-aware diffing |
 | `test_snapshot.py` | Snapshot CLI commands: view, set-status, remove (using Typer CliRunner) |
 | `test_config.py` | Configuration loading, credential parsing |
-| `test_scraper.py` | Selector validation (offline, no browser needed) |
+| `test_scraper.py` | Selector validation and the "Label as" row parser (offline, no browser needed) |
+| `test_browser.py` | Session slot, navigation fallback, saved-session load/save/permissions, expired-session errors (fake page, no browser) |
+| `test_login.py` | The `login` command and interactive login (fake browser) |
+| `test_navigation.py` | Integration: direct filters navigation, onboarding-modal dismissal and saved-session loading in headless Chromium, with `account.proton.me` served locally by route interception |
 | `test_parallel_scraping.py` | Worker distribution logic, chunk assignment |
+| `test_label_scraping.py` | Integration: ticked-checkbox label reading (live DOM shape) and raw evidence against the mock page |
+| `test_scrape_completeness.py` | Integration: filters the scraper cannot fully read are flagged (mock page `?set=edge`) |
+| `test_cli_safety.py` | `backup` refusing incomplete scrapes and `cleanup` refusing unverified deletions (fake browser) |
+| `test_delete_filter.py` | `delete_filter` only ever deletes a single, disabled row in the Custom filters section (fake page) |
+| `test_toggle_row.py` | `set_row_enabled` toggles the row `sync` matched, by position and name, and clicks nothing when unsure (fake page) |
+| `test_private_files.py` | `write_private_file`: owner-only, atomic, never follows a planted temp path |
+| `test_step_text.py` | Integration: raw step evidence comes only from the wizard modal, never the whole page |
 
 ### Key Fixtures (`conftest.py`)
 
@@ -50,6 +63,7 @@ The shared fixture file provides sample data for consistent test setup:
 - Backup tests that create time-based directory names need `sleep(1)` between creates to avoid timestamp collisions.
 - The `temp_snapshots_dir` fixture patches `PROTONFUSION_DATA_DIR` to isolate tests from real snapshot data.
 - Snapshot CLI tests require patching `SNAPSHOTS_DIR` in both `src.utils.config` and `src.backup.backup_manager` due to Python's import-time binding.
+- An autouse fixture points `PROTONFUSION_STORAGE_STATE` at a nonexistent temp file for every non-e2e test, so a developer's real saved session is never loaded.
 - Rich console width must be monkeypatched (`Console(width=200)`) for Typer CliRunner tests, since the runner captures output without a real terminal.
 
 ## End-to-End Test

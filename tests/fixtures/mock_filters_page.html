@@ -72,6 +72,11 @@
       <div id="actionsContainer"></div>
     </div>
 
+    <!-- Sieve editor: shown instead of the wizard when editing a Sieve filter -->
+    <div id="step-sieve" class="wizard-step hidden">
+      <div class="CodeMirror" id="sieveEditor"></div>
+    </div>
+
     <!-- Single Next/Cancel buttons always visible at bottom of modal -->
     <div id="modalButtons">
       <button data-testid="filter-modal:next-button" id="nextBtn" onclick="advanceStep()">Next</button>
@@ -95,7 +100,7 @@
 
 <script>
 // Filter data - 10 mock filters with varying conditions/actions
-const FILTERS = [
+const DEFAULT_FILTERS = [
   {
     name: "Newsletter Trash",
     enabled: true,
@@ -104,6 +109,9 @@ const FILTERS = [
       { type: "the sender", operator: "contains", values: ["newsletter@example.com"] }
     ],
     folder: "Trash",
+    // First filter with a folder: the scraper builds its folder map here,
+    // which presses Escape. Its label must still be read.
+    labels: ["pf-test-label"],
     markRead: false,
     markStarred: false
   },
@@ -115,6 +123,7 @@ const FILTERS = [
       { type: "the sender", operator: "ends with", values: ["@company.com"] }
     ],
     folder: "Work",
+    labels: ["Work"],
     markRead: false,
     markStarred: false
   },
@@ -146,7 +155,7 @@ const FILTERS = [
     enabled: false,
     logic: "all",
     conditions: [
-      { type: "the subject", operator: "contains", values: ["buy now", "limited offer"] }
+      { type: "the subject", operator: "contains", values: ["buy now", "limited offer", "Invoice, Receipt"] }
     ],
     folder: "Trash",
     markRead: false,
@@ -161,6 +170,7 @@ const FILTERS = [
       { type: "the subject", operator: "begins with", values: ["Q"] }
     ],
     folder: "• Finance",
+    labels: ["Finance", "Taxes"],
     markRead: false,
     markStarred: true
   },
@@ -206,10 +216,93 @@ const FILTERS = [
       { type: "the sender", operator: "contains", values: ["alert1@test.com", "alert2@test.com"] }
     ],
     folder: "Work",
+    labels: ["Alerts", "On Call"],
     markRead: true,
     markStarred: true
   }
 ];
+
+// Loaded with ?set=edge: filters the scraper must flag as incomplete,
+// plus one clean filter and one Sieve filter that must not be flagged.
+const EDGE_FILTERS = [
+  {
+    name: "Clean Labelled",
+    enabled: true,
+    logic: "all",
+    conditions: [{ type: "the sender", operator: "contains", values: ["a@example.com"] }],
+    folder: "Do not move",
+    labels: ["Work"],
+    markRead: false,
+    markStarred: false
+  },
+  {
+    name: "Has Autoreply",
+    enabled: false,
+    logic: "all",
+    conditions: [{ type: "the sender", operator: "contains", values: ["b@example.com"] }],
+    folder: "Work",
+    markRead: false,
+    markStarred: false,
+    autoReply: true
+  },
+  {
+    name: "Unknown Row",
+    enabled: true,
+    logic: "all",
+    conditions: [{ type: "the sender", operator: "contains", values: ["f@example.com"] }],
+    folder: "Do not move",
+    markRead: false,
+    markStarred: false,
+    extraRow: { testid: "filter-modal:forward-row", text: "Forward to" }
+  },
+  {
+    name: "Unnamed Label Option",
+    enabled: true,
+    logic: "all",
+    conditions: [{ type: "the sender", operator: "contains", values: ["c@example.com"] }],
+    folder: "Do not move",
+    labelNoName: true,
+    markRead: false,
+    markStarred: false
+  },
+  {
+    name: "Unexplained Label Text",
+    enabled: true,
+    logic: "all",
+    conditions: [{ type: "the sender", operator: "contains", values: ["d@example.com"] }],
+    folder: "Do not move",
+    labelJunk: "Applied: Receipts",
+    markRead: false,
+    markStarred: false
+  },
+  {
+    name: "Unknown Operator",
+    enabled: true,
+    logic: "all",
+    conditions: [{ type: "the subject", operator: "does not contain", values: ["hello"] }],
+    folder: "Trash",
+    markRead: false,
+    markStarred: false
+  },
+  {
+    name: "Extra Mark Option",
+    enabled: true,
+    logic: "all",
+    conditions: [{ type: "the sender", operator: "contains", values: ["e@example.com"] }],
+    folder: "Do not move",
+    markRead: true,
+    markStarred: false,
+    markExtra: "Pinned"
+  },
+  {
+    name: "My Sieve",
+    enabled: true,
+    sieve: 'require ["fileinto"];\nif header :contains "Subject" "x" { fileinto "X"; }'
+  }
+];
+
+const FILTERS = new URLSearchParams(location.search).get('set') === 'edge'
+  ? EDGE_FILTERS : DEFAULT_FILTERS;
 
 let currentFilter = null;
 let currentStep = 'name';
@@ -251,6 +344,17 @@ function buildFilterTable() {
 function openModal(idx) {
   currentFilter = FILTERS[idx];
   document.getElementById('modalFilterName').value = currentFilter.name;
+
+  // Sieve filters open the code editor instead of the wizard
+  if (currentFilter.sieve) {
+    const editor = document.getElementById('sieveEditor');
+    editor.textContent = currentFilter.sieve;
+    editor.CodeMirror = { getValue: () => currentFilter.sieve };
+    document.getElementById('nextBtn').classList.add('hidden');
+    showStep('sieve');
+    document.getElementById('filterModal').classList.add('visible');
+    return;
+  }
 
   // Reset to name step
   currentStep = 'name';
@@ -321,16 +425,78 @@ function buildConditions() {
   });
 }
 
+// Every label that exists on the mock account. Like the live UI, the label
+// row lists ALL of them as checkboxes; a filter's labels are the ticked ones.
+const ACCOUNT_LABELS = ["pf-test-label", "Work", "Finance", "Taxes", "Alerts", "On Call"];
+
+// Row heading that is really a collapse toggle (the live UI's first button
+// in the folder, label and mark-as rows).
+function collapseToggle(text) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'w-full md:w-1/4 text-left';
+  const span = document.createElement('span');
+  span.className = 'ml-2';
+  span.textContent = text;
+  btn.appendChild(span);
+  return btn;
+}
+
+// One label option, as captured from the live Actions step:
+// <label class="checkbox-container" title="NAME"><input class="checkbox-input">
+//   ...<ul class="label-stack"><li class="label-stack-item">...NAME...</li></ul></label>
+// The tick is set through the `checked` PROPERTY, never the attribute, as
+// in the live UI, so a reader looking at HTML attributes sees nothing.
+function labelOption(name, ticked) {
+  const wrap = document.createElement('div');
+  wrap.className = 'mb-2 inline-block text-ellipsis';
+  const label = document.createElement('label');
+  label.className = 'checkbox-container relative gap-2 mr-4 flex-nowrap';
+  if (name) label.setAttribute('title', name);
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.className = 'checkbox-input';
+  input.checked = ticked;
+  label.appendChild(input);
+  const fake = document.createElement('span');
+  fake.className = 'checkbox-fakecheck';
+  label.appendChild(fake);
+  const outer = document.createElement('span');
+  outer.className = 'inline-flex align-middle';
+  if (name) {
+    const ul = document.createElement('ul');
+    ul.className = 'label-stack';
+    ul.setAttribute('aria-label', 'Labels:');
+    const li = document.createElement('li');
+    li.className = 'label-stack-item';
+    li.setAttribute('data-testid', 'label-item:container-' + name);
+    const inner = document.createElement('span');
+    inner.className = 'label-stack-item-inner text-ellipsis';
+    const text = document.createElement('span');
+    text.className = 'label-stack-item-text';
+    text.textContent = name;
+    inner.appendChild(text);
+    li.appendChild(inner);
+    ul.appendChild(li);
+    outer.appendChild(ul);
+  }
+  label.appendChild(outer);
+  wrap.appendChild(label);
+  return wrap;
+}
+
 function buildActions() {
   const container = document.getElementById('actionsContainer');
   container.innerHTML = '';
   if (!currentFilter) return;
 
-  // Folder row
+  // Folder row: collapse toggle first, then the real dropdown
   const folderRow = document.createElement('div');
   folderRow.setAttribute('data-testid', 'filter-modal:folder-row');
+  folderRow.appendChild(collapseToggle('Move to'));
   const folderBtn = document.createElement('button');
   folderBtn.className = 'select';
+  folderBtn.id = 'move-to-select';
   folderBtn.setAttribute('aria-label', currentFilter.folder);
   folderBtn.textContent = currentFilter.folder;
   folderBtn.onclick = function(e) {
@@ -343,9 +509,36 @@ function buildActions() {
   folderRow.appendChild(folderBtn);
   container.appendChild(folderRow);
 
+  // Label row: every account label as a checkbox, ticked ones applied
+  const labels = currentFilter.labels || [];
+  const labelRow = document.createElement('div');
+  labelRow.className = 'border-bottom flex';
+  labelRow.setAttribute('data-testid', 'filter-modal:label-row');
+  labelRow.appendChild(collapseToggle('Label as'));
+  const body = document.createElement('div');
+  body.className = 'w-full';
+  const list = document.createElement('div');
+  list.className = 'w-full';
+  ACCOUNT_LABELS.forEach(name => list.appendChild(labelOption(name, labels.includes(name))));
+  if (currentFilter.labelNoName) list.appendChild(labelOption('', true));
+  if (currentFilter.labelJunk) {
+    const junk = document.createElement('span');
+    junk.textContent = currentFilter.labelJunk;
+    list.appendChild(junk);
+  }
+  body.appendChild(list);
+  const create = document.createElement('button');
+  create.type = 'button';
+  create.className = 'button button-medium button-outline-weak mt-0';
+  create.textContent = 'Create label';
+  body.appendChild(create);
+  labelRow.appendChild(body);
+  container.appendChild(labelRow);
+
   // Mark-as row
   const markRow = document.createElement('div');
   markRow.setAttribute('data-testid', 'filter-modal:mark-as-row');
+  markRow.appendChild(collapseToggle('Mark as'));
 
   const readLabel = document.createElement('label');
   readLabel.textContent = 'Read';
@@ -363,21 +556,68 @@ function buildActions() {
   starLabel.prepend(starCb);
   markRow.appendChild(starLabel);
 
+  if (currentFilter.markExtra) {
+    const extraLabel = document.createElement('label');
+    extraLabel.textContent = currentFilter.markExtra;
+    const extraCb = document.createElement('input');
+    extraCb.type = 'checkbox';
+    extraCb.checked = true;
+    extraLabel.prepend(extraCb);
+    markRow.appendChild(extraLabel);
+  }
+
   container.appendChild(markRow);
+
+  // Auto-reply row: present on every filter, toggle off unless autoReply
+  const autoRow = document.createElement('div');
+  autoRow.setAttribute('data-testid', 'filter-modal:auto-reply-row');
+  const autoText = document.createElement('span');
+  autoText.textContent = 'Send auto-reply';
+  autoRow.appendChild(autoText);
+  const toggle = document.createElement('label');
+  toggle.className = 'toggle-label';
+  const toggleInput = document.createElement('input');
+  toggleInput.type = 'checkbox';
+  toggleInput.checked = !!currentFilter.autoReply;
+  toggle.appendChild(toggleInput);
+  autoRow.appendChild(toggle);
+  container.appendChild(autoRow);
+
+  // One-time "apply on save" option outside the rows; not part of the filter
+  const applyLabel = document.createElement('label');
+  applyLabel.textContent = 'Apply filter to existing emails';
+  const applyCb = document.createElement('input');
+  applyCb.type = 'checkbox';
+  applyCb.checked = true;
+  applyLabel.prepend(applyCb);
+  container.appendChild(applyLabel);
+
+  // An action row the scraper has no reader for
+  if (currentFilter.extraRow) {
+    const extra = document.createElement('div');
+    extra.setAttribute('data-testid', currentFilter.extraRow.testid);
+    extra.textContent = currentFilter.extraRow.text;
+    container.appendChild(extra);
+  }
 }
 
 function closeModal() {
   document.getElementById('filterModal').classList.remove('visible');
+  // React unmounts a closed modal: its rows leave the DOM, so nothing in
+  // them can be read after the wizard closes (e.g. by Escape).
+  document.getElementById('conditionsContainer').innerHTML = '';
+  document.getElementById('actionsContainer').innerHTML = '';
   currentFilter = null;
   currentStep = 'name';
+  document.getElementById('nextBtn').classList.remove('hidden');
   // Hide folder dropdown too
   document.getElementById('folderDropdown').classList.add('hidden');
 }
 
-// Close dropdown on Escape
+// Escape closes the whole wizard, as in the live UI (not just a dropdown)
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') {
-    document.getElementById('folderDropdown').classList.add('hidden');
+    closeModal();
   }
 });
 

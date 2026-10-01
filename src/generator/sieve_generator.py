@@ -1,12 +1,12 @@
 """Generate Sieve scripts from consolidated filters."""
 
 import logging
-import re
-from typing import List, Set
+from typing import List, Optional, Set
 
 from src.models.filter_models import (
     ConsolidatedFilter, ConditionGroup, FilterCondition, FilterAction,
-    ConditionType, Operator, ActionType, LogicType,
+    ConditionType, Operator, ActionType, LogicType, empty_value_problem,
+    operator_mismatch_problem,
 )
 
 logger = logging.getLogger(__name__)
@@ -19,11 +19,75 @@ SECTION_END = "# === END ProtonFusion ==="
 EXTENSION_MAP = {
     ActionType.MOVE_TO: "fileinto",
     ActionType.LABEL: "fileinto",  # Labels use fileinto in ProtonMail
-    ActionType.DELETE: None,  # discard is built-in
+    ActionType.TRASH: "fileinto",  # fileinto "trash", never discard
     ActionType.MARK_READ: "imap4flags",
     ActionType.STAR: "imap4flags",
     ActionType.ARCHIVE: "fileinto",
 }
+
+
+# Proton's Sieve name for the Trash folder (Proton's Sieve docs and
+# ProtonMail/sieve.js both write `fileinto "trash";`).
+TRASH_FOLDER = "trash"
+
+# Proton's Sieve name for the Archive folder, as ProtonMail/sieve.js writes
+# it (test/fixtures/archive.js). Older versions wrote "Archive"; the rule
+# comparison treats the two as the same action (see sieve_rules).
+ARCHIVE_FOLDER = "archive"
+
+
+# The wizard's "has attachment" condition, exactly as Proton's own
+# wizard-to-Sieve translator writes it: ProtonMail/sieve.js,
+# src/constants.js TEST_NODES.attachment = {Type: 'Exists', Headers:
+# ['X-Attached']}, used by toTree.js buildCondition for 'attachments'.
+# `exists` is a base RFC 5228 test (section 5.5), so it needs no require.
+ATTACHMENT_TEST = 'exists "X-Attached"'
+
+
+class SieveGenerationError(ValueError):
+    """Raised when a filter cannot be written into the ProtonFusion section safely."""
+
+
+# Characters with special meaning in a :matches pattern (RFC 5228 section
+# 2.7.1): "*" and "?" are wildcards and backslash escapes the next character.
+_MATCH_SPECIAL = ("\\", "*", "?")
+
+
+def escape_match_literal(value: str) -> str:
+    """Escape a literal value so a :matches pattern matches it verbatim.
+
+    Used for begins-with / ends-with, whose values are plain text that the
+    generator wraps in a "*" wildcard. Without this, a "*" or "?" typed in the
+    value would act as a wildcard. The result still needs the usual Sieve
+    string escaping when it is written into a quoted string.
+    """
+    out = []
+    for ch in value:
+        if ch in _MATCH_SPECIAL:
+            out.append("\\")
+        out.append(ch)
+    return "".join(out)
+
+
+def unescape_match_literal(pattern: str) -> Optional[str]:
+    """Inverse of escape_match_literal, or None if the pattern has a live wildcard.
+
+    A trailing lone backslash is kept as a literal backslash, matching how
+    Sieve implementations treat it.
+    """
+    out = []
+    i = 0
+    while i < len(pattern):
+        ch = pattern[i]
+        if ch == "\\" and i + 1 < len(pattern):
+            out.append(pattern[i + 1])
+            i += 2
+            continue
+        if ch in ("*", "?"):
+            return None
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 class SieveGenerator:
@@ -32,6 +96,10 @@ class SieveGenerator:
     def generate(self, filters: List[ConsolidatedFilter]) -> str:
         """Generate a complete Sieve script from consolidated filters."""
         lines = []
+
+        for f in filters:
+            self._check_no_section_markers(f)
+            self._check_has_conditions(f)
 
         # Collect required extensions
         extensions = self._collect_extensions(filters)
@@ -57,26 +125,23 @@ class SieveGenerator:
             # Add comment with source filter info
             if f.source_filters:
                 if f.filter_count > 1:
-                    lines.append(f"# {f.name}")
-                    lines.append(f"# Source filters: {', '.join(f.source_filters[:5])}")
+                    lines.append(f"# {self._comment_text(f.name)}")
+                    sources = ", ".join(f.source_filters[:5])
+                    lines.append(f"# Source filters: {self._comment_text(sources)}")
                     if len(f.source_filters) > 5:
                         lines.append(f"#   ... and {len(f.source_filters) - 5} more")
                 else:
-                    lines.append(f"# {f.source_filters[0]}")
+                    lines.append(f"# {self._comment_text(f.source_filters[0])}")
 
             # Generate the rule
             condition_str = self._generate_conditions(f)
             action_lines = self._generate_actions(f)
 
-            if condition_str:
-                lines.append(f"if {condition_str} {{")
-                for action_line in action_lines:
-                    lines.append(f"    {action_line}")
-                lines.append("}")
-            else:
-                # No conditions = unconditional rule (rare)
-                for action_line in action_lines:
-                    lines.append(action_line)
+            # _check_has_conditions guarantees a test, so every rule is an if
+            lines.append(f"if {condition_str} {{")
+            for action_line in action_lines:
+                lines.append(f"    {action_line}")
+            lines.append("}")
 
             first = False
 
@@ -86,6 +151,61 @@ class SieveGenerator:
         script = "\n".join(lines)
         logger.info("Generated Sieve script: %d lines, %d rules", len(lines), len(filters))
         return script
+
+    @staticmethod
+    def _check_no_section_markers(f: ConsolidatedFilter) -> None:
+        """Refuse a filter whose text contains a ProtonFusion section marker.
+
+        merge_with_existing and extract_section find the section with a plain
+        substring search, so a marker inside a value, folder or filter name
+        would end (or start) the section early on the next sync and corrupt
+        the merge. Only the user's own filter text can do this, so a clear
+        refusal is enough.
+        """
+        texts = [f.name, *f.source_filters]
+        for group in f.condition_groups:
+            for cond in group.conditions:
+                texts.extend(cond.keys)
+        for action in f.actions:
+            texts.extend(str(v) for v in action.parameters.values())
+        for text in texts:
+            for marker in (SECTION_BEGIN, SECTION_END):
+                if marker in text:
+                    # A consolidated rule's name is synthetic; name the UI filters too
+                    origin = f.name if f.source_filters in ([], [f.name]) else (
+                        f"{f.name} (from {', '.join(f.source_filters)})")
+                    raise SieveGenerationError(
+                        f"Filter {origin!r} contains the ProtonFusion section marker "
+                        f"{marker!r}, which would corrupt the Sieve section on the next "
+                        "sync. Rename or edit that filter in ProtonMail and back up again."
+                    )
+
+    @staticmethod
+    def _check_has_conditions(f: ConsolidatedFilter) -> None:
+        """Refuse a rule that would run its actions on every message.
+
+        A rule with no condition groups, or with a group that has no
+        conditions (an original filter with none, which as one branch of an
+        OR matches everything), would become top-level actions or an always
+        true test. With a Trash or folder action that moves all incoming
+        mail. A filter normally has conditions, so this means one was lost
+        upstream (for example, dropped as unreadable); refuse rather than
+        widen the rule to all mail.
+        """
+        if f.condition_groups and all(group.conditions for group in f.condition_groups):
+            return
+        origin = f.name if f.source_filters in ([], [f.name]) else (
+            f"{f.name} (from {', '.join(f.source_filters)})")
+        raise SieveGenerationError(
+            f"Filter {origin!r} has no conditions, so its actions would apply to "
+            "every message. Refusing to generate it. Check the filter in ProtonMail "
+            "and back up again, or exclude it."
+        )
+
+    @staticmethod
+    def _comment_text(text: str) -> str:
+        """Flatten line breaks so a filter name cannot escape its # comment line."""
+        return " ".join(text.splitlines())
 
     def _collect_extensions(self, filters: List[ConsolidatedFilter]) -> Set[str]:
         """Determine which Sieve extensions are needed."""
@@ -100,46 +220,21 @@ class SieveGenerator:
         return extensions
 
     def _generate_conditions(self, f: ConsolidatedFilter) -> str:
-        """Generate the Sieve condition expression from condition groups."""
-        if not f.condition_groups:
-            return ""
+        """Generate the Sieve condition expression from condition groups.
 
-        # Filter out empty groups
-        non_empty = [g for g in f.condition_groups if g.conditions]
-        if not non_empty:
-            return ""
-
-        if len(non_empty) == 1:
-            return self._generate_group(non_empty[0])
-
-        # Multiple groups - OR them together (any group matching triggers action)
-        parts = []
-        for group in non_empty:
-            part = self._generate_group(group)
-            if part:
-                parts.append(part)
-
-        if not parts:
-            return ""
+        Every group has at least one condition (see _check_has_conditions).
+        """
+        parts = [self._generate_group(group) for group in f.condition_groups]
         if len(parts) == 1:
             return parts[0]
 
+        # Multiple groups - OR them together (any group matching triggers action)
         inner = ",\n    ".join(parts)
         return f"anyof (\n    {inner}\n)"
 
     def _generate_group(self, group: ConditionGroup) -> str:
-        """Generate conditions for a single ConditionGroup."""
-        if not group.conditions:
-            return ""
-
-        parts = []
-        for cond in group.conditions:
-            sieve_cond = self._condition_to_sieve(cond)
-            if sieve_cond:
-                parts.append(sieve_cond)
-
-        if not parts:
-            return ""
+        """Generate conditions for a single, non-empty ConditionGroup."""
+        parts = [self._condition_to_sieve(cond) for cond in group.conditions]
         if len(parts) == 1:
             return parts[0]
 
@@ -148,21 +243,32 @@ class SieveGenerator:
         return f"{joiner} (\n        {inner}\n    )"
 
     def _condition_to_sieve(self, cond: FilterCondition) -> str:
-        """Convert a single condition to Sieve syntax."""
+        """Convert a single condition to Sieve syntax.
+
+        Raises SieveGenerationError for an empty value, which would match
+        every message (the model flags such a filter incomplete, so this
+        only fires for a condition built some other way).
+        """
+        problem = operator_mismatch_problem(cond) or empty_value_problem(cond)
+        if problem:
+            raise SieveGenerationError(
+                f"Condition {cond.type.value} {cond.operator.value}: {problem}. "
+                "It has no Sieve form that would not widen the rule; refusing to generate it."
+            )
         comparator = self._operator_to_sieve(cond.operator)
 
-        # Handle pipe-delimited values (from merge_conditions strategy)
-        raw_values = cond.value.split("|") if "|" in cond.value else [cond.value]
+        # A key list comes only from an explicit values list (wizard chips,
+        # or filters merged by consolidation). A single value is one literal
+        # even if it contains ", " or "|": a key list is an OR, so splitting
+        # text would widen the rule.
+        values = cond.keys
 
-        # Also split comma-separated values within each entry.
-        # ProtonMail stores multiple values in a single condition field
-        # as "val1, val2, val3" — these need to become Sieve array elements.
-        values = []
-        for v in raw_values:
-            if ", " in v:
-                values.extend(part.strip() for part in v.split(", "))
-            else:
-                values.append(v)
+        # begins-with / ends-with become a :matches pattern around the literal
+        # value, so the value's own wildcard characters must be escaped first.
+        if cond.operator == Operator.STARTS_WITH:
+            values = [escape_match_literal(v) + "*" for v in values]
+        elif cond.operator == Operator.ENDS_WITH:
+            values = ["*" + escape_match_literal(v) for v in values]
 
         if len(values) == 1:
             value_str = f'"{self._escape_sieve(values[0])}"'
@@ -177,7 +283,7 @@ class SieveGenerator:
         elif cond.type == ConditionType.SUBJECT:
             return f'header {comparator} "Subject" {value_str}'
         elif cond.type == ConditionType.ATTACHMENTS:
-            return "true"  # Simplified - ProtonMail handles attachments differently
+            return ATTACHMENT_TEST
         elif cond.type == ConditionType.HEADER:
             return f'header {comparator} "X-Custom" {value_str}'
 
@@ -188,12 +294,12 @@ class SieveGenerator:
         mapping = {
             Operator.CONTAINS: ":contains",
             Operator.IS: ":is",
-            Operator.MATCHES: ":matches",
-            Operator.STARTS_WITH: ":matches",  # Uses wildcard pattern
-            Operator.ENDS_WITH: ":matches",    # Uses wildcard pattern
-            Operator.HAS: ":contains",
+            Operator.MATCHES: ":matches",      # value is the user's own pattern
+            Operator.STARTS_WITH: ":matches",  # value* (see _condition_to_sieve)
+            Operator.ENDS_WITH: ":matches",    # *value
         }
-        return mapping.get(op, ":contains")
+        # HAS is only valid for attachments, which uses no comparator
+        return mapping.get(op, "")
 
     def _generate_actions(self, f: ConsolidatedFilter) -> List[str]:
         """Generate Sieve action statements."""
@@ -212,9 +318,11 @@ class SieveGenerator:
             elif action.type == ActionType.STAR:
                 lines.append('addflag "\\\\Flagged";')
             elif action.type == ActionType.ARCHIVE:
-                lines.append('fileinto "Archive";')
-            elif action.type == ActionType.DELETE:
-                lines.append("discard;")
+                lines.append(f'fileinto "{ARCHIVE_FOLDER}";')
+            elif action.type == ActionType.TRASH:
+                # Proton: discard deletes "immediately and permanently";
+                # a Trash move is `fileinto "trash";` and stays recoverable.
+                lines.append(f'fileinto "{TRASH_FOLDER}";')
 
         if not lines:
             lines.append("keep;")
@@ -227,19 +335,24 @@ class SieveGenerator:
 
     @staticmethod
     def parse_require_extensions(script: str) -> Set[str]:
-        """Extract extension names from require lines in a Sieve script."""
-        extensions = set()
-        for match in re.finditer(r'require\s+\[([^\]]+)\]\s*;', script):
-            for ext in re.findall(r'"([^"]+)"', match.group(1)):
-                extensions.add(ext)
-        return extensions
+        """Extension names from every require in a Sieve script.
+
+        Uses the Sieve tokenizer, so `require "x";` and a require list split
+        over lines are both read. Raises SieveParseError if the script does
+        not parse.
+        """
+        # Imported here: sieve_rules imports this module at load time
+        from src.generator.sieve_rules import require_extensions
+        return require_extensions(script)
 
     @staticmethod
     def strip_require_lines(script: str) -> str:
-        """Remove require statements from a Sieve script."""
-        lines = script.split("\n")
-        filtered = [l for l in lines if not re.match(r'\s*require\s+\[', l)]
-        return "\n".join(filtered)
+        """Remove every require command from a Sieve script, keeping the rest as written.
+
+        Raises SieveParseError if the script does not parse.
+        """
+        from src.generator.sieve_rules import strip_requires
+        return strip_requires(script)
 
     @staticmethod
     def wrap_with_markers(script: str) -> str:
@@ -253,45 +366,50 @@ class SieveGenerator:
     def merge_with_existing(generated_script: str, existing_script: str) -> str:
         """Merge a generated ProtonFusion script with an existing Sieve script.
 
-        Preserves user rules outside the ProtonFusion section markers.
-        Deduplicates require extensions into a single sorted require statement at the top.
+        Preserves user rules outside the ProtonFusion section markers, in their
+        original position relative to the section: content above the section
+        stays above it and content below stays below. Sieve evaluates top to
+        bottom, so moving a user rule across the section changes behaviour (a
+        user ``keep; stop;`` exception above the section stops protecting mail
+        once it runs after the section's ``discard``).
+
+        If the existing script has no markers, all of it is treated as user
+        content and placed after the new section (there is no prior position to
+        preserve).
+
+        Deduplicates require extensions from every part into a single sorted
+        require statement at the top.
+
+        Raises SieveParseError if either script does not parse. The result
+        should still be checked with sieve_rules.validate_script before it
+        is uploaded.
         """
         if not existing_script or not existing_script.strip():
-            # No existing script — just wrap generated with markers
-            require_exts = SieveGenerator.parse_require_extensions(generated_script)
-            rules = SieveGenerator.strip_require_lines(generated_script).strip("\n")
-            parts = []
-            if require_exts:
-                ext_list = ", ".join(f'"{e}"' for e in sorted(require_exts))
-                parts.append(f"require [{ext_list}];")
-                parts.append("")
-            parts.append(SECTION_BEGIN)
-            parts.append(rules)
-            parts.append(SECTION_END)
-            parts.append("")
-            return "\n".join(parts)
+            existing_script = ""
 
-        # Extract user section from existing script (everything outside markers)
         begin_idx = existing_script.find(SECTION_BEGIN)
-        end_idx = existing_script.find(SECTION_END)
+        end_idx = existing_script.find(SECTION_END, begin_idx + 1) if begin_idx != -1 else -1
 
         if begin_idx != -1 and end_idx != -1:
-            # Previous ProtonFusion section exists — replace it
-            before_section = existing_script[:begin_idx]
-            after_section = existing_script[end_idx + len(SECTION_END):]
-            user_section = before_section + after_section
+            # Previous ProtonFusion section exists: replace it in place.
+            user_before = existing_script[:begin_idx]
+            user_after = existing_script[end_idx + len(SECTION_END):]
         else:
-            # No previous markers — entire existing script is user content
-            user_section = existing_script
+            # No previous markers: entire existing script is user content.
+            user_before = ""
+            user_after = existing_script
 
-        # Collect require extensions from both scripts
-        gen_exts = SieveGenerator.parse_require_extensions(generated_script)
-        user_exts = SieveGenerator.parse_require_extensions(user_section)
-        all_exts = gen_exts | user_exts
+        # Collect require extensions from all parts
+        all_exts = (
+            SieveGenerator.parse_require_extensions(generated_script)
+            | SieveGenerator.parse_require_extensions(user_before)
+            | SieveGenerator.parse_require_extensions(user_after)
+        )
 
-        # Strip require from both
+        # Strip require from all parts
         gen_rules = SieveGenerator.strip_require_lines(generated_script).strip("\n")
-        user_rules = SieveGenerator.strip_require_lines(user_section).strip()
+        before_rules = SieveGenerator.strip_require_lines(user_before).strip()
+        after_rules = SieveGenerator.strip_require_lines(user_after).strip()
 
         # Build final script
         parts = []
@@ -299,11 +417,14 @@ class SieveGenerator:
             ext_list = ", ".join(f'"{e}"' for e in sorted(all_exts))
             parts.append(f"require [{ext_list}];")
             parts.append("")
+        if before_rules:
+            parts.append(before_rules)
+            parts.append("")
         parts.append(SECTION_BEGIN)
         parts.append(gen_rules)
         parts.append(SECTION_END)
-        if user_rules:
+        if after_rules:
             parts.append("")
-            parts.append(user_rules)
+            parts.append(after_rules)
         parts.append("")
         return "\n".join(parts)

@@ -3,12 +3,18 @@
 import pytest
 
 from src.generator.sieve_generator import (
-    SieveGenerator, EXTENSION_MAP, SECTION_BEGIN, SECTION_END,
+    SieveGenerator, SieveGenerationError, EXTENSION_MAP, SECTION_BEGIN, SECTION_END,
 )
 from src.models.filter_models import (
     ConsolidatedFilter, ConditionGroup, FilterCondition, FilterAction,
     ConditionType, Operator, ActionType, LogicType,
 )
+
+
+# A minimal condition for tests that only exercise actions or comments: the
+# generator refuses a rule without one.
+_ANY_SENDER = [ConditionGroup(conditions=[
+    FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="x@example.com")])]
 
 
 class TestSieveGenerator:
@@ -28,8 +34,8 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
-            condition_groups=[],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            condition_groups=_ANY_SENDER,
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -43,7 +49,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
-            condition_groups=[],
+            condition_groups=_ANY_SENDER,
             actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "Test"})]
         )
 
@@ -52,15 +58,15 @@ class TestSieveGenerator:
         assert "require" in script
         assert "fileinto" in script
 
-    def test_generate_simple_delete_rule(self):
-        """Test generating a simple delete rule."""
+    def test_generate_simple_trash_rule(self):
+        """Move to Trash is a recoverable folder move, never discard."""
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Delete Spam",
             condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam@test.com")
             ])],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -69,7 +75,9 @@ class TestSieveGenerator:
         assert "address" in script
         assert "From" in script
         assert "spam@test.com" in script
-        assert "discard;" in script
+        assert 'fileinto "trash";' in script
+        assert "discard" not in script
+        assert 'require ["fileinto"];' in script
 
     def test_generate_move_to_folder(self):
         """Test generating move to folder action."""
@@ -79,20 +87,20 @@ class TestSieveGenerator:
             condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent")
             ])],
-            actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "Spam"})]
+            actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "Work"})]
         )
 
         script = gen.generate([cf])
 
         assert "fileinto" in script
-        assert '"Spam"' in script
+        assert '"Work"' in script
 
     def test_generate_mark_read(self):
         """Test generating mark as read action."""
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Mark Read",
-            condition_groups=[],
+            condition_groups=_ANY_SENDER,
             actions=[FilterAction(type=ActionType.MARK_READ)]
         )
 
@@ -106,7 +114,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Star",
-            condition_groups=[],
+            condition_groups=_ANY_SENDER,
             actions=[FilterAction(type=ActionType.STAR)]
         )
 
@@ -120,21 +128,22 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Archive",
-            condition_groups=[],
+            condition_groups=_ANY_SENDER,
             actions=[FilterAction(type=ActionType.ARCHIVE)]
         )
 
         script = gen.generate([cf])
 
         assert "fileinto" in script
-        assert '"Archive"' in script
+        assert 'fileinto "archive";' in script
+        assert '"Archive"' not in script
 
     def test_generate_label(self):
         """Test generating label action."""
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Label",
-            condition_groups=[],
+            condition_groups=_ANY_SENDER,
             actions=[FilterAction(type=ActionType.LABEL, parameters={"label": "Important"})]
         )
 
@@ -151,7 +160,7 @@ class TestSieveGenerator:
             condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test@example.com")
             ])],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -168,7 +177,7 @@ class TestSieveGenerator:
             condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.RECIPIENT, operator=Operator.IS, value="me@example.com")
             ])],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -185,7 +194,7 @@ class TestSieveGenerator:
             condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent")
             ])],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -202,7 +211,7 @@ class TestSieveGenerator:
             condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test")
             ])],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -217,7 +226,7 @@ class TestSieveGenerator:
             condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="test@example.com")
             ])],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -232,7 +241,7 @@ class TestSieveGenerator:
             condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.MATCHES, value="*@spam.com")
             ])],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -253,7 +262,7 @@ class TestSieveGenerator:
                     FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam2"),
                 ],
             )],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -272,7 +281,7 @@ class TestSieveGenerator:
                     FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
                 ],
             )],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -287,7 +296,7 @@ class TestSieveGenerator:
             condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam1@test.com|spam2@test.com|spam3@test.com")
             ])],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -302,7 +311,7 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Test",
-            condition_groups=[],
+            condition_groups=_ANY_SENDER,
             actions=[
                 FilterAction(type=ActionType.LABEL, parameters={"label": "Important"}),
                 FilterAction(type=ActionType.MARK_READ),
@@ -321,8 +330,8 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Consolidated",
-            condition_groups=[],
-            actions=[FilterAction(type=ActionType.DELETE)],
+            condition_groups=_ANY_SENDER,
+            actions=[FilterAction(type=ActionType.TRASH)],
             source_filters=["Filter 1", "Filter 2", "Filter 3"],
             filter_count=3
         )
@@ -337,8 +346,8 @@ class TestSieveGenerator:
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="Consolidated",
-            condition_groups=[],
-            actions=[FilterAction(type=ActionType.DELETE)],
+            condition_groups=_ANY_SENDER,
+            actions=[FilterAction(type=ActionType.TRASH)],
             source_filters=[f"Filter {i}" for i in range(10)],
             filter_count=10
         )
@@ -367,7 +376,7 @@ class TestSieveGenerator:
                 condition_groups=[ConditionGroup(conditions=[
                     FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam")
                 ])],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
             ConsolidatedFilter(
                 name="Archive News",
@@ -380,23 +389,42 @@ class TestSieveGenerator:
 
         script = gen.generate(filters)
 
-        assert "Delete Spam" in script or "discard" in script
-        assert "Archive News" in script or "Archive" in script
+        assert 'fileinto "trash";' in script
+        assert 'fileinto "archive";' in script
         assert script.count("if ") == 2
 
-    def test_generate_no_conditions(self):
-        """Test generating filter with no conditions."""
-        gen = SieveGenerator()
+    def test_generate_no_conditions_refused(self):
+        """A rule with no conditions would act on every message: refuse it."""
         cf = ConsolidatedFilter(
             name="Unconditional",
             condition_groups=[],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
+        with pytest.raises(SieveGenerationError, match="no conditions"):
+            SieveGenerator().generate([cf])
 
-        script = gen.generate([cf])
+    def test_generate_empty_group_refused(self):
+        """An empty group is an always-true branch of the OR: refuse it too."""
+        cf = ConsolidatedFilter(
+            name="Consolidated",
+            condition_groups=_ANY_SENDER + [ConditionGroup(conditions=[])],
+            actions=[FilterAction(type=ActionType.TRASH)],
+            source_filters=["has sender", "lost its condition"],
+            filter_count=2,
+        )
+        with pytest.raises(SieveGenerationError, match="lost its condition"):
+            SieveGenerator().generate([cf])
 
-        # Should have action without if statement
-        assert "discard;" in script
+    def test_no_top_level_actions_ever(self):
+        """Every generated action sits inside an if block."""
+        cf = ConsolidatedFilter(
+            name="r", condition_groups=_ANY_SENDER,
+            actions=[FilterAction(type=ActionType.TRASH), FilterAction(type=ActionType.MARK_READ)],
+        )
+        script = SieveGenerator().generate([cf])
+        body = [l for l in script.splitlines() if l and not l.startswith(("#", "require"))]
+        assert body[0].startswith("if ")
+        assert all(l.startswith(("if ", "    ", "}")) for l in body)
 
     def test_collect_extensions_fileinto(self):
         """Test that fileinto extension is collected."""
@@ -432,7 +460,7 @@ class TestSieveGenerator:
             condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.MATCHES, value="*@spam.com")
             ])],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         extensions = gen._collect_extensions([cf])
@@ -450,7 +478,7 @@ class TestSieveGenerator:
                     FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam1@test.com|spam2@test.com|spam3@test.com"),
                 ],
             )],
-            actions=[FilterAction(type=ActionType.DELETE)],
+            actions=[FilterAction(type=ActionType.TRASH)],
             source_filters=["Spam Filter 1", "Spam Filter 2", "Spam Filter 3"],
             filter_count=3
         )
@@ -459,7 +487,7 @@ class TestSieveGenerator:
 
         assert "require" not in script or "require" in script  # May or may not need extensions
         assert "Delete spam" in script or "Spam Filter" in script
-        assert "discard;" in script
+        assert 'fileinto "trash";' in script
         assert "spam1@test.com" in script
 
     def test_generate_multiple_condition_groups_anyof(self):
@@ -475,7 +503,7 @@ class TestSieveGenerator:
                     FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="bob")
                 ]),
             ],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -496,7 +524,7 @@ class TestSieveGenerator:
                     FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
                 ],
             )],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -505,13 +533,8 @@ class TestSieveGenerator:
         assert "alice" in script
         assert "urgent" in script
 
-    def test_generate_comma_separated_values_expanded_to_array(self):
-        """Test that ProtonMail comma-separated values are expanded into Sieve arrays.
-
-        ProtonMail stores multiple values in a single condition field as
-        "val1, val2, val3". These must become Sieve array elements, not a
-        single string literal.
-        """
+    def test_generate_values_list_expanded_to_array(self):
+        """A condition's values list (several wizard chips) becomes a Sieve key list."""
         gen = SieveGenerator()
         cf = ConsolidatedFilter(
             name="dumb services",
@@ -521,7 +544,7 @@ class TestSieveGenerator:
                     FilterCondition(
                         type=ConditionType.SENDER,
                         operator=Operator.CONTAINS,
-                        value="redfin.com, zillow.com, ebay.com",
+                        values=["redfin.com", "zillow.com", "ebay.com"],
                     ),
                     FilterCondition(
                         type=ConditionType.SUBJECT,
@@ -538,33 +561,25 @@ class TestSieveGenerator:
 
         script = gen.generate([cf])
 
-        # Each comma-separated value must be a separate array element
+        # Each listed value must be a separate array element
         assert '["redfin.com", "zillow.com", "ebay.com"]' in script
         # Single values should NOT become arrays
         assert '"[IEEE-Announcements]"' in script
 
-    def test_generate_comma_separated_with_pipe_merged(self):
-        """Test comma-separated values combined with pipe-merged values."""
-        gen = SieveGenerator()
+    @pytest.mark.parametrize("literal", ["Invoice, Receipt", "a|b", "a.com, b.com|c.com"])
+    def test_separators_in_a_single_value_stay_literal(self, literal):
+        """A key list is an OR (RFC 5228 2.7), so splitting text on ", " or
+        "|" would widen the rule: "Invoice, Receipt" must stay one literal."""
         cf = ConsolidatedFilter(
             name="Test",
             condition_groups=[ConditionGroup(conditions=[
-                FilterCondition(
-                    type=ConditionType.SENDER,
-                    operator=Operator.CONTAINS,
-                    # Pipe from merge_conditions, commas from ProtonMail
-                    value="a.com, b.com|c.com, d.com",
-                ),
+                FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value=literal),
             ])],
-            actions=[FilterAction(type=ActionType.DELETE)],
+            actions=[FilterAction(type=ActionType.TRASH)],
         )
-
-        script = gen.generate([cf])
-
-        assert '"a.com"' in script
-        assert '"b.com"' in script
-        assert '"c.com"' in script
-        assert '"d.com"' in script
+        script = SieveGenerator().generate([cf])
+        assert f'header :contains "Subject" "{literal}"' in script
+        assert "[" not in script.split("header", 1)[1].split("{", 1)[0]
 
     def test_generate_mixed_and_or_groups(self):
         """Test rendering consolidated filter with AND and single-condition groups."""
@@ -585,7 +600,7 @@ class TestSieveGenerator:
                     FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="bob"),
                 ]),
             ],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -820,3 +835,332 @@ class TestMergeWithExisting:
 
         assert result2.count(SECTION_BEGIN) == 1
         assert result2.count(SECTION_END) == 1
+
+    def test_user_rule_above_section_stays_above(self):
+        """A user exception with `stop;` above the section must keep running first."""
+        generated = self._make_generated()
+        existing = (
+            'require ["fileinto"];\n'
+            "\n"
+            "# Never filter mail from my boss\n"
+            'if address :is "From" "boss@example.com" {\n'
+            "    keep;\n"
+            "    stop;\n"
+            "}\n"
+            "\n"
+            f"{SECTION_BEGIN}\n"
+            'if address :contains "From" "old@example.com" {\n'
+            "    discard;\n"
+            "}\n"
+            f"{SECTION_END}\n"
+        )
+        result = SieveGenerator.merge_with_existing(generated, existing)
+
+        stop_pos = result.index("stop;")
+        begin_pos = result.index(SECTION_BEGIN)
+        assert stop_pos < begin_pos
+        # Nothing but whitespace after the section
+        assert result.split(SECTION_END)[1].strip() == ""
+        # The require line is still the first line, and there is only one
+        assert result.startswith('require ["fileinto"];')
+        assert result.count("require [") == 1
+
+    def test_user_rules_before_and_after_keep_their_sides(self):
+        generated = self._make_generated()
+        existing = (
+            'require ["imap4flags"];\n'
+            "\n"
+            'if header :contains "Subject" "BEFORE-RULE" { keep; stop; }\n'
+            "\n"
+            f"{SECTION_BEGIN}\n"
+            "# old\n"
+            f"{SECTION_END}\n"
+            "\n"
+            'require ["vacation"];\n'
+            'if header :contains "Subject" "AFTER-RULE" { addflag "\\\\Seen"; }\n'
+        )
+        result = SieveGenerator.merge_with_existing(generated, existing)
+
+        before_pos = result.index("BEFORE-RULE")
+        begin_pos = result.index(SECTION_BEGIN)
+        end_pos = result.index(SECTION_END)
+        after_pos = result.index("AFTER-RULE")
+        assert before_pos < begin_pos < end_pos < after_pos
+
+        # Requires from both sides and the generated script merged at the top
+        first_line = result.split("\n")[0]
+        assert first_line == 'require ["fileinto", "imap4flags", "vacation"];'
+        assert result.count("require [") == 1
+
+    def test_position_stable_across_repeated_merges(self):
+        generated = self._make_generated()
+        existing = (
+            'if address :is "From" "boss@example.com" { keep; stop; }\n'
+            f"{SECTION_BEGIN}\n"
+            f"{SECTION_END}\n"
+            'if true { keep; }\n'
+        )
+        once = SieveGenerator.merge_with_existing(generated, existing)
+        twice = SieveGenerator.merge_with_existing(generated, once)
+        assert once == twice
+        assert twice.index("boss@example.com") < twice.index(SECTION_BEGIN)
+
+class TestLabelGeneration:
+    """Label actions become fileinto, alongside any folder move."""
+
+    def _cf(self, actions):
+        return ConsolidatedFilter(
+            name="T",
+            condition_groups=[ConditionGroup(conditions=[
+                FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="x"),
+            ])],
+            actions=actions,
+            source_filters=["T"],
+            filter_count=1,
+        )
+
+    def test_move_and_labels_all_emitted(self):
+        script = SieveGenerator().generate([self._cf([
+            FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "Work"}),
+            FilterAction(type=ActionType.LABEL, parameters={"label": "Red"}),
+            FilterAction(type=ActionType.LABEL, parameters={"label": "On Call"}),
+        ])])
+        assert 'fileinto "Work";' in script
+        assert 'fileinto "Red";' in script
+        assert 'fileinto "On Call";' in script
+        assert 'require ["fileinto"];' in script
+
+    def test_label_name_escaped(self):
+        script = SieveGenerator().generate([self._cf([
+            FilterAction(type=ActionType.LABEL, parameters={"label": 'Say "hi"'}),
+        ])])
+        assert 'fileinto "Say \\"hi\\"";' in script
+
+    def test_label_with_mark_read_and_star(self):
+        script = SieveGenerator().generate([self._cf([
+            FilterAction(type=ActionType.LABEL, parameters={"label": "Red"}),
+            FilterAction(type=ActionType.MARK_READ),
+            FilterAction(type=ActionType.STAR),
+        ])])
+        assert 'fileinto "Red";' in script
+        assert 'addflag "\\\\Seen";' in script
+        assert 'addflag "\\\\Flagged";' in script
+        assert 'require ["fileinto", "imap4flags"];' in script
+
+
+def test_scraped_labels_end_to_end():
+    """Scraped dicts -> parser -> consolidator -> Sieve keeps every label."""
+    from src.parser.filter_parser import parse_scraped_filters
+    from src.consolidator.consolidation_engine import ConsolidationEngine
+
+    def scraped(name, sender, labels):
+        return {
+            "name": name,
+            "conditions": [{"type": "sender", "operator": "contains", "value": sender}],
+            "actions": [{"type": "move_to", "parameters": {"folder": "Work"}}]
+                       + [{"type": "label", "parameters": {"label": l}} for l in labels],
+        }
+
+    filters = parse_scraped_filters([
+        scraped("A", "a@x.com", ["Red"]),
+        scraped("B", "b@x.com", ["Red", "Blue"]),
+    ])
+    consolidated, _ = ConsolidationEngine().consolidate(filters)
+    script = SieveGenerator().generate(consolidated)
+
+    assert script.count('fileinto "Red";') == 2  # one per rule, both rules keep it
+    assert script.count('fileinto "Blue";') == 1
+    assert script.count('fileinto "Work";') == 2
+
+
+def _single_condition(operator, value, ctype=ConditionType.SENDER):
+    return ConsolidatedFilter(
+        name="Test",
+        condition_groups=[ConditionGroup(conditions=[
+            FilterCondition(type=ctype, operator=operator, value=value)
+        ])],
+        actions=[FilterAction(type=ActionType.TRASH)],
+    )
+
+
+class TestWildcardOperators:
+    """begins with / ends with become :matches patterns with an explicit wildcard."""
+
+    def test_starts_with_appends_wildcard(self):
+        script = SieveGenerator().generate([_single_condition(Operator.STARTS_WITH, "news")])
+        assert 'address :matches "From" "news*"' in script
+
+    def test_ends_with_prepends_wildcard(self):
+        script = SieveGenerator().generate([_single_condition(Operator.ENDS_WITH, "@x.com")])
+        assert 'address :matches "From" "*@x.com"' in script
+
+    def test_each_value_in_a_list_gets_the_wildcard(self):
+        cf = _single_condition(Operator.STARTS_WITH, "a")
+        cf.condition_groups[0].conditions[0] = FilterCondition(
+            type=ConditionType.SENDER, operator=Operator.STARTS_WITH, values=["a", "b"])
+        script = SieveGenerator().generate([cf])
+        assert 'address :matches "From" ["a*", "b*"]' in script
+
+    def test_literal_wildcard_characters_are_escaped(self):
+        """A "*" or "?" typed into a begins-with value is matched literally."""
+        script = SieveGenerator().generate(
+            [_single_condition(Operator.STARTS_WITH, "a*b?c\\d", ctype=ConditionType.SUBJECT)])
+        # Pattern a\*b\?c\\d* , then Sieve string escaping doubles each backslash
+        assert r'header :matches "Subject" "a\\*b\\?c\\\\d*"' in script
+
+    def test_matches_value_is_the_users_pattern(self):
+        script = SieveGenerator().generate([_single_condition(Operator.MATCHES, "*@spam.?om")])
+        assert 'address :matches "From" "*@spam.?om"' in script
+
+
+class TestSectionMarkersInFilterText:
+    """Marker text in a filter would end the section early on the next sync."""
+
+    @pytest.mark.parametrize("marker", [SECTION_BEGIN, SECTION_END])
+    def test_marker_in_condition_value_is_rejected(self, marker):
+        cf = _single_condition(Operator.CONTAINS, f"before\n{marker}\nafter", ctype=ConditionType.SUBJECT)
+        cf.name = "Sneaky subject"
+        with pytest.raises(SieveGenerationError, match="Sneaky subject"):
+            SieveGenerator().generate([cf])
+
+    def test_marker_mid_line_is_rejected(self):
+        """The section find is a substring search, so a newline is not needed."""
+        cf = _single_condition(Operator.IS, f"x {SECTION_END} y")
+        with pytest.raises(SieveGenerationError):
+            SieveGenerator().generate([cf])
+
+    def test_marker_in_folder_is_rejected(self):
+        cf = ConsolidatedFilter(
+            name="Folder",
+            condition_groups=_ANY_SENDER,
+            actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": SECTION_END})],
+        )
+        with pytest.raises(SieveGenerationError):
+            SieveGenerator().generate([cf])
+
+    def test_marker_in_source_filter_name_names_the_sources(self):
+        cf = _single_condition(Operator.IS, "a")
+        cf.name = "Consolidated"
+        cf.source_filters = ["ok", SECTION_BEGIN]
+        cf.filter_count = 2
+        with pytest.raises(SieveGenerationError, match="from ok"):
+            SieveGenerator().generate([cf])
+
+    def test_newline_in_filter_name_stays_in_the_comment(self):
+        cf = _single_condition(Operator.IS, "a")
+        cf.source_filters = ["line one\nif true { discard; }"]
+        script = SieveGenerator().generate([cf])
+        assert "# line one if true { discard; }" in script
+        assert "\nif true" not in script
+
+    def test_generated_script_round_trips_through_merge(self):
+        """Ordinary values still produce a section that extracts cleanly."""
+        cf = _single_condition(Operator.CONTAINS, "=== BEGIN something else ===")
+        merged = SieveGenerator.merge_with_existing(SieveGenerator().generate([cf]), "")
+        assert merged.count(SECTION_BEGIN) == 1
+        assert merged.count(SECTION_END) == 1
+
+
+def test_generator_refuses_empty_value():
+    """Defence in depth: a condition built outside the model with no value."""
+    cf = ConsolidatedFilter(
+        name="r",
+        condition_groups=[ConditionGroup(conditions=[
+            FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="")])],
+        actions=[FilterAction(type=ActionType.TRASH)],
+    )
+    with pytest.raises(SieveGenerationError, match="empty value"):
+        SieveGenerator().generate([cf])
+
+
+class TestAttachmentCondition:
+    """"Has attachment" is Proton's `exists "X-Attached"`, never `true`."""
+
+    def _attachment_rule(self, operator=Operator.HAS, ctype=ConditionType.ATTACHMENTS):
+        return ConsolidatedFilter(
+            name="att",
+            condition_groups=[ConditionGroup(conditions=[
+                FilterCondition(type=ctype, operator=operator, value="x" if ctype != ConditionType.ATTACHMENTS else "")])],
+            actions=[FilterAction(type=ActionType.TRASH)],
+        )
+
+    def test_generates_exists_x_attached(self):
+        script = SieveGenerator().generate([self._attachment_rule()])
+        assert 'if exists "X-Attached" {' in script
+        assert "true" not in script
+
+    def test_in_allof_with_sender(self):
+        cf = ConsolidatedFilter(
+            name="att",
+            condition_groups=[ConditionGroup(logic=LogicType.AND, conditions=[
+                FilterCondition(type=ConditionType.ATTACHMENTS, operator=Operator.HAS),
+                FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="a@x.com"),
+            ])],
+            actions=[FilterAction(type=ActionType.TRASH)],
+        )
+        from src.generator.sieve_rules import script_facts
+        (fact,) = script_facts(SieveGenerator().generate([cf]))
+        assert ("opaque", 'exists "X-Attached"') in fact.conditions
+        assert len(fact.conditions) == 2
+
+    @pytest.mark.parametrize("ctype, operator", [
+        (ConditionType.ATTACHMENTS, Operator.CONTAINS),
+        (ConditionType.SENDER, Operator.HAS),
+    ])
+    def test_operator_type_mismatch_refused(self, ctype, operator):
+        with pytest.raises(SieveGenerationError, match="does not apply"):
+            SieveGenerator().generate([self._attachment_rule(operator, ctype)])
+
+
+class TestRequireForms:
+    """require "x"; and require lists over several lines (panel cases)."""
+
+    SINGLE = 'require "fileinto";\nif address :is "From" "a" { fileinto "x"; }\n'
+    MULTILINE = (
+        'require [\n'
+        '    "fileinto",  # folders\n'
+        '    "imap4flags"\n'
+        '];\n'
+        'if address :is "From" "a" { fileinto "x"; addflag "\\\\Seen"; }\n'
+    )
+
+    def test_single_string_form_parsed(self):
+        assert SieveGenerator.parse_require_extensions(self.SINGLE) == {"fileinto"}
+
+    def test_multiline_list_parsed(self):
+        assert SieveGenerator.parse_require_extensions(self.MULTILINE) == {"fileinto", "imap4flags"}
+
+    def test_mixed_forms_parsed(self):
+        script = 'require "fileinto";\nrequire ["imap4flags", "vacation"];\n'
+        assert SieveGenerator.parse_require_extensions(script) == {"fileinto", "imap4flags", "vacation"}
+
+    @pytest.mark.parametrize("script", [SINGLE, MULTILINE])
+    def test_strip_leaves_no_fragment(self, script):
+        stripped = SieveGenerator.strip_require_lines(script)
+        assert "require" not in stripped
+        assert '"imap4flags"' not in stripped and "];" not in stripped
+        assert stripped.startswith("if address")
+
+    def test_strip_keeps_command_sharing_the_line(self):
+        stripped = SieveGenerator.strip_require_lines('require "fileinto"; if true { fileinto "x"; }\n')
+        assert stripped.strip() == 'if true { fileinto "x"; }'
+
+    def test_require_word_in_string_or_comment_untouched(self):
+        script = '# require "x";\nif header :contains "Subject" "require [\\"a\\"];" { keep; }\n'
+        assert SieveGenerator.strip_require_lines(script) == script
+        assert SieveGenerator.parse_require_extensions(script) == set()
+
+    @pytest.mark.parametrize("existing", [SINGLE, MULTILINE])
+    def test_merged_script_is_valid(self, existing):
+        from src.generator.sieve_rules import validate_script
+        generated = SieveGenerator().generate([ConsolidatedFilter(
+            name="r", condition_groups=_ANY_SENDER, actions=[FilterAction(type=ActionType.MARK_READ)])])
+        merged = SieveGenerator.merge_with_existing(generated, existing)
+        validate_script(merged)
+        assert merged.count("require") == 1
+        assert merged.startswith('require ["fileinto", "imap4flags"];')
+
+    def test_merge_of_unparsable_existing_script_raises(self):
+        from src.generator.sieve_rules import SieveParseError
+        with pytest.raises(SieveParseError):
+            SieveGenerator.merge_with_existing("", 'if true { keep;\n')

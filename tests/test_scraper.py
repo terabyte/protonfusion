@@ -6,6 +6,7 @@ from src.scraper.protonmail_scraper import (
     _distribute_indices,
     ProtonMailScraper,
     BULLET_CHARS,
+    _parse_label_row,
 )
 
 
@@ -97,3 +98,119 @@ class TestResolveFolderPath:
     def test_no_match_returns_clean(self):
         scraper = self._make_scraper({"Other": "Other"})
         assert scraper._resolve_folder_path("Unknown") == "Unknown"
+
+
+class TestParseLabelRow:
+    """Tests for _parse_label_row, the pure half of the "Label as" reader.
+
+    The live row lists every account label as a checkbox; options are
+    (name, ticked) pairs and only ticked ones are applied.
+    """
+
+    ROW = "Label as\npf-test-label\nWork\nFinance\nCreate label"
+
+    def test_only_ticked_labels(self):
+        options = [("pf-test-label", False), ("Work", True), ("Finance", True)]
+        labels, issue = _parse_label_row(options, self.ROW)
+        assert labels == ["Work", "Finance"]
+        assert issue is None
+
+    def test_nothing_ticked_is_no_labels_not_an_issue(self):
+        options = [("pf-test-label", False), ("Work", False), ("Finance", False)]
+        assert _parse_label_row(options, self.ROW) == ([], None)
+
+    def test_account_with_no_labels(self):
+        assert _parse_label_row([], "Label as\nCreate label") == ([], None)
+
+    def test_label_name_with_comma(self):
+        labels, issue = _parse_label_row([("Smith, John", True)], "Label as\nSmith, John\nCreate label")
+        assert labels == ["Smith, John"]
+        assert issue is None
+
+    def test_inline_text_run_together(self):
+        """innerText joins inline elements with no separator."""
+        labels, issue = _parse_label_row([("Work", True)], "Label asWorkCreate label")
+        assert labels == ["Work"]
+        assert issue is None
+
+    def test_unnamed_option_is_an_issue(self):
+        labels, issue = _parse_label_row([("Work", False), ("", True)], "Label as\nWork")
+        assert "no readable name" in issue
+
+    def test_unexplained_text_is_an_issue(self):
+        """A layout change must not read as "no labels"."""
+        labels, issue = _parse_label_row([("Work", False)], "Label as\nWork\nApplied: Receipts\nCreate label")
+        assert labels == []
+        assert "Applied: Receipts" in issue
+
+
+class _FakeItem:
+    """A dropdown <li> with only the inner_text the path map reads."""
+
+    def __init__(self, text):
+        self.text = text
+
+    async def inner_text(self):
+        return self.text
+
+
+class _FakeDropdownPage:
+    """Just enough of a Playwright page for _build_folder_path_map."""
+
+    def __init__(self, item_texts):
+        self.items = [_FakeItem(t) for t in item_texts]
+
+        class _Keyboard:
+            async def press(self, key):
+                return None
+
+        self.keyboard = _Keyboard()
+
+    async def wait_for_timeout(self, ms):
+        return None
+
+    async def query_selector_all(self, selector):
+        return self.items
+
+
+class _FakeButton:
+    async def click(self):
+        return None
+
+
+class TestFolderPathEscaping:
+    """A "/" inside one folder name is escaped, not read as nesting (Proton: "a\\/b")."""
+
+    def _scraper(self, folder_map=None):
+        scraper = ProtonMailScraper.__new__(ProtonMailScraper)
+        scraper._folder_path_map = folder_map
+        return scraper
+
+    @pytest.mark.asyncio
+    async def test_slash_in_segment_escaped_in_built_map(self):
+        scraper = self._scraper()
+        page = _FakeDropdownPage(["Inbox - Default", "Work", "• Misc/Others", "•• Deep", "Trash"])
+        await scraper._build_folder_path_map(_FakeButton(), page=page)
+        assert scraper._resolve_folder_path("• Misc/Others") == "Work/Misc\\/Others"
+        assert scraper._resolve_folder_path("•• Deep") == "Work/Misc\\/Others/Deep"
+        assert scraper._resolve_folder_path("Trash") == "Trash"
+
+    def test_unmapped_name_with_slash_is_one_segment(self):
+        assert self._scraper(None)._resolve_folder_path("a/b") == "a\\/b"
+        assert self._scraper({"x": "x"})._resolve_folder_path("a/b") == "a\\/b"
+
+    def test_generated_path_matches_proton_docs(self):
+        """Proton's docs: "Work/Misc\\\\/Others" in a script is subfolder 'Misc/Others' of 'Work'."""
+        from src.generator.sieve_generator import SieveGenerator
+        from src.models.filter_models import (
+            ConsolidatedFilter, ConditionGroup, FilterCondition, FilterAction,
+            ConditionType, Operator, ActionType, join_folder_path,
+        )
+        folder = join_folder_path(["Work", "Misc/Others"])
+        script = SieveGenerator().generate([ConsolidatedFilter(
+            name="r",
+            condition_groups=[ConditionGroup(conditions=[
+                FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="a")])],
+            actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": folder})],
+        )])
+        assert 'fileinto "Work/Misc\\\\/Others";' in script

@@ -5,7 +5,7 @@ import pytest
 from src.backup.diff_engine import DiffEngine, FilterDiff
 from src.models.filter_models import (
     ProtonMailFilter, FilterCondition, FilterAction,
-    ConditionType, Operator, ActionType, LogicType, FilterStatus,
+    ConditionType, Operator, ActionType, LogicType, FilterStatus, ScrapeEvidence,
 )
 from src.models.backup_models import Backup
 
@@ -83,13 +83,13 @@ class TestDiffEngine:
             name="Test",
             enabled=True,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test")],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
         new = ProtonMailFilter(
             name="Test",
             enabled=False,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test")],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         diff = engine.compare_filter_lists([old], [new])
@@ -106,12 +106,12 @@ class TestDiffEngine:
         old = ProtonMailFilter(
             name="Test",
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="old")],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
         new = ProtonMailFilter(
             name="Test",
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="new")],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         diff = engine.compare_filter_lists([old], [new])
@@ -170,13 +170,13 @@ class TestDiffEngine:
             name="Test",
             enabled=True,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="old")],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
         new = ProtonMailFilter(
             name="Test",
             enabled=False,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="new")],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         diff = engine.compare_filter_lists([old], [new])
@@ -311,14 +311,14 @@ class TestDiffEngine:
             enabled=True,
             priority=1,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test")],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
         f2 = ProtonMailFilter(
             name="Test",
             enabled=True,
             priority=1,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test")],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         assert engine._filters_equal(f1, f2)
@@ -394,3 +394,22 @@ class TestStatusAwareDiff:
         assert not engine._filters_equal(f1, f2)
         # But they are equal except enabled/status
         assert engine._filters_equal_except_enabled(f1, f2)
+
+
+class TestDiffIgnoresEvidence:
+    """Scrape evidence must not turn an unchanged filter into a 'modified' one."""
+
+    def test_raw_text_difference_is_unchanged(self):
+        engine = DiffEngine()
+        old = ProtonMailFilter(name="A")  # pre-1.1 backup: no evidence
+        new = ProtonMailFilter(name="A", raw=ScrapeEvidence(actions_text="Move to\nWork"))
+        result = engine.compare_filter_lists([old], [new])
+        assert len(result.unchanged) == 1
+        assert result.modified == []
+
+    def test_state_change_with_evidence_difference(self):
+        engine = DiffEngine()
+        old = ProtonMailFilter(name="A", enabled=True)
+        new = ProtonMailFilter(name="A", enabled=False, scrape_issues=["x"])
+        result = engine.compare_filter_lists([old], [new])
+        assert len(result.state_changed) == 1

@@ -6,6 +6,7 @@ from datetime import datetime
 from src.models.filter_models import (
     ProtonMailFilter, FilterCondition, FilterAction, ConsolidatedFilter,
     ConditionGroup, ConditionType, Operator, ActionType, LogicType, FilterStatus,
+    ScrapeEvidence,
 )
 from src.models.backup_models import Backup, BackupMetadata, ArchiveEntry, Archive
 
@@ -66,14 +67,14 @@ class TestFilterAction:
         """Test creating action with parameters."""
         action = FilterAction(
             type=ActionType.MOVE_TO,
-            parameters={"folder": "Spam"}
+            parameters={"folder": "Work"}
         )
         assert action.type == ActionType.MOVE_TO
-        assert action.parameters == {"folder": "Spam"}
+        assert action.parameters == {"folder": "Work"}
 
     def test_action_default_parameters(self):
         """Test that parameters defaults to empty dict."""
-        action = FilterAction(type=ActionType.DELETE)
+        action = FilterAction(type=ActionType.TRASH)
         assert action.parameters == {}
 
     def test_action_serialization(self):
@@ -123,7 +124,7 @@ class TestProtonMailFilter:
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam")
             ],
             actions=[
-                FilterAction(type=ActionType.DELETE)
+                FilterAction(type=ActionType.TRASH)
             ]
         )
         assert f.name == "Complex Filter"
@@ -212,7 +213,7 @@ class TestConsolidatedFilter:
                 ]),
             ],
             actions=[
-                FilterAction(type=ActionType.DELETE)
+                FilterAction(type=ActionType.TRASH)
             ],
             source_filters=["Filter 1", "Filter 2", "Filter 3"],
             filter_count=3
@@ -394,7 +395,9 @@ class TestEnums:
         assert ActionType.MARK_READ.value == "mark_read"
         assert ActionType.STAR.value == "star"
         assert ActionType.ARCHIVE.value == "archive"
-        assert ActionType.DELETE.value == "delete"
+        assert ActionType.TRASH.value == "trash"
+        # Old name kept as an alias; it means Trash, not a permanent delete
+        assert ActionType.DELETE is ActionType.TRASH
 
     def test_logic_type_enum(self):
         """Test LogicType enum values."""
@@ -458,13 +461,13 @@ class TestFilterStatus:
             name="Test",
             status=FilterStatus.ENABLED,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="x")],
-            actions=[FilterAction(type=ActionType.DELETE)],
+            actions=[FilterAction(type=ActionType.TRASH)],
         )
         f_archived = ProtonMailFilter(
             name="Test",
             status=FilterStatus.ARCHIVED,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="x")],
-            actions=[FilterAction(type=ActionType.DELETE)],
+            actions=[FilterAction(type=ActionType.TRASH)],
         )
         assert f_enabled.content_hash == f_archived.content_hash
 
@@ -512,7 +515,7 @@ class TestArchiveEntry:
             name="Test",
             status=FilterStatus.ARCHIVED,
             conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="x")],
-            actions=[FilterAction(type=ActionType.DELETE)],
+            actions=[FilterAction(type=ActionType.TRASH)],
         )
         entry = ArchiveEntry(filter=f, archived_at="2025-01-01T00:00:00Z", source_snapshot="snap1")
         data = entry.model_dump()
@@ -551,3 +554,221 @@ class TestArchive:
         assert len(archive2.entries) == 2
         assert archive2.entries[0].filter.status == FilterStatus.ARCHIVED
         assert archive2.entries[1].filter.status == FilterStatus.DEPRECATED
+
+
+class TestScrapeEvidence:
+    """Test raw scrape evidence and completeness fields on ProtonMailFilter."""
+
+    def test_defaults_are_empty(self):
+        f = ProtonMailFilter(name="Old")
+        assert f.raw is None
+        assert f.scrape_issues == []
+        assert f.is_complete is True
+
+    def test_issues_make_filter_incomplete(self):
+        f = ProtonMailFilter(name="X", scrape_issues=["unknown action row"])
+        assert f.is_complete is False
+
+    def test_evidence_roundtrip(self):
+        f = ProtonMailFilter(
+            name="X",
+            raw=ScrapeEvidence(conditions_text="the sender", actions_text="Label as\nWork"),
+            scrape_issues=["boom"],
+        )
+        f2 = ProtonMailFilter.model_validate(f.model_dump())
+        assert f2.raw.actions_text == "Label as\nWork"
+        assert f2.scrape_issues == ["boom"]
+
+    def test_content_hash_ignores_evidence(self):
+        """Evidence records how a filter was read, not what it does."""
+        a = ProtonMailFilter(name="X")
+        b = ProtonMailFilter(
+            name="X", raw=ScrapeEvidence(actions_text="whatever"), scrape_issues=["x"],
+        )
+        assert a.content_hash == b.content_hash
+
+
+class TestSieveFilterMarker:
+    """A Sieve filter is a script, so it is marked and hashed by that script."""
+
+    def test_is_sieve_derived_from_captured_script(self):
+        """Backups written before is_sieve existed mark a Sieve filter only by its script."""
+        f = ProtonMailFilter.model_validate({"name": "S", "raw": {"sieve_text": 'fileinto "X";'}})
+        assert f.is_sieve is True
+
+    def test_wizard_filter_is_not_sieve(self):
+        f = ProtonMailFilter(name="W", raw=ScrapeEvidence(conditions_text="c", actions_text="a"))
+        assert f.is_sieve is False
+
+    def test_explicit_flag_wins(self):
+        """An empty script still means the Sieve editor opened."""
+        f = ProtonMailFilter(name="S", is_sieve=True, raw=ScrapeEvidence(sieve_text=""))
+        assert f.is_sieve is True
+
+    def test_flag_survives_roundtrip(self):
+        f = ProtonMailFilter(name="S", is_sieve=True, raw=ScrapeEvidence(sieve_text="keep;"))
+        assert ProtonMailFilter.model_validate(f.model_dump()).is_sieve is True
+
+    def test_content_hash_covers_script(self):
+        a = ProtonMailFilter(name="S", is_sieve=True, raw=ScrapeEvidence(sieve_text='fileinto "A";'))
+        b = ProtonMailFilter(name="S", is_sieve=True, raw=ScrapeEvidence(sieve_text='fileinto "B";'))
+        assert a.content_hash != b.content_hash
+
+    def test_content_hash_of_wizard_filter_unchanged(self):
+        """Only Sieve filters hash their script, so existing wizard hashes stay valid."""
+        a = ProtonMailFilter(name="X")
+        b = ProtonMailFilter(name="X", raw=ScrapeEvidence(sieve_text="", actions_text="a"))
+        assert a.content_hash == b.content_hash
+
+
+class TestLegacyActions:
+    """Backups from older versions recorded Trash as "delete" and Spam/Inbox by label."""
+
+    def test_backup_delete_action_reads_as_trash(self):
+        f = ProtonMailFilter.model_validate({
+            "name": "old", "conditions": [{"type": "sender", "operator": "is", "value": "a"}],
+            "actions": [{"type": "delete", "parameters": {}}],
+        })
+        assert [a.type for a in f.actions] == [ActionType.TRASH]
+        assert f.is_complete
+
+    @pytest.mark.parametrize("old, new", [("Spam", "spam"), ("Inbox - Default", "inbox"), ("Work", "Work")])
+    def test_backup_system_folder_targets(self, old, new):
+        a = FilterAction.model_validate({"type": "move_to", "parameters": {"folder": old}})
+        assert a.parameters == {"folder": new}
+
+    def test_direct_action_construction_migrates(self):
+        assert FilterAction(type="delete").type == ActionType.TRASH
+
+
+class TestEmptyConditionValue:
+    """An empty condition value matches every message, so it is quarantined."""
+
+    @pytest.mark.parametrize("cond", [
+        {"type": "subject", "operator": "contains", "value": ""},
+        {"type": "subject", "operator": "contains", "value": "   \t"},
+        {"type": "sender", "operator": "is"},
+    ])
+    def test_empty_value_flags_filter_incomplete(self, cond):
+        f = ProtonMailFilter.model_validate({
+            "name": "delete all?",
+            "conditions": [cond, {"type": "sender", "operator": "is", "value": "a@x.com"}],
+            "actions": [{"type": "trash"}],
+        })
+        assert not f.is_complete
+        assert [c.value for c in f.conditions] == ["a@x.com"]
+        assert "condition 1: empty value" in f.scrape_issues[0]
+
+    def test_empty_value_condition_object_flagged(self):
+        f = ProtonMailFilter(
+            name="obj",
+            conditions=[FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value=" ")],
+        )
+        assert not f.is_complete
+        assert f.conditions == []
+
+    def test_attachment_condition_needs_no_value(self):
+        f = ProtonMailFilter.model_validate({
+            "name": "att", "conditions": [{"type": "attachments", "operator": "has", "value": ""}],
+        })
+        assert f.is_complete
+        assert len(f.conditions) == 1
+
+
+@pytest.mark.parametrize("cond", [
+    {"type": "attachments", "operator": "contains", "value": "pdf"},
+    {"type": "sender", "operator": "has", "value": "a@x.com"},
+])
+def test_operator_type_mismatch_is_quarantined(cond):
+    f = ProtonMailFilter.model_validate({"name": "m", "conditions": [cond]})
+    assert not f.is_complete
+    assert f.conditions == []
+    assert "does not apply" in f.scrape_issues[0]
+
+
+class TestMultiValueConditions:
+    """Several values are an explicit list; a single value is always one literal."""
+
+    def test_values_list_keys(self):
+        c = FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, values=["a", "b"])
+        assert c.keys == ["a", "b"]
+        assert c.value == ""
+
+    def test_one_element_list_is_a_single_value(self):
+        c = FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, values=["a"])
+        assert (c.value, c.values) == ("a", [])
+
+    def test_separators_in_value_are_literal(self):
+        c = FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="Invoice, Receipt")
+        assert c.keys == ["Invoice, Receipt"]
+
+    def test_both_forms_refused_directly(self):
+        with pytest.raises(ValueError):
+            FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="a", values=["b", "c"])
+
+    def test_both_forms_in_backup_quarantined(self):
+        f = ProtonMailFilter.model_validate({"name": "x", "conditions": [
+            {"type": "sender", "operator": "is", "value": "a", "values": ["b", "c"]}]})
+        assert not f.is_complete
+        assert f.conditions == []
+
+    def test_empty_entry_in_values_quarantined(self):
+        f = ProtonMailFilter.model_validate({"name": "x", "conditions": [
+            {"type": "sender", "operator": "is", "values": ["b", " "]}]})
+        assert not f.is_complete
+
+    def test_single_value_serializes_without_values_key(self):
+        c = FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="a")
+        assert c.model_dump(mode="json") == {"type": "sender", "operator": "is", "value": "a"}
+
+    def test_list_and_joined_literal_hash_differently(self):
+        listed = ProtonMailFilter(name="f", conditions=[
+            FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, values=["Invoice", "Receipt"])])
+        literal = ProtonMailFilter(name="f", conditions=[
+            FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="Invoice, Receipt")])
+        assert listed.content_hash != literal.content_hash
+
+    def test_single_value_hash_unchanged_by_values_field(self):
+        """Existing filters keep their hash (archive and manifest keys)."""
+        import hashlib
+        f = ProtonMailFilter(name="f", conditions=[
+            FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="a")])
+        expected = hashlib.sha256("name=f\nlogic=and\ncond:sender|is|a".encode()).hexdigest()[:16]
+        assert f.content_hash == expected
+
+    def test_round_trip_through_json(self):
+        f = ProtonMailFilter(name="f", conditions=[
+            FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, values=["a", "b"])])
+        again = ProtonMailFilter.model_validate_json(f.model_dump_json())
+        assert again.conditions[0].values == ["a", "b"]
+        assert again.content_hash == f.content_hash
+
+    OLD_CARRIED = {
+        "name": "Carried forward (2026-01-01): sender is -> discard;",
+        "conditions": [{"type": "sender", "operator": "is", "value": "a|b"}],
+        "actions": [{"type": "delete"}],
+    }
+
+    def test_old_carried_filter_pipe_value_becomes_list(self):
+        """An archive entry written before source_format existed (V4)."""
+        from src.models.backup_models import ArchiveEntry
+        entry = ArchiveEntry.model_validate({"filter": self.OLD_CARRIED})
+        assert entry.filter.conditions[0].values == ["a", "b"]
+
+    def test_stamped_carried_filter_pipe_value_is_literal(self):
+        """V4: carry-forward today can store one key containing "|"."""
+        from src.models.backup_models import ArchiveEntry, BACKUP_FORMAT_VERSION
+        entry = ArchiveEntry.model_validate({"filter": self.OLD_CARRIED, "source_format": BACKUP_FORMAT_VERSION})
+        assert entry.filter.conditions[0].keys == ["a|b"]
+
+    def test_carried_name_outside_archive_is_literal(self):
+        """V4: the legacy split never applies to a filter read on its own (scraped data)."""
+        f = ProtonMailFilter.model_validate(self.OLD_CARRIED)
+        assert f.conditions[0].keys == ["a|b"]
+
+    def test_pipe_in_ordinary_filter_is_literal(self):
+        f = ProtonMailFilter.model_validate({
+            "name": "user filter",
+            "conditions": [{"type": "subject", "operator": "contains", "value": "a|b"}],
+        })
+        assert f.conditions[0].keys == ["a|b"]

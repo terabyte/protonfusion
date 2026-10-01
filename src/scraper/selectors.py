@@ -15,11 +15,26 @@ LOGIN_BUTTON = 'button[type="submit"]'
 # Navigation - after login
 SETTINGS_GEAR = '[data-testid="settings-drawer-app-button:settings-icon"]'
 ALL_SETTINGS_LINK = 'a:has-text("All settings")'
-FILTERS_NAV_LINK = 'a[href="/u/0/mail/filters"]'
+FILTERS_NAV_LINK = 'a[href$="/mail/filters"]'  # href is /u/<slot>/mail/filters
 COMPOSE_BUTTON = '[data-testid="sidebar:compose"]'
 USER_DROPDOWN_EMAIL = '[data-testid="heading:userdropdown"] span.user-dropdown-displayName + span'
 
-# Filter list page (account.proton.me/u/0/mail/filters)
+# First-run / onboarding modals (e.g. the "Welcome to Proton Mail" tour on a
+# fresh account) overlay the app and intercept every click. Dismiss buttons are
+# tried in order; "get started" advances the tour, so dismissal loops.
+ONBOARDING_MODAL = 'div.modal-two'
+ONBOARDING_DISMISS_BUTTONS = (
+    '[data-testid="modal:close"]',
+    'button:has-text("Skip")',
+    'button:has-text("Maybe later")',
+    'button:has-text("Close")',
+    'button:has-text("get started")',
+    'button:has-text("Next")',
+    'button:has-text("Got it")',
+    'button:has-text("Done")',
+)
+
+# Filter list page (account.proton.me/u/<slot>/mail/filters)
 # Page structure: two <section> blocks, each with an <h2>.
 #   Section 1: h2 "Custom filters"   -> user-created filters (table.simple-table)
 #   Section 2: h2 "Spam, block, and allow lists" -> spam/allow entries
@@ -52,6 +67,19 @@ FILTER_CONDITION_ROWS = '[data-testid*="filter-modal:condition"]'
 FILTER_ACTION_FOLDER_ROW = '[data-testid="filter-modal:folder-row"]'
 FILTER_ACTION_LABEL_ROW = '[data-testid="filter-modal:label-row"]'
 FILTER_ACTION_MARK_AS_ROW = '[data-testid="filter-modal:mark-as-row"]'
+# Every action row, used to spot rows the scraper does not understand
+FILTER_ACTION_ANY_ROW = '[data-testid^="filter-modal:"][data-testid$="-row"]'
+
+FILTER_ACTION_AUTO_REPLY_ROW = '[data-testid="filter-modal:auto-reply-row"]'
+
+# "Label as" row internals, from the live UI (2026-09-30). The row lists
+# every account label as one of these options; applied = checkbox ticked.
+FILTER_LABEL_OPTION = 'label.checkbox-container'
+FILTER_LABEL_OPTION_TEXT = '.label-stack-item-text'
+
+# Folder dropdown inside the folder row (id="move-to-select" in the live
+# UI). The row's first button is a collapse toggle, not this.
+FOLDER_SELECT_BUTTON = 'button.select'
 
 # Sieve editor modal - opened by "Add sieve filter" button or editing an existing sieve filter
 ADD_SIEVE_FILTER_BUTTON = 'button:has-text("Add sieve filter")'

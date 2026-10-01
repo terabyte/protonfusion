@@ -16,7 +16,7 @@ ProtonMail lets you create filters one at a time through the UI. Over time, you 
 2. **Backs them up** to timestamped JSON files (with checksums for integrity)
 3. **Consolidates** redundant filters into optimized Sieve rules (e.g., 50 "delete spam from X" filters become 1 Sieve rule)
 4. **Generates** a clean Sieve script you can upload to ProtonMail
-5. **Syncs** the Sieve script to your account and disables the old UI filters (non-destructively)
+5. **Syncs** the Sieve script to your account and disables the UI filters it replaces (non-destructively)
 
 **Before** (3 separate UI filters):
 ```
@@ -43,14 +43,23 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
-### 2. See what you've got (read-only)
+### 2. Sign in once
 
 ```bash
-# Opens a browser, reads your filters, and displays them - no changes made
+# Opens a visible browser; sign in (CAPTCHA, 2FA) and the session is saved
+python -m src.main login
+```
+
+Proton puts a Human Verification CAPTCHA in front of automated logins, so sign in by hand once. The session is saved to `~/.config/protonfusion/storage_state.json` (owner-only, it holds live auth cookies) and every other command reuses it, headless included, until Proton expires it. Then run `login` again.
+
+### 3. See what you've got (read-only)
+
+```bash
+# Reads your filters and displays them - no changes made
 python -m src.main show
 ```
 
-### 3. Back up your filters
+### 4. Back up your filters
 
 ```bash
 # Same as show, but saves to a timestamped snapshot directory
@@ -59,20 +68,36 @@ python -m src.main backup
 
 Each backup creates a snapshot at `snapshots/<timestamp>/backup.json`.
 
-### 4. Analyze consolidation opportunities
+If any filter could not be fully read (an action it cannot express such as
+auto-reply, a row it cannot parse, an unknown condition operator),
+`backup` lists each one with the reason and exits with status 1 without
+saving. Pass `--allow-incomplete` to save anyway; those filters are flagged in
+`backup.json`, `consolidate` leaves them out of the script (listing them and
+recording them in `manifest.json`; `--allow-incomplete` includes them as read,
+with a warning), `sync` refuses a script that holds their rules (`--allow-incomplete`
+to override; one `consolidate` left out does not count, nor does a rule a fully
+read filter also generates) and `cleanup` will not delete them.
+
+### 5. Analyze consolidation opportunities
 
 ```bash
 python -m src.main analyze --backup latest
 ```
 
-### 5. Generate consolidated Sieve script
+### 6. Generate consolidated Sieve script
 
 ```bash
 # Writes consolidated.sieve + manifest.json into the snapshot directory
 python -m src.main consolidate --backup latest
 ```
 
-### 6. Review and upload
+`--output PATH` writes the script elsewhere. Every output file is written
+through a temp file next to the target (`<name>.XXXXXXXX`) and renamed into
+place; a crash mid-write can leave that temp file behind. Inside a git working
+tree it would then show up as untracked, so keep outputs in `snapshots/`
+(gitignored, the default) or outside the repository.
+
+### 7. Review and upload
 
 Review the generated Sieve script in the snapshot dir, then:
 
@@ -140,32 +165,46 @@ A GitHub Actions workflow runs unit + integration tests on every push and pull r
 
 | Command | Description |
 |---------|-------------|
+| `login` | Sign in by hand in a visible browser and save the session for the other commands |
 | `show` | Read and display your current filters (read-only, no changes) |
 | `show-backup` | Display filters from a backup file (offline, no login) |
+| `show-backup --show-raw` | Also print each filter's raw scrape evidence (wizard text or Sieve script) and scrape issues |
 | `backup` | Scrape current filters and save to a timestamped backup |
 | `list-snapshots` | Show all available snapshots with statistics |
 | `analyze` | View filter statistics and consolidation opportunities |
 | `consolidate` | Generate optimized Sieve script from a backup |
+| `consolidate --allow-incomplete` | Also build rules from filters not fully read when backed up (left out by default, since what was read can match more mail than the filter) |
+| `consolidate --keep-live-rules` | Also carry forward rules that exist only in the live Sieve section (saved to the archive) |
 | `diff` | Compare two backups or a backup vs current state |
-| `sync` | Upload Sieve script and disable old UI filters |
+| `sync` | Upload Sieve script and disable the UI filters whose rules it carries (Sieve filters and filters newer than the backup stay on; all are re-enabled if the upload fails); refuses if the new script drops live rules (`--allow-rule-removal` to override) or was built from pre-1.1 filters with no raw text (`--allow-incomplete` to override) |
 | `sync --show-diff-only` | Preview Sieve changes against the live script (no upload) |
-| `restore` | Restore filters to a previous backup state |
-| `cleanup` | Delete disabled filters (with confirmation) |
+| `restore` | Roll back to a backup: UI filters' on/off states and the ProtonFusion Sieve script, after a preview and confirmation, with a safety backup first (`--dry-run` previews only) |
+| `cleanup` | Delete disabled filters whose rules are in the live Sieve section and that have a verified backup copy (with confirmation) |
+| `cleanup --include-uncovered` | Also delete disabled filters whose rules are NOT in the live ProtonFusion section |
 | `snapshot view` | View merged backup + archive filters grouped by status |
 | `snapshot set-status` | Change a filter's lifecycle status (enabled/disabled/archived/deprecated) |
 | `snapshot remove` | Remove a filter from the archive |
 
-All commands that interact with ProtonMail accept these flags:
+All commands that interact with ProtonMail accept `--state` and `--credentials-file`; most also accept the others:
 
-- `--headless` - Run browser without a visible window
-- `--credentials-file .credentials` - Use stored credentials instead of manual login
-- `--manual-login` - Force manual login even if credentials file exists
-- `--workers N` / `-w N` - Number of parallel browser tabs for scraping (default: 5, max: 10). Use `-w 1` for sequential scraping.
+- `--state PATH` - Saved session file from `login` (default: `$PROTONFUSION_STORAGE_STATE`, else `~/.config/protonfusion/storage_state.json`). Used whenever it exists; if `--credentials-file` names a different account than the one the session was saved for, the command refuses (exit 1).
+- `--credentials-file .credentials` - Use stored credentials instead of manual login (`login` uses it only to pre-fill the form)
+- `--headless` - Run browser without a visible window (all except `login`, which always shows the browser)
+- `--workers N` / `-w N` - Number of parallel browser tabs for scraping (default: 5, max: 10). Use `-w 1` for sequential scraping. Accepted by `backup`, `show`, `diff`, `restore` and `cleanup`.
+- `--manual-login` - Force manual login even if credentials file exists. Accepted by `backup` and `show` only.
+
+`backup`, `sync` and `cleanup` exit with status 1 whenever they refuse or hold anything back (including a dry run that would), so scripts can tell a partial run from a complete one; a live Sieve script that could not be read is a refusal.
 
 ### Examples
 
 ```bash
-# Automated backup (5 parallel tabs by default)
+# Sign in by hand once (pre-fill the form from .credentials, wait up to 15 min)
+python -m src.main login --credentials-file .credentials --timeout 900
+
+# Headless backup reusing the saved session (5 parallel tabs by default)
+python -m src.main backup --headless
+
+# Automated backup with credentials (Proton may block this with a CAPTCHA)
 python -m src.main backup --headless --credentials-file .credentials
 
 # Faster scraping with 10 parallel tabs
@@ -195,7 +234,7 @@ python -m src.main sync --sieve filters.sieve --backup latest
 # Compare two backups
 python -m src.main diff --backup1 2026-02-08_19-30-45 --backup2 2026-02-09_10-00-00
 
-# Restore to a previous state
+# Roll back to a backup: filter states and the Sieve script (previews, then asks)
 python -m src.main restore --backup 2026-02-08_19-30-45 --headless --credentials-file .credentials
 
 # View filters in latest snapshot (backup + archive merged, grouped by status)
@@ -219,10 +258,17 @@ python -m src.main consolidate --backup latest --include-args-from 2026-02-11_08
 ProtonFusion is designed to be non-destructive:
 
 - **Backup first**: Every operation starts from a backup. Your original filter state is always preserved.
-- **Disable, don't delete**: When syncing, old UI filters are disabled (not deleted). You can re-enable them anytime.
+- **Disable, don't delete**: When syncing, the UI filters whose rules are in the uploaded script are disabled (not deleted). You can re-enable them anytime.
+- **Disable only what the script replaces**: `sync` matches each live filter to the backup by content and leaves Sieve filters, filters created or edited after the backup, and filters it cannot read in full enabled, listing them. If the upload fails it re-enables everything it disabled.
+- **Refuse rather than drop**: `sync` refuses to upload a ProtonFusion section that would lose any rule in the live one, and `cleanup` never deletes a filter whose rules are not in the live ProtonFusion section (override: `--include-uncovered`).
 - **Dry-run mode**: Preview what `sync` and `cleanup` will do before committing.
-- **Checksums**: Backups include SHA256 checksums to detect corruption.
-- **Restore**: One command to roll back to any previous backup.
+- **Old snapshots are flagged**: a backup older than format 1.3 may have been written by a ProtonFusion that misread some operators ("is not" stored as "is", "does not contain" as "contains", "begins with" or "ends with" as "contains"). `consolidate` warns prominently about such a backup and `sync` refuses one (override: `--allow-old-snapshot`); run `backup` again instead. `consolidate` archives nothing from such a backup. Archive entries taken from one (or written before entries recorded their source format) are left out of the script with the same warning unless the current backup holds a filter with the same content, and `sync` refuses a script that draws on one without `--allow-old-snapshot`.
+- **Checksums**: Backups include a SHA-256 checksum, verified every time one is loaded, against the file as written (so an unmodified backup from an older version verifies, though its values are then read in their current form). A `backup.json` changed after it was written (corruption, or a hand edit) is refused; run `backup` again, or, for a deliberate edit, put the global `--ignore-checksum` before the command name (`python -m src.main --ignore-checksum consolidate`). Values in an edited backup that ProtonFusion does not know load flagged incomplete rather than guessed.
+- **Incomplete reads are loud**: A filter the scraper cannot fully read stops `backup` (override: `--allow-incomplete`). Each backed-up filter also keeps the wizard's raw text, so a field the parser missed can still be recovered: `show-backup --show-raw` prints it with each filter's scrape issues.
+- **Cleanup needs a verified copy**: `cleanup` only deletes a disabled filter if the latest snapshot holds an identical, complete copy with raw text. Others are listed and kept (override: `--allow-incomplete`). Backups made before format 1.1 have no raw text, so run `backup` again after upgrading. `consolidate` warns about such filters and `sync` refuses a script built from them (override: `--allow-incomplete`).
+- **Shared names are never deleted**: deletion works by name, so `cleanup` keeps any filter whose name another filter (enabled or not) also uses, and only ever deletes a disabled filter in the Custom filters list.
+- **Sieve filters are left alone**: `consolidate` skips filters written in Sieve (including ProtonFusion's own), and `cleanup` never deletes them.
+- **Restore is a full rollback**: `restore --backup <snapshot>` puts back the UI filters' on/off states and the `ProtonFusion Consolidated` script captured in that backup. It previews every filter it will toggle and a diff of the script, asks for confirmation (`--dry-run` stops at the preview), and first saves a safety backup of the current state, printing its id so the restore itself can be undone. Filters are matched by content and row position, so a shared name never toggles the wrong one; any it cannot match are listed and left alone (exit 1). It enables filters first, then replaces the script, then disables filters, so a failure part-way leaves every rule that was active before still active (some possibly twice), and the report says exactly where it stopped. A completed restore does switch off the rules the backed-up state lacks, so before changing anything it refuses, listing them, if any rule of the live ProtonFusion section would end up in neither the restored script nor a filter that is on afterwards (its filter deleted by `cleanup` or edited since the backup, so restore cannot switch it back on); `--allow-rule-removal` proceeds anyway. When the backup has the ProtonFusion filter off, restore switches it off first, because ProtonMail's active-filter limit counts it; if an enable then fails it switches the filters it enabled back off (they may hold the slots it needs) and then switches it back on before stopping, and if it still cannot, it names every rule left in no running filter. It refuses if the live script cannot be read, or if the backup holds no script while the account does (`--allow-empty-script` then disables the ProtonFusion filter instead). Restoring a backup from before ProtonFusion's first sync removes ProtonFusion's section; the preview says so.
 
 ## Architecture
 
@@ -272,10 +318,12 @@ backup → consolidate → sync → cleanup → backup → consolidate → ...
 
 1. `backup` scrapes live filters into `backup.json` and copies `archive.json` from the previous snapshot
 2. `consolidate` reads both files, generates Sieve, and auto-archives included backup filters
-3. `sync` uploads the Sieve script and disables UI filters
-4. `cleanup` deletes disabled UI filters from ProtonMail
+3. `sync` uploads the Sieve script and disables the UI filters it replaces
+4. `cleanup` deletes disabled UI filters from ProtonMail, holding back any whose rules are not in the live ProtonFusion section or that lack a verified backup copy. After you confirm, each filter it deletes is added to `archive.json` (as `archived`, or as `deprecated` if deleted with `--include-uncovered`, so a rule that was not live does not come back); `--dry-run` and a declined prompt write nothing
 5. Next `backup` scrapes the now-reduced filter list; archived filters carry forward via `archive.json`
 6. Next `consolidate` still has all rules from the archive
+
+If the live Sieve section holds rules the archive does not (for example rules consolidated before the archive existed), `consolidate` warns and `sync` refuses. Run `consolidate --keep-live-rules` once to rebuild them into the archive.
 
 Use `snapshot set-status <name> deprecated` to permanently exclude a rule, or `snapshot set-status <name> archived` to re-include it.
 
@@ -297,7 +345,7 @@ Only scraping (read-only) is parallelized. Sync operations (disabling filters, u
 
 ProtonMail occasionally updates their web UI, which can break the Playwright selectors. When this happens:
 
-1. Open ProtonMail settings manually: Settings gear -> All settings -> Filters
+1. Open the filters page manually: `https://account.proton.me/u/<slot>/mail/filters` (or Settings gear -> All settings -> Filters)
 2. Use browser dev tools to inspect the new element structure
 3. Update the selectors in `src/scraper/selectors.py`
 4. Run the E2E smoke tests: `pytest -m e2e --credentials-file .credentials -v`
@@ -306,7 +354,9 @@ All UI selectors are centralized in `selectors.py` to make this straightforward.
 
 ## Troubleshooting
 
-**"Login failed"** - Check that your `.credentials` file has the right format (`Username: ...` / `Password: ...`). If your account has 2FA, use `--manual-login` instead.
+**"The saved session ... has expired"** - Proton ended the saved session. Run `python -m src.main login` again.
+
+**"Login failed"** - Check that your `.credentials` file has the right format (`Username: ...` / `Password: ...`). If Proton shows Human Verification (CAPTCHA) or your account has 2FA, use `python -m src.main login` to sign in by hand and save a session.
 
 **"Playwright browser not found"** - Run `playwright install chromium`.
 

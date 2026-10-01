@@ -4,15 +4,27 @@ This document describes the ProtonMail web UI structure as it relates to ProtonF
 
 ## Navigation Path
 
-ProtonFusion navigates to the filters page through this sequence:
+ProtonFusion reaches the filters page like this:
 
-1. Login at `account.proton.me/login`
-2. Wait for redirect to inbox (URL contains `/apps` or `/mail`)
-3. Click the settings gear icon
-4. Click "All settings"
-5. Click "Filters" in the sidebar
+1. Reuse the saved session (mail app at `mail.proton.me/u/<slot>/inbox`), or log in at `account.proton.me/login`
+2. Record the session slot from the URL
+3. Go directly to `account.proton.me/u/<slot>/mail/filters` and assert the page structure
 
-Direct navigation to settings URLs (e.g., `mail.proton.me/settings/filters`) no longer works -- ProtonMail moved settings to `account.proton.me`.
+If step 3 fails, it falls back to clicking through the mail app: settings gear icon -> "All settings" -> "Filters" in the sidebar.
+
+The old `mail.proton.me/settings/filters` URLs no longer work -- ProtonMail moved settings to `account.proton.me`.
+
+## Session Slot
+
+Proton addresses each signed-in account by a slot in the path: `/u/0/`, `/u/1/`, and so on. The slot is not always 0; a fresh login has been seen landing on `/u/1/inbox` (2026-09-30). The slot is read from the URL after login and saved alongside the session, and every URL is built from it, so never hardcode `/u/0/`. The sidebar Filters link is matched as `a[href$="/mail/filters"]` for the same reason.
+
+## Human Verification
+
+Proton shows a Human Verification CAPTCHA to automated (headless, credential) logins, so those time out. Sign in by hand with the `login` command, which saves the Playwright storage state for the other commands to reuse.
+
+## Onboarding Modals
+
+A fresh account opens on a "Welcome to Proton Mail" tour: a `div.modal-two` with "Let's get started" and panel dots that intercepts every click. After login, and before clicking around, ProtonFusion tries the modal's close / Skip / "get started" / Next buttons in turn (Escape if none), a few rounds at most, and carries on if no modal is present. The buttons are listed in `selectors.ONBOARDING_DISMISS_BUTTONS`.
 
 ## Filters Page Structure
 
@@ -66,9 +78,35 @@ Clicking "Edit" opens a multi-step wizard modal:
   - Value input field
 
 **Step 3: Actions**
-- Action rows, each with:
-  - Type dropdown: Move to, Label as, Mark as read, Star, Archive, Permanently delete
-  - Parameter (folder/label selector, when applicable)
+- Four action rows (below): "Move to" (a folder dropdown that also lists the
+  system folders Inbox, Archive, Spam and Trash), "Label as", "Mark as" and
+  auto-reply. There is no permanent-delete action; "Move to" Trash is a
+  recoverable move (see [sieve-reference.md](sieve-reference.md#trash-is-a-move-not-a-delete)).
+
+Every filter's Actions step has four rows, identified by `data-testid`
+(checked against the live UI on 2026-09-30): `filter-modal:folder-row`,
+`filter-modal:label-row`, `filter-modal:mark-as-row` and
+`filter-modal:auto-reply-row`. Any other visible `filter-modal:*-row` marks the
+filter incomplete, and so does a missing one of the four. An "Apply filter to existing emails" checkbox sits outside
+the rows; it is a one-time action on save, not part of the filter, and is
+ignored.
+
+- **Collapse toggles.** The first `<button>` in the folder, label and mark-as
+  rows is a section collapse toggle ("Move to", "Label as", "Mark as"), not a
+  dropdown. The folder dropdown is `button.select` (`id="move-to-select"`), whose
+  `aria-label` is the selected folder ("Do not move" when none).
+- **"Label as" row.** It lists **every label on the account**, each as
+  `<label class="checkbox-container" title="NAME">` holding an
+  `input.checkbox-input` and a `label-stack` chip with the name. Applied labels
+  are the ticked ones. Row chrome is "Label as" and "Create label".
+- **Checked is a property.** Ticking a box sets the DOM `checked` property only;
+  the HTML attribute never changes, so the serialized HTML looks the same
+  whether a box is ticked or not. The scraper reads `el => el.checked`.
+- **Auto-reply row.** "Send auto-reply" with a toggle switch, off by default. On
+  means an action ProtonFusion cannot express, so the filter is flagged.
+- **Escape closes the wizard.** Building the folder path map opens the folder
+  dropdown and presses Escape, which closes the whole modal, so the scraper
+  reads the folder row last.
 
 Dropdowns use `button.select` to open and `li.dropdown-item` for options (not native `<select>` elements).
 
@@ -95,7 +133,7 @@ On the free plan, only 1 custom filter is allowed. After creating one:
 - "Add sieve filter" button disappears
 - A "Get more filters" upsell replaces both buttons
 
-The sync workflow disables existing UI filters first to free the slot.
+The sync workflow disables the UI filters the script replaces first to free the slot.
 
 ## Delete Confirmation
 
@@ -127,7 +165,7 @@ If any assertion fails, scraping aborts with a clear error message indicating wh
 
 When ProtonMail changes their UI:
 
-1. Open the filters page manually (Settings → All settings → Filters)
+1. Open the filters page manually (`account.proton.me/u/<slot>/mail/filters`, or Settings → All settings → Filters)
 2. Use browser dev tools to inspect the new element structure
 3. Update `src/scraper/selectors.py`
 4. Run the E2E test: `bash test_workflow.sh`
