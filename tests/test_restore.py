@@ -679,3 +679,15 @@ class TestRestoreFilterLimit:
         assert FakeBrowser.calls == [("enable", "Old")]
         assert "active-filter limit" in result.output
         assert "Enabled: 1 of 2 (Old)" in result.output
+
+    def test_protonfusion_not_found_is_not_reported_as_switched_off(self, pf_off_in_backup):
+        """W7: its row cannot be identified, so nothing is clicked and nothing went off;
+        the report must not say it was switched off and could not come back on."""
+        FakeBrowser.toggle_fails = {(SIEVE_FILTER_NAME, False), (SIEVE_FILTER_NAME, True)}
+        result = runner.invoke(app, ["restore", "--backup", "latest"], input="y\n")
+        flat = " ".join(result.output.split())
+        assert result.exit_code == 1, result.output
+        assert FakeBrowser.calls == []
+        assert "was switched off first" not in flat
+        assert "could not be switched back on" not in flat
+        assert "no mail is left unfiltered" in flat

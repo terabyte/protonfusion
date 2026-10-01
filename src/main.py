@@ -2086,12 +2086,12 @@ def restore(
                 progress.disabled = [n for n in progress.disabled if n != SIEVE_FILTER_NAME]
                 progress.disable_errors += errors
 
-            # 0. ProtonFusion's filter off, when the backup has it off
+            # 0. ProtonFusion's filter off, when the backup has it off. If that
+            # failed, nothing went off, so there is nothing to switch back on.
             if pf_first:
                 progress.disabled, progress.disable_errors = await engine.apply(pf_off_pairs, False)
                 if progress.disable_errors:
                     progress.stopped_at = "pf-disable"
-                    await _switch_pf_back_on()
 
             # 1. Enable: only adds filtering
             if progress.stopped_at is None:
