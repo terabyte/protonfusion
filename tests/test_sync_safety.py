@@ -101,7 +101,7 @@ def fake_sync(monkeypatch):
 
 @pytest.fixture
 def shrunk_account(cli_snapshots_dir, fake_sync):
-    """The real-world state: 20 rules live in Sieve, only 2 UI filters left.
+    """A shrunk account: 20 rules live in Sieve, only 2 UI filters left.
 
     Returns the live script. The latest snapshot holds a backup of the 2
     surviving filters (with the live script captured) and a consolidated.sieve
