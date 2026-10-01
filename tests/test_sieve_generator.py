@@ -820,3 +820,71 @@ class TestMergeWithExisting:
 
         assert result2.count(SECTION_BEGIN) == 1
         assert result2.count(SECTION_END) == 1
+
+
+class TestLabelGeneration:
+    """Label actions become fileinto, alongside any folder move."""
+
+    def _cf(self, actions):
+        return ConsolidatedFilter(
+            name="T",
+            condition_groups=[ConditionGroup(conditions=[
+                FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="x"),
+            ])],
+            actions=actions,
+            source_filters=["T"],
+            filter_count=1,
+        )
+
+    def test_move_and_labels_all_emitted(self):
+        script = SieveGenerator().generate([self._cf([
+            FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "Work"}),
+            FilterAction(type=ActionType.LABEL, parameters={"label": "Red"}),
+            FilterAction(type=ActionType.LABEL, parameters={"label": "On Call"}),
+        ])])
+        assert 'fileinto "Work";' in script
+        assert 'fileinto "Red";' in script
+        assert 'fileinto "On Call";' in script
+        assert 'require ["fileinto"];' in script
+
+    def test_label_name_escaped(self):
+        script = SieveGenerator().generate([self._cf([
+            FilterAction(type=ActionType.LABEL, parameters={"label": 'Say "hi"'}),
+        ])])
+        assert 'fileinto "Say \\"hi\\"";' in script
+
+    def test_label_with_mark_read_and_star(self):
+        script = SieveGenerator().generate([self._cf([
+            FilterAction(type=ActionType.LABEL, parameters={"label": "Red"}),
+            FilterAction(type=ActionType.MARK_READ),
+            FilterAction(type=ActionType.STAR),
+        ])])
+        assert 'fileinto "Red";' in script
+        assert 'addflag "\\\\Seen";' in script
+        assert 'addflag "\\\\Flagged";' in script
+        assert 'require ["fileinto", "imap4flags"];' in script
+
+
+def test_scraped_labels_end_to_end():
+    """Scraped dicts -> parser -> consolidator -> Sieve keeps every label."""
+    from src.parser.filter_parser import parse_scraped_filters
+    from src.consolidator.consolidation_engine import ConsolidationEngine
+
+    def scraped(name, sender, labels):
+        return {
+            "name": name,
+            "conditions": [{"type": "sender", "operator": "contains", "value": sender}],
+            "actions": [{"type": "move_to", "parameters": {"folder": "Work"}}]
+                       + [{"type": "label", "parameters": {"label": l}} for l in labels],
+        }
+
+    filters = parse_scraped_filters([
+        scraped("A", "a@x.com", ["Red"]),
+        scraped("B", "b@x.com", ["Red", "Blue"]),
+    ])
+    consolidated, _ = ConsolidationEngine().consolidate(filters)
+    script = SieveGenerator().generate(consolidated)
+
+    assert script.count('fileinto "Red";') == 2  # one per rule, both rules keep it
+    assert script.count('fileinto "Blue";') == 1
+    assert script.count('fileinto "Work";') == 2
