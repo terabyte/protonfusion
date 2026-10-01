@@ -12,7 +12,7 @@ The downside is fragility -- ProtonMail can change their UI at any time and brea
 
 Every design choice prioritizes reversibility:
 
-- **Disable, don't delete.** When syncing, old UI filters are disabled rather than deleted. This means you can always re-enable them manually or via the `restore` command. See [Which Filters Sync Disables](#which-filters-sync-disables).
+- **Disable, don't delete.** When syncing, old UI filters are disabled rather than deleted. This means you can always re-enable them manually or via the `restore` command, which toggles UI filters only and leaves the Sieve script as it is (the pre-sync script is kept in the snapshot's `backup.json` as `sieve_script`, to paste back by hand). See [Which Filters Sync Disables](#which-filters-sync-disables).
 - **Snapshot-based operations.** Every action references a snapshot. You never modify filter data in place -- you create a new snapshot directory.
 - **Section markers in Sieve.** Generated Sieve rules are wrapped in `# === BEGIN/END ProtonFusion ===` markers. User-authored Sieve rules outside these markers are preserved during merge. This allows ProtonFusion to coexist with hand-written Sieve rules.
 - **Refuse rather than drop.** `sync` compares the live ProtonFusion section with the new one and refuses, before disabling or uploading anything, if any rule would disappear. See [Refusing to Drop Live Rules](#refusing-to-drop-live-rules).

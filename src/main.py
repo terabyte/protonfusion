@@ -1331,7 +1331,7 @@ def sync(
                 f"Sieve uploaded: Yes\n"
                 f"Filters disabled: {len(disabled)}\n"
                 f"Filters left enabled: {len(plan.left_enabled) + len(not_disabled)}\n\n"
-                f"[yellow]To rollback, run: restore --backup {backup_id}",
+                + _rollback_help(backup_id, snapshot_dir),
                 title="Sync Complete",
             ))
             return True
@@ -1342,6 +1342,19 @@ def sync(
         raise typer.Exit(1)
 
 
+def _rollback_help(backup_id: str, snapshot_dir: Path) -> str:
+    """What to tell the user about undoing a sync: restore covers the UI
+    filters only, so the script has to be put back by hand."""
+    return (
+        f"[yellow]To roll back: 'restore --backup {escape(backup_id)}' turns the UI filters back on "
+        "or off as they were in that backup. It does NOT change the Sieve script, so until you put "
+        "the old script back, the new one and the re-enabled filters both run.\n"
+        f"The script captured with that backup is \"sieve_script\" in "
+        f"{escape(str(snapshot_dir / 'backup.json'))}: paste it back into the "
+        f"'{SIEVE_FILTER_NAME}' filter in ProtonMail (Settings > Filters), or re-sync it."
+    )
+
+
 @app.command()
 def restore(
     backup_id: str = typer.Option(..., "--backup", help="Backup to restore from"),
@@ -1350,7 +1363,15 @@ def restore(
     state: str = typer.Option("", "--state", help=STATE_HELP),
     workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
 ):
-    """Restore filters to previous backup state."""
+    """Turn UI filters on or off to match a backup. Does not change the Sieve script.
+
+    Each backed-up filter is matched to the live one with the same content
+    (Sieve filters by name) and toggled by row position plus name, so a
+    shared name never toggles the wrong filter. Filters it cannot match,
+    or cannot match unambiguously, are listed and left alone, and the
+    command then exits 1. To put the Sieve script back as well, paste
+    backup.json's "sieve_script" into the ProtonFusion filter by hand.
+    """
     from src.scraper.protonmail_scraper import ProtonMailScraper
     from src.scraper.protonmail_sync import ProtonMailSync
     from src.backup.restore_engine import RestoreEngine
@@ -1359,8 +1380,9 @@ def restore(
     _workers = max(1, min(workers, 10))
     manager = BackupManager()
     bkup = manager.load_backup(backup_id)
+    snapshot_dir = manager.snapshot_dir_for(backup_id)
 
-    async def _run():
+    async def _run() -> bool:
         scraper = ProtonMailScraper(headless=headless, credentials=creds, storage_state_path=state or None)
         try:
             await scraper.initialize()
@@ -1380,25 +1402,51 @@ def restore(
             restore_engine = RestoreEngine(sync_client)
             report = await restore_engine.restore_from_backup(bkup, current_filters)
 
+            not_restored = report["not_found"] + report["ambiguous"] + report["errors"]
+            heading = "[bold green]Restore complete![/]" if not not_restored else (
+                f"[bold red]Restore incomplete: {len(not_restored)} filter(s) not restored[/]"
+            )
             console.print(Panel(
-                f"[bold green]Restore complete![/]\n\n"
+                f"{heading}\n\n"
                 f"Enabled: {len(report['enabled'])}\n"
                 f"Disabled: {len(report['disabled'])}\n"
                 f"Already correct: {len(report['already_correct'])}\n"
                 f"Not found: {len(report['not_found'])}\n"
-                f"Errors: {len(report['errors'])}",
+                f"Ambiguous (left alone): {len(report['ambiguous'])}\n"
+                f"Errors: {len(report['errors'])}\n\n"
+                "[yellow]Only UI filter on/off states were restored; the Sieve script was not changed.",
                 title="Restore Report",
             ))
 
-            if report["errors"]:
-                console.print("\n[bold red]Errors:")
-                for err in report["errors"]:
-                    console.print(f"  [red]{err}")
+            for key, title in (
+                ("not_found", "Not found (deleted, or changed since the backup)"),
+                ("ambiguous", "Ambiguous, left alone"),
+                ("errors", "Errors"),
+            ):
+                if report[key]:
+                    console.print(f"\n[bold red]{title}:")
+                    for line in report[key]:
+                        console.print(f"  [red]- {escape(line)}")
+            if report["script_not_restored"]:
+                console.print(
+                    "\n[yellow]These Sieve filters' scripts differ from the backup (restore set their "
+                    "on/off state only):"
+                )
+                for name in report["script_not_restored"]:
+                    console.print(f"  [yellow]- {escape(name)}")
+            if bkup.sieve_script:
+                console.print(
+                    f"[cyan]The Sieve script captured with this backup is \"sieve_script\" in "
+                    f"{escape(str(snapshot_dir / 'backup.json'))}; paste it back into the "
+                    f"'{SIEVE_FILTER_NAME}' filter to restore the script too."
+                )
+            return not not_restored
 
         finally:
             await sync_client.close()
 
-    _run_browser_command(_run())
+    if not _run_browser_command(_run()):
+        raise typer.Exit(1)
 
 
 @app.command()
