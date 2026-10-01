@@ -11,7 +11,7 @@ import pytest
 from src.scraper import selectors
 from src.scraper.browser import (
     ProtonMailBrowser, SessionAccountMismatchError, SessionExpiredError, SieveReadError,
-    same_account,
+    name_from_edit_label, same_account,
 )
 
 
@@ -385,16 +385,21 @@ class FakeElement:
 class SievePage(FakePage):
     """A filters page holding one Sieve filter row whose Edit opens the editor."""
 
-    def __init__(self, script="", rows=True, editor_opens=True, evaluate_error=None):
+    def __init__(self, script="", rows=True, editor_opens=True, evaluate_error=None, names=None):
         super().__init__("https://account.proton.me/u/0/mail/filters")
         self.script = script
         self.evaluate_error = evaluate_error
         self.editor_opens = editor_opens
-        edit = FakeElement(aria="Edit filter ProtonFusion Consolidated", on_click=self._open)
-        row = FakeElement(children={selectors.FILTER_EDIT_BUTTON: edit})
-        self.section = FakeElement(children={selectors.FILTER_TABLE_ROWS: [row] if rows else []})
+        self.opened = []  # names whose Edit button was clicked
+        names = ["ProtonFusion Consolidated"] if names is None else names
+        built = []
+        for name in names:
+            edit = FakeElement(aria=f'Edit filter "{name}"', on_click=lambda n=name: self._open(n))
+            built.append(FakeElement(children={selectors.FILTER_EDIT_BUTTON: edit}))
+        self.section = FakeElement(children={selectors.FILTER_TABLE_ROWS: built if rows else []})
 
-    def _open(self):
+    def _open(self, name):
+        self.opened.append(name)
         if self.editor_opens:
             self.present.add(selectors.SIEVE_EDITOR_CM)
 
@@ -462,6 +467,44 @@ class TestReadSieveScript:
             await browser.read_sieve_script("ProtonFusion Consolidated")
         assert "SECRET" not in str(excinfo.value)
         assert "Timeout exceeded" in str(excinfo.value)
+
+
+class TestOpenSieveFilterByName:
+    """The ProtonFusion filter is found by its exact name, and only if that name is unique."""
+
+    @pytest.mark.parametrize("aria,name", [
+        ('Edit filter "ProtonFusion Consolidated"', "ProtonFusion Consolidated"),
+        ('Edit filter "Say "hi" twice"', 'Say "hi" twice'),
+        ('Edit filter ""', None),
+        ("Edit filter ProtonFusion Consolidated", None),
+        (None, None),
+    ])
+    def test_name_from_edit_label(self, aria, name):
+        assert name_from_edit_label(aria) == name
+
+    @pytest.mark.asyncio
+    async def test_substring_name_listed_first_is_not_opened(self):
+        page = SievePage(script="keep;", names=[
+            "ProtonFusion Consolidated (old copy)", "ProtonFusion Consolidated",
+        ])
+        browser = sieve_browser(page)
+        assert await browser.read_sieve_script("ProtonFusion Consolidated") == "keep;"
+        assert page.opened == ["ProtonFusion Consolidated"]
+
+    @pytest.mark.asyncio
+    async def test_only_substring_match_is_not_found(self):
+        page = SievePage(script="keep;", names=["ProtonFusion Consolidated (old copy)"])
+        browser = sieve_browser(page)
+        assert await browser.read_sieve_script("ProtonFusion Consolidated") == ""
+        assert page.opened == []
+
+    @pytest.mark.asyncio
+    async def test_duplicate_exact_name_refuses(self):
+        page = SievePage(script="keep;", names=["ProtonFusion Consolidated", "ProtonFusion Consolidated"])
+        browser = sieve_browser(page)
+        with pytest.raises(SieveReadError, match="2 filters are named"):
+            await browser.read_sieve_script("ProtonFusion Consolidated")
+        assert page.opened == []
 
 
 class TestSessionAccount:

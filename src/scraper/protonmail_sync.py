@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 from src.scraper import selectors
 from src.scraper.browser import (
     ProtonMailBrowser, MODAL_TRANSITION_MS, DROPDOWN_MS,
-    ALL_SETTINGS_LOAD_MS,
+    ALL_SETTINGS_LOAD_MS, row_filter_name,
 )
 from src.utils.config import ELEMENT_TIMEOUT_MS
 
@@ -131,24 +131,41 @@ class ProtonMailSync(ProtonMailBrowser):
             raise
 
     async def _ensure_filter_enabled(self, name: str):
-        """Enable a filter by name if it isn't already enabled."""
+        """Enable the one filter with exactly this name if it isn't already enabled.
+
+        Does nothing (with a warning) when no row or more than one row has the
+        name, so another filter sharing it is never switched on by mistake.
+        """
         page = self.page
         section = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
         if not section:
             return
+        row = await self._unique_row_named(section, name)
+        if row is None:
+            return
+        toggle_input = await row.query_selector(selectors.FILTER_TOGGLE)
+        if toggle_input and not await toggle_input.is_checked():
+            toggle_label = await row.query_selector(selectors.FILTER_TOGGLE_LABEL)
+            if toggle_label:
+                await toggle_label.click()
+                await page.wait_for_timeout(1000)
+                logger.info("Enabled filter: %s", name)
+
+    async def _unique_row_named(self, section, name: str):
+        """The single Custom filters row named exactly `name`, or None (with a warning).
+
+        None when no row has the name, and also when several do: rows can
+        only be told apart by name here, so picking one would be a guess.
+        """
         rows = await section.query_selector_all(selectors.FILTER_TABLE_ROWS)
-        for row in rows:
-            row_name = await self._get_filter_name(row)
-            if row_name == name:
-                toggle_input = await row.query_selector(selectors.FILTER_TOGGLE)
-                if toggle_input and not await toggle_input.is_checked():
-                    toggle_label = await row.query_selector(selectors.FILTER_TOGGLE_LABEL)
-                    if toggle_label:
-                        await toggle_label.click()
-                        await page.wait_for_timeout(1000)
-                        logger.info("Enabled filter: %s", name)
-                return
-        logger.warning("Could not find filter '%s' to enable", name)
+        matches = [row for row in rows if await self._get_filter_name(row) == name]
+        if not matches:
+            logger.warning("Filter '%s' not found", name)
+            return None
+        if len(matches) > 1:
+            logger.warning("%d filters are named '%s'; not touching any of them", len(matches), name)
+            return None
+        return matches[0]
 
     async def create_filter(
         self,
@@ -326,31 +343,32 @@ class ProtonMailSync(ProtonMailBrowser):
         return await self._set_filter_toggle(name, enabled=False)
 
     async def _set_filter_toggle(self, name: str, enabled: bool) -> bool:
-        """Set a filter's toggle state by finding the row with the given name."""
+        """Set the toggle of the one filter named exactly `name`.
+
+        Returns False without clicking when no row, or more than one row,
+        has that name: with a shared name the wrong filter could be toggled.
+        """
         page = self.page
         section = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
         if not section:
             logger.warning("Custom filters section not found")
             return False
-        rows = await section.query_selector_all(selectors.FILTER_TABLE_ROWS)
+        row = await self._unique_row_named(section, name)
+        if row is None:
+            return False
 
-        for row in rows:
-            row_name = await self._get_filter_name(row)
-            if row_name == name:
-                toggle_input = await row.query_selector(selectors.FILTER_TOGGLE)
-                toggle_label = await row.query_selector(selectors.FILTER_TOGGLE_LABEL)
-                if toggle_input and toggle_label:
-                    is_checked = await toggle_input.is_checked()
-                    if is_checked != enabled:
-                        await toggle_label.click()
-                        await page.wait_for_timeout(1000)
-                        logger.info("%s filter: %s", "Enabled" if enabled else "Disabled", name)
-                    else:
-                        logger.info("Filter '%s' already %s", name, "enabled" if enabled else "disabled")
-                    return True
-
-        logger.warning("Filter '%s' not found", name)
-        return False
+        toggle_input = await row.query_selector(selectors.FILTER_TOGGLE)
+        toggle_label = await row.query_selector(selectors.FILTER_TOGGLE_LABEL)
+        if not toggle_input or not toggle_label:
+            logger.warning("No toggle for filter '%s'", name)
+            return False
+        if await toggle_input.is_checked() != enabled:
+            await toggle_label.click()
+            await page.wait_for_timeout(1000)
+            logger.info("%s filter: %s", "Enabled" if enabled else "Disabled", name)
+        else:
+            logger.info("Filter '%s' already %s", name, "enabled" if enabled else "disabled")
+        return True
 
     async def set_row_enabled(self, index: int, name: str, enabled: bool) -> bool:
         """Set the toggle of one Custom filters row, identified by position and name.
@@ -497,15 +515,5 @@ class ProtonMailSync(ProtonMailBrowser):
         return False
 
     async def _get_filter_name(self, row) -> str:
-        """Extract filter name from a table row."""
-        edit_btn = await row.query_selector(selectors.FILTER_EDIT_BUTTON)
-        if edit_btn:
-            aria = await edit_btn.get_attribute("aria-label")
-            if aria and '"' in aria:
-                return aria.split('"')[1]
-        tds = await row.query_selector_all("td")
-        if len(tds) >= 2:
-            return (await tds[1].inner_text()).strip()
-        elif tds:
-            return (await tds[0].inner_text()).strip()
-        return ""
+        """Exact filter name of a table row (see row_filter_name)."""
+        return await row_filter_name(row)

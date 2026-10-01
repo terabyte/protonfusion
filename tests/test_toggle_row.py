@@ -59,3 +59,39 @@ def test_missing_row_is_refused():
     result, clicks = _toggle([("Other", True)], 3, "Gone", False)
     assert result is False
     assert clicks == []
+
+
+def _by_name(rows, method, *args):
+    """Run a name-keyed ProtonMailSync method against a fake page; return (result, clicks)."""
+    sync = ProtonMailSync()
+    sync.page = TogglePage(rows)
+    result = asyncio.run(getattr(sync, method)(*args))
+    return result, sync.page.clicks
+
+
+def test_toggle_by_name_matches_exactly_not_by_substring():
+    result, clicks = _by_name([("A (old copy)", False), ("A", False)], "enable_filter", "A")
+    assert result is True
+    assert clicks == ["switch1"]
+
+
+def test_toggle_by_shared_name_is_refused():
+    result, clicks = _by_name([("A", False), ("A", False)], "enable_filter", "A")
+    assert result is False
+    assert clicks == []
+
+
+def test_ensure_enabled_matches_exactly_not_by_substring():
+    _, clicks = _by_name(
+        [("ProtonFusion Consolidated (old copy)", False), ("ProtonFusion Consolidated", False)],
+        "_ensure_filter_enabled", "ProtonFusion Consolidated",
+    )
+    assert clicks == ["switch1"]
+
+
+def test_ensure_enabled_with_shared_name_touches_nothing():
+    _, clicks = _by_name(
+        [("ProtonFusion Consolidated", False), ("ProtonFusion Consolidated", False)],
+        "_ensure_filter_enabled", "ProtonFusion Consolidated",
+    )
+    assert clicks == []
