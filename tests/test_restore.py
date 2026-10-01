@@ -80,12 +80,12 @@ class TestRestoreEngine:
         By name, the first "News" row would have taken both toggles."""
         backed_up = [
             _filter("News", "keep@x", enabled=True, priority=0),
-            _filter("News", "drop@x", enabled=False, priority=1, action=ActionType.DELETE),
+            _filter("News", "drop@x", enabled=False, priority=1, action=ActionType.TRASH),
         ]
         # Since the backup, a sync disabled the first and someone enabled the second
         current = [
             _filter("News", "keep@x", enabled=False, priority=0),
-            _filter("News", "drop@x", enabled=True, priority=1, action=ActionType.DELETE),
+            _filter("News", "drop@x", enabled=True, priority=1, action=ActionType.TRASH),
         ]
         report, sync = _restore(backed_up, current)
         assert sorted(sync.calls) == [(0, "News", True), (1, "News", False)]

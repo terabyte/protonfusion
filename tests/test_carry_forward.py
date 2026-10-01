@@ -51,7 +51,7 @@ VARIED_FILTERS = [
             FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="[SPAM]"),
             FilterCondition(type=ConditionType.HEADER, operator=Operator.IS, value="yes"),
         ],
-        actions=[FilterAction(type=ActionType.DELETE)],
+        actions=[FilterAction(type=ActionType.TRASH)],
     ),
     ProtonMailFilter(
         name="attachments",
@@ -291,7 +291,7 @@ class TestWildcardOperatorsCarryForward:
             ProtonMailFilter(
                 name=f"{op.value}",
                 conditions=[FilterCondition(type=ConditionType.SUBJECT, operator=op, value=v)],
-                actions=[FilterAction(type=ActionType.DELETE)],
+                actions=[FilterAction(type=ActionType.TRASH)],
             )
             for op, v in [(Operator.STARTS_WITH, "Re: [x]"), (Operator.ENDS_WITH, "?!*")]
         ]

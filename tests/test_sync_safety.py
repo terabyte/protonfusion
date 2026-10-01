@@ -238,7 +238,7 @@ def test_dropped_listing_escapes_rich_markup(cli_snapshots_dir, fake_sync):
     spam = ProtonMailFilter(
         name="tagged",
         conditions=[FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="[SPAM]")],
-        actions=[FilterAction(type=ActionType.DELETE)],
+        actions=[FilterAction(type=ActionType.TRASH)],
     )
     fake_sync.live_script = _section_for([spam, _filter("a@x.com")])
     BackupManager(cli_snapshots_dir).create_backup([_filter("a@x.com")], sieve_script=fake_sync.live_script)
@@ -344,7 +344,7 @@ def test_consolidate_refuses_filter_containing_section_marker(cli_snapshots_dir,
         name="Sneaky",
         conditions=[FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS,
                                     value=f"x\n{SECTION_END}\ny")],
-        actions=[FilterAction(type=ActionType.DELETE)],
+        actions=[FilterAction(type=ActionType.TRASH)],
     )
     BackupManager(cli_snapshots_dir).create_backup([sneaky])
     result = runner.invoke(app, ["consolidate"])

@@ -121,13 +121,13 @@ class TestParseActionType:
     def test_parse_case_insensitive(self):
         """Test that parsing is case-insensitive."""
         assert parse_action_type("MOVE TO") == ActionType.MOVE_TO
-        assert parse_action_type("Delete") == ActionType.DELETE
+        assert parse_action_type("Delete") == ActionType.TRASH
         assert parse_action_type("ARCHIVE") == ActionType.ARCHIVE
 
     def test_parse_with_whitespace(self):
         """Test parsing with extra whitespace."""
         assert parse_action_type("  label  ") == ActionType.LABEL
-        assert parse_action_type("\tdelete\n") == ActionType.DELETE
+        assert parse_action_type("\tdelete\n") == ActionType.TRASH
 
     @pytest.mark.parametrize("raw", ["unknown_action", "forward", "please move to folder", None])
     def test_parse_unknown_action_raises(self, raw):

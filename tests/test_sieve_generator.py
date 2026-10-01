@@ -35,7 +35,7 @@ class TestSieveGenerator:
         cf = ConsolidatedFilter(
             name="Test",
             condition_groups=_ANY_SENDER,
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -66,7 +66,7 @@ class TestSieveGenerator:
             condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam@test.com")
             ])],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -160,7 +160,7 @@ class TestSieveGenerator:
             condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test@example.com")
             ])],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -177,7 +177,7 @@ class TestSieveGenerator:
             condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.RECIPIENT, operator=Operator.IS, value="me@example.com")
             ])],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -194,7 +194,7 @@ class TestSieveGenerator:
             condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent")
             ])],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -211,7 +211,7 @@ class TestSieveGenerator:
             condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="test")
             ])],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -226,7 +226,7 @@ class TestSieveGenerator:
             condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="test@example.com")
             ])],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -241,7 +241,7 @@ class TestSieveGenerator:
             condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.MATCHES, value="*@spam.com")
             ])],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -262,7 +262,7 @@ class TestSieveGenerator:
                     FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam2"),
                 ],
             )],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -281,7 +281,7 @@ class TestSieveGenerator:
                     FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
                 ],
             )],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -296,7 +296,7 @@ class TestSieveGenerator:
             condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam1@test.com|spam2@test.com|spam3@test.com")
             ])],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -331,7 +331,7 @@ class TestSieveGenerator:
         cf = ConsolidatedFilter(
             name="Consolidated",
             condition_groups=_ANY_SENDER,
-            actions=[FilterAction(type=ActionType.DELETE)],
+            actions=[FilterAction(type=ActionType.TRASH)],
             source_filters=["Filter 1", "Filter 2", "Filter 3"],
             filter_count=3
         )
@@ -347,7 +347,7 @@ class TestSieveGenerator:
         cf = ConsolidatedFilter(
             name="Consolidated",
             condition_groups=_ANY_SENDER,
-            actions=[FilterAction(type=ActionType.DELETE)],
+            actions=[FilterAction(type=ActionType.TRASH)],
             source_filters=[f"Filter {i}" for i in range(10)],
             filter_count=10
         )
@@ -376,7 +376,7 @@ class TestSieveGenerator:
                 condition_groups=[ConditionGroup(conditions=[
                     FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam")
                 ])],
-                actions=[FilterAction(type=ActionType.DELETE)]
+                actions=[FilterAction(type=ActionType.TRASH)]
             ),
             ConsolidatedFilter(
                 name="Archive News",
@@ -460,7 +460,7 @@ class TestSieveGenerator:
             condition_groups=[ConditionGroup(conditions=[
                 FilterCondition(type=ConditionType.SENDER, operator=Operator.MATCHES, value="*@spam.com")
             ])],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         extensions = gen._collect_extensions([cf])
@@ -478,7 +478,7 @@ class TestSieveGenerator:
                     FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="spam1@test.com|spam2@test.com|spam3@test.com"),
                 ],
             )],
-            actions=[FilterAction(type=ActionType.DELETE)],
+            actions=[FilterAction(type=ActionType.TRASH)],
             source_filters=["Spam Filter 1", "Spam Filter 2", "Spam Filter 3"],
             filter_count=3
         )
@@ -503,7 +503,7 @@ class TestSieveGenerator:
                     FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="bob")
                 ]),
             ],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -524,7 +524,7 @@ class TestSieveGenerator:
                     FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="urgent"),
                 ],
             )],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -600,7 +600,7 @@ class TestSieveGenerator:
                     FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="bob"),
                 ]),
             ],
-            actions=[FilterAction(type=ActionType.DELETE)]
+            actions=[FilterAction(type=ActionType.TRASH)]
         )
 
         script = gen.generate([cf])
@@ -979,7 +979,7 @@ def _single_condition(operator, value, ctype=ConditionType.SENDER):
         condition_groups=[ConditionGroup(conditions=[
             FilterCondition(type=ctype, operator=operator, value=value)
         ])],
-        actions=[FilterAction(type=ActionType.DELETE)],
+        actions=[FilterAction(type=ActionType.TRASH)],
     )
 
 
