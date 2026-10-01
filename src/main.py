@@ -27,7 +27,7 @@ from src.models.backup_models import Backup, ArchiveEntry, BACKUP_FORMAT_VERSION
 from src.backup.backup_manager import (
     BackupManager, BackupIntegrityError, format_predates_strict_parser, predates_strict_parser,
     unverified_for_deletion, classify_old_entries, strict_confirmations, suspect_matches,
-    OLD_BACKUP_ENTRY, CARRIED_COPY_ENTRY,
+    OLD_BACKUP_ENTRY, CARRIED_COPY_ENTRY, UNSTAMPED_CARRIED_ENTRY,
 )
 from src.backup.diff_engine import DiffEngine
 from src.backup.sync_plan import (
@@ -178,6 +178,7 @@ def _warn_old_archive_entries(
     )
     old = [e for e, kind in classified if kind == OLD_BACKUP_ENTRY]
     copies = [e for e, kind in classified if kind == CARRIED_COPY_ENTRY]
+    unstamped = [e for e, kind in classified if kind == UNSTAMPED_CARRIED_ENTRY]
     parts = [f"[bold red]archive.json holds {len(classified)} archived filter(s) that nothing has confirmed. "
              f"{where}[/]"]
     if old:
@@ -211,6 +212,16 @@ def _warn_old_archive_entries(
             f"misread rule:\n{names}\n"
             "Each is used again once the old entry it matches is confirmed. If that never happens, "
             "'snapshot remove <name>' drops it; 'sync' then needs --allow-rule-removal to take the live rule out."
+        )
+    if unstamped:
+        names = "\n".join(f"  - {escape(e.filter.name)}" for e in unstamped)
+        parts.append(
+            "\n[bold]Carried forward from the live ProtonFusion section by an earlier build, which did not "
+            "record a format.[/] No backup can confirm these, since they are not filters in your account; one "
+            "is confirmed when its rule is in the live section captured in the backup, unchanged. These are "
+            f"not:\n{names}\n"
+            "If a rule is still wanted, recreate it as a filter in Proton and run 'backup'. "
+            "'consolidate --keep-live-rules' carries forward again whatever the live section still holds."
         )
     parts.append("'snapshot remove <name>' drops an archive copy for good.")
     console.print(Panel("\n".join(parts), title="Old Archive Entries", border_style="red"))
@@ -809,14 +820,26 @@ def consolidate(
             # rebuilt from the live script, replaces it.
             known_hashes = {e.filter.content_hash for e in archive_entries if id(e) not in old_entry_ids}
             now_ts = datetime.now(timezone.utc).isoformat()
+            # An unverified carried entry whose every rule is carried again
+            # is replaced by the new copies. Matched by rules, not by name or
+            # hash: the snapshot label in a carried filter's name changes its
+            # hash on every run. A new copy inherits a replaced copy's
+            # suspicion through suspect_matches (classified_old still holds it).
+            recarried = set()
+            for f in carried:
+                recarried |= filter_facts(f)
+            replaced = [
+                e for e in archive_entries
+                if id(e) in old_entry_ids and is_carried(e.filter)
+                and e.filter.status == FilterStatus.ARCHIVED and filter_facts(e.filter) <= recarried
+            ]
+            if replaced:
+                replaced_ids = {id(e) for e in replaced}
+                archive_entries = [e for e in archive_entries if id(e) not in replaced_ids]
             held_back = 0
             for f in carried:
                 if f.content_hash in known_hashes:
                     continue
-                archive_entries = [
-                    e for e in archive_entries
-                    if not (id(e) in old_entry_ids and e.filter.content_hash == f.content_hash)
-                ]
                 # A live rule matching an unconfirmed old entry may be that
                 # entry's misread rule: copying it from Sieve confirms
                 # nothing, so the copy is recorded as such and stays out.
@@ -838,6 +861,12 @@ def consolidate(
                 f"[cyan]Carried forward {len(to_carry) - len(unconvertible)} condition/action pairs "
                 f"from the live Sieve section as {carried_count} archived filters"
             )
+            if replaced:
+                console.print(
+                    f"[cyan]Replaced {len(replaced)} unverified carried-forward archive entr"
+                    f"{'y' if len(replaced) == 1 else 'ies'} whose rules were carried again: "
+                    + ", ".join(escape(e.filter.name) for e in replaced)
+                )
             if held_back:
                 console.print(
                     f"[yellow]{held_back} of them copy a live rule matching an old archive entry nothing "
@@ -969,6 +998,14 @@ def consolidate(
         if (not is_carried(e.filter) and format_predates_strict_parser(e.source_format)
                 and e.filter.content_hash in confirmed_hashes):
             e.source_format = bkup.version
+    # An unstamped carried entry found unchanged in the live section is
+    # stamped: it is written back with its values list, so it is not split
+    # again on load, and it stays confirmed after the live section changes.
+    still_unverified = {id(e) for e, _ in classified_old}
+    for e in archive_entries:
+        if (is_carried(e.filter) and format_predates_strict_parser(e.source_format)
+                and id(e) not in still_unverified):
+            e.source_format = BACKUP_FORMAT_VERSION
     manager.write_archive(snapshot_dir, archive_entries)
 
     # Save consolidation_args.json

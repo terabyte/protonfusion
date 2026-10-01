@@ -539,3 +539,128 @@ class TestKeepLiveRulesDoesNotLaunder:
         script = _script(account)
         assert '"news*"' in script and self.MISREAD_LIVE not in script
         assert not [e for e in m.load_archive(account / "latest") if e.filter.name.startswith("Carried")]
+
+
+class TestUnstampedCarriedEntries:
+    """W5: carried-forward entries an earlier build wrote without a source_format.
+
+    No backup can confirm them (carried filters are not UI filters), so they
+    are confirmed against the live ProtonFusion section they were copied
+    from, and get their own message when that fails.
+    """
+
+    LIVE_C = ('# === BEGIN ProtonFusion ===\nif address :is "From" "c@x.com" {\n    fileinto "Bills";\n}\n'
+              '# === END ProtonFusion ===\n')
+
+    @staticmethod
+    def _carried(live, label="prev"):
+        from src.consolidator.carry_forward import facts_to_filters
+        from src.generator.sieve_rules import script_facts
+        carried, unconvertible = facts_to_filters(script_facts(live), label=label)
+        assert not unconvertible
+        return carried
+
+    @staticmethod
+    def _write_unstamped_dicts(snapshots_dir, filter_dicts):
+        """archive.json as an earlier build wrote it: no source_format key."""
+        entries = [{"filter": d, "archived_at": "", "source_snapshot": "prev"} for d in filter_dicts]
+        (snapshots_dir / "latest" / "archive.json").write_text(json.dumps({"version": "1.0", "entries": entries}))
+
+    def _write_unstamped(self, snapshots_dir, filters):
+        self._write_unstamped_dicts(snapshots_dir, [
+            f.model_copy(update={"status": FilterStatus.ARCHIVED, "enabled": False}).model_dump(mode="json")
+            for f in filters
+        ])
+
+    def test_rule_in_live_section_is_confirmed_and_stamped(self, snapshots_dir):
+        from src.models.backup_models import BACKUP_FORMAT_VERSION
+        carried = self._carried(self.LIVE_C)
+        m = BackupManager(snapshots_dir)
+        m.create_backup([_filter("Work", [SENDER_A], [LABEL_WORK])], sieve_script=self.LIVE_C)
+        self._write_unstamped(snapshots_dir, carried)
+        result = runner.invoke(app, ["consolidate"])
+        assert result.exit_code == 0, result.output
+        assert "Old Archive Entries" not in result.output
+        assert "c@x.com" in _script(snapshots_dir)
+        entries = [e for e in m.load_archive(snapshots_dir / "latest") if e.filter.name == carried[0].name]
+        assert [e.source_format for e in entries] == [BACKUP_FORMAT_VERSION]
+
+    def test_rule_not_in_live_section_has_its_own_message(self, snapshots_dir):
+        carried = self._carried(self.LIVE_C)
+        BackupManager(snapshots_dir).create_backup([_filter("Work", [SENDER_A], [LABEL_WORK])])
+        self._write_unstamped(snapshots_dir, carried)
+        result = runner.invoke(app, ["consolidate"])
+        flat = " ".join(result.output.split())
+        assert "Old Archive Entries" in result.output and carried[0].name in flat
+        assert "by an earlier build, which did not record a format" in flat
+        assert "older than format 1.3" not in flat
+        assert "c@x.com" not in _script(snapshots_dir)
+
+    def test_recarried_copy_replaces_the_old_one_by_rule(self, snapshots_dir):
+        """A copy from an earlier snapshot is replaced when --keep-live-rules carries
+        the same rules again under a new snapshot label (a new hash)."""
+        account = TestKeepLiveRulesDoesNotLaunder()
+        consolidated, _ = ConsolidationEngine().consolidate([account.MISREAD])
+        from src.generator.sieve_generator import SieveGenerator
+        live = SieveGenerator.merge_with_existing(SieveGenerator().generate(consolidated), "")
+        m = BackupManager(snapshots_dir)
+        m.create_backup([account.CORRECT], sieve_script=live)
+        TestOldSnapshot._write_legacy_archive(snapshots_dir, [account.MISREAD])
+        assert runner.invoke(app, ["consolidate", "--keep-live-rules"]).exit_code == 0
+        m.create_backup([account.CORRECT], sieve_script=live)
+        result = runner.invoke(app, ["consolidate", "--keep-live-rules"])
+        assert result.exit_code == 0, result.output
+        assert "Replaced 1 unverified carried-forward archive entry" in result.output
+        copies = [e for e in m.load_archive(snapshots_dir / "latest") if e.filter.name.startswith("Carried")]
+        assert len(copies) == 1 and m.load_backup("latest") is not None
+        assert copies[0].matches_unverified == [account.MISREAD.content_hash]
+        assert account.MISREAD_LIVE not in _script(snapshots_dir)
+
+    # --- V4: the legacy "|" split stays confined to unstamped legacy entries ---
+
+    LIVE_PIPE = ('require ["fileinto"];\n# === BEGIN ProtonFusion ===\n'
+                 'if header :contains "Subject" "invoice|receipt" {\n    fileinto "Bills";\n}\n'
+                 '# === END ProtonFusion ===\n')
+
+    def test_split_reading_of_literal_pipe_key_is_not_confirmed(self, snapshots_dir):
+        """An unstamped carried entry with a "|" value is read split. The live
+        section holds the literal key, so the split (wider) reading is not
+        confirmed; --keep-live-rules carries the literal again."""
+        carried = self._carried(self.LIVE_PIPE)
+        m = BackupManager(snapshots_dir)
+        m.create_backup([_filter("Work", [SENDER_A], [LABEL_WORK])], sieve_script=self.LIVE_PIPE)
+        self._write_unstamped(snapshots_dir, carried)
+        result = runner.invoke(app, ["consolidate"])
+        assert "by an earlier build" in " ".join(result.output.split())
+        assert '["invoice", "receipt"]' not in _script(snapshots_dir)
+        assert runner.invoke(app, ["consolidate", "--keep-live-rules"]).exit_code == 0
+        m.create_backup([_filter("Work", [SENDER_A], [LABEL_WORK])], sieve_script=self.LIVE_PIPE)
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        script = _script(snapshots_dir)
+        assert '"invoice|receipt"' in script and '["invoice", "receipt"]' not in script
+
+    def test_confirmed_legacy_split_entry_is_stamped_as_a_list(self, snapshots_dir):
+        """A legacy entry whose "|" was a join, and whose live rule holds the keys
+        separately, is confirmed and stamped. It is written back as a values
+        list, so the stamp (which turns the split off) changes nothing."""
+        live = ('# === BEGIN ProtonFusion ===\nif header :contains "Subject" ["invoice", "receipt"] {\n'
+                '    fileinto "Bills";\n}\n# === END ProtonFusion ===\n')
+        legacy = {
+            "name": "Carried forward (old): subject contains -> fileinto \"Bills\";",
+            "status": "archived", "enabled": False,
+            "conditions": [{"type": "subject", "operator": "contains", "value": "invoice|receipt"}],
+            "actions": [{"type": "move_to", "parameters": {"folder": "Bills"}}],
+        }
+        m = BackupManager(snapshots_dir)
+        m.create_backup([_filter("Work", [SENDER_A], [LABEL_WORK])], sieve_script=live)
+        self._write_unstamped_dicts(snapshots_dir, [legacy])
+        result = runner.invoke(app, ["consolidate"])
+        assert "Old Archive Entries" not in result.output, result.output
+        raw = json.loads((snapshots_dir / "latest" / "archive.json").read_text())["entries"]
+        stamped = [e for e in raw if e["filter"]["name"] == legacy["name"]]
+        assert stamped[0]["source_format"] is not None
+        assert stamped[0]["filter"]["conditions"][0]["values"] == ["invoice", "receipt"]
+        # Read again (no split now): same rule
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        script = _script(snapshots_dir)
+        assert '["invoice", "receipt"]' in script and '"invoice|receipt"' not in script

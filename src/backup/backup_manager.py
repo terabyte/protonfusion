@@ -13,6 +13,7 @@ from src.models.backup_models import (
     STRICT_PARSER_FORMAT_VERSION,
 )
 from src.consolidator.carry_forward import filter_facts, is_carried
+from src.generator.sieve_rules import Fact, SieveParseError, current_forms, extract_section, script_facts
 from src.models.filter_models import ProtonMailFilter
 from src.utils.config import SNAPSHOTS_DIR, TOOL_VERSION
 from src.utils.private_files import write_private_file
@@ -62,6 +63,28 @@ def predates_strict_parser(backup: Backup) -> bool:
 # Why an archive entry is unverified (classify_old_entries)
 OLD_BACKUP_ENTRY = "old backup"
 CARRIED_COPY_ENTRY = "carried copy"
+UNSTAMPED_CARRIED_ENTRY = "unstamped carried"
+
+
+def live_section_facts(backup: Backup) -> Set[Fact]:
+    """The facts of the live ProtonFusion section captured in `backup`, in current forms.
+
+    Each live fact is expanded to every form the current generator may
+    write for the same rule (current_forms), so a filter's generated facts
+    can be tested against it by plain subset. Empty when the backup holds
+    no section or one that cannot be parsed: nothing is confirmed then.
+    """
+    script = backup.sieve_script or ""
+    try:
+        if extract_section(script) is None:
+            return set()
+        live = script_facts(script)
+    except SieveParseError:
+        return set()
+    forms: Set[Fact] = set()
+    for fact in live:
+        forms |= current_forms(fact)
+    return forms
 
 
 def strict_confirmations(backup: Backup) -> Set[str]:
@@ -91,6 +114,17 @@ def classify_old_entries(
     archived from an old backup would outlive the re-backup that the
     old-snapshot warning asks for.
 
+    UNSTAMPED_CARRIED_ENTRY: a carried-forward filter (rebuilt from the
+    live ProtonFusion section, never scraped) written by an earlier build
+    without a source_format. No backup can confirm it, since carried
+    filters are not UI filters; instead it is confirmed when every rule it
+    generates is in the live section captured in `backup`, in the form
+    the current version writes (live_section_facts). It was copied from
+    that section, so finding it there unchanged means it still says what
+    is running. Its "|"-joined legacy value was split on load (see
+    ArchiveEntry), so a literal "|" key in the live section never confirms
+    the split reading.
+
     CARRIED_COPY_ENTRY: a carried-forward filter (rebuilt from the live
     ProtonFusion section) that copies the rule of an unconfirmed old
     entry. The live section was generated from that entry's filter by
@@ -117,14 +151,18 @@ def classify_old_entries(
         e.filter.content_hash for e in entries
         if not is_carried(e.filter) and not format_predates_strict_parser(e.source_format)
     }
+    live: Optional[Set[Fact]] = None
     for e in entries:
         if not is_carried(e.filter):
             continue
         if any(h not in cleared for h in e.matches_unverified) or filter_facts(e.filter) & suspect_facts:
             classified[id(e)] = CARRIED_COPY_ENTRY
         elif format_predates_strict_parser(e.source_format):
-            # An unstamped carried entry from an earlier build
-            classified[id(e)] = OLD_BACKUP_ENTRY
+            if live is None:
+                live = live_section_facts(backup)
+            facts = filter_facts(e.filter)
+            if not (facts and facts <= live):
+                classified[id(e)] = UNSTAMPED_CARRIED_ENTRY
     return [(e, classified[id(e)]) for e in entries if id(e) in classified]
 
 
