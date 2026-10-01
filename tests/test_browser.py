@@ -579,6 +579,24 @@ class TestSessionAccount:
             await browser.login()
 
     @pytest.mark.asyncio
+    async def test_live_email_beats_recorded_email(self, monkeypatch):
+        """The recorded email matches the credentials, but the app shows another account."""
+        browser = self._reused(
+            monkeypatch, session_email="bob@proton.me", live_email="alice@proton.me",
+            credentials=("bob@proton.me", "pw"),
+        )
+        with pytest.raises(SessionAccountMismatchError, match="alice@proton.me"):
+            await browser.login()
+
+    @pytest.mark.asyncio
+    async def test_live_email_match_overrides_stale_recorded_email(self, monkeypatch):
+        browser = self._reused(
+            monkeypatch, session_email="old@proton.me", live_email="bob@proton.me",
+            credentials=("bob", "pw"),
+        )
+        assert await browser.login() is True
+
+    @pytest.mark.asyncio
     async def test_matching_session_is_reused(self, monkeypatch):
         browser = self._reused(
             monkeypatch, session_email="alice@proton.me", live_email="alice@proton.me",

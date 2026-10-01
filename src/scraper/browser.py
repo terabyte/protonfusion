@@ -284,6 +284,8 @@ class ProtonMailBrowser:
         if not self.credentials:
             return
         username = self.credentials.username
+        # The live email wins: it is what the app shows now, whereas the
+        # recorded one is only what the session file claims.
         account = self.account_email or self.session_account_email
         if not account:
             logger.warning(
