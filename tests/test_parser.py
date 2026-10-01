@@ -461,3 +461,15 @@ def test_permanently_delete_is_not_a_known_action():
     """Proton's wizard has no permanent delete; the label is never guessed at."""
     with pytest.raises(UnknownFilterValueError):
         parse_action_type("permanently delete")
+
+
+def test_scraped_empty_value_is_quarantined():
+    """Through parse_scraped_filters: kept, flagged incomplete, condition dropped."""
+    (f,) = parse_scraped_filters([{
+        "name": "Blank subject",
+        "conditions": [{"type": "subject", "operator": "contains", "value": ""}],
+        "actions": [{"type": "trash", "parameters": {}}],
+    }])
+    assert not f.is_complete
+    assert f.conditions == []
+    assert any("empty value" in issue for issue in f.scrape_issues)

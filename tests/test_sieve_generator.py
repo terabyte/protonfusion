@@ -1068,3 +1068,15 @@ class TestSectionMarkersInFilterText:
         merged = SieveGenerator.merge_with_existing(SieveGenerator().generate([cf]), "")
         assert merged.count(SECTION_BEGIN) == 1
         assert merged.count(SECTION_END) == 1
+
+
+def test_generator_refuses_empty_value():
+    """Defence in depth: a condition built outside the model with no value."""
+    cf = ConsolidatedFilter(
+        name="r",
+        condition_groups=[ConditionGroup(conditions=[
+            FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="")])],
+        actions=[FilterAction(type=ActionType.TRASH)],
+    )
+    with pytest.raises(SieveGenerationError, match="empty value"):
+        SieveGenerator().generate([cf])

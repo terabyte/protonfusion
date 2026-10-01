@@ -639,3 +639,37 @@ class TestLegacyActions:
 
     def test_direct_action_construction_migrates(self):
         assert FilterAction(type="delete").type == ActionType.TRASH
+
+
+class TestEmptyConditionValue:
+    """An empty condition value matches every message, so it is quarantined."""
+
+    @pytest.mark.parametrize("cond", [
+        {"type": "subject", "operator": "contains", "value": ""},
+        {"type": "subject", "operator": "contains", "value": "   \t"},
+        {"type": "sender", "operator": "is"},
+    ])
+    def test_empty_value_flags_filter_incomplete(self, cond):
+        f = ProtonMailFilter.model_validate({
+            "name": "delete all?",
+            "conditions": [cond, {"type": "sender", "operator": "is", "value": "a@x.com"}],
+            "actions": [{"type": "trash"}],
+        })
+        assert not f.is_complete
+        assert [c.value for c in f.conditions] == ["a@x.com"]
+        assert "condition 1: empty value" in f.scrape_issues[0]
+
+    def test_empty_value_condition_object_flagged(self):
+        f = ProtonMailFilter(
+            name="obj",
+            conditions=[FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value=" ")],
+        )
+        assert not f.is_complete
+        assert f.conditions == []
+
+    def test_attachment_condition_needs_no_value(self):
+        f = ProtonMailFilter.model_validate({
+            "name": "att", "conditions": [{"type": "attachments", "operator": "has", "value": ""}],
+        })
+        assert f.is_complete
+        assert len(f.conditions) == 1

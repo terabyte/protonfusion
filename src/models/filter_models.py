@@ -150,6 +150,31 @@ def unknown_value_problem(entry: dict, enum_fields) -> Optional[str]:
     return None
 
 
+# Condition types that take no value: "has attachment" is a test of the
+# message, not a comparison against text.
+VALUELESS_CONDITION_TYPES = {"attachments"}
+
+
+def empty_value_problem(entry) -> Optional[str]:
+    """Describe a condition whose value is missing, empty or only whitespace.
+
+    `entry` is a condition dict or a FilterCondition. An empty value is not
+    "no restriction": `header :contains "Subject" ""` matches every message,
+    so a rule built from it widens to all mail. Condition types in
+    VALUELESS_CONDITION_TYPES are exempt. Returns None when the value is fine.
+    """
+    if isinstance(entry, dict):
+        ctype, value = entry.get("type"), entry.get("value", "")
+    else:
+        ctype, value = getattr(entry, "type", None), getattr(entry, "value", "")
+    ctype = getattr(ctype, "value", ctype)
+    if ctype in VALUELESS_CONDITION_TYPES:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        return f"empty value {value!r}"
+    return None
+
+
 class ProtonMailFilter(BaseModel):
     name: str
     enabled: bool = True
@@ -181,10 +206,11 @@ class ProtonMailFilter(BaseModel):
         """Flag, rather than guess or reject, entries with no defined meaning.
 
         A condition or action whose type/operator is missing or not one the
-        model knows (a hand-edited backup, a parser that let one through) is
-        dropped and recorded in scrape_issues, entry included, so the filter
-        is incomplete: consolidate leaves it out and cleanup will not delete
-        it. Guessing a value could widen a rule; rejecting would stop a
+        model knows (a hand-edited backup, a parser that let one through),
+        or a condition whose value is empty or whitespace (see
+        empty_value_problem), is dropped and recorded in scrape_issues,
+        entry included, so the filter is incomplete: consolidate leaves it
+        out and cleanup will not delete it. Guessing a value could widen a rule; rejecting would stop a
         whole backup loading over one filter. An unknown logic value is
         treated the same way; a missing one stays AND, as for backups made
         before the field existed.
@@ -205,8 +231,11 @@ class ProtonMailFilter(BaseModel):
                 if key == "actions" and isinstance(entry, dict):
                     entry = migrate_legacy_action(entry)
                 problem = unknown_value_problem(entry, enum_fields) if isinstance(entry, dict) else None
+                if problem is None and key == "conditions":
+                    problem = empty_value_problem(entry)
                 if problem:
-                    issues.append(f"{kind} {index}: {problem}; dropped {json.dumps(entry, default=str)}")
+                    shown = entry.model_dump(mode="json") if isinstance(entry, BaseModel) else entry
+                    issues.append(f"{kind} {index}: {problem}; dropped {json.dumps(shown, default=str)}")
                 else:
                     kept.append(entry)
             data[key] = kept

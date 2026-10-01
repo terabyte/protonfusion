@@ -6,7 +6,7 @@ from typing import List, Optional, Set
 
 from src.models.filter_models import (
     ConsolidatedFilter, ConditionGroup, FilterCondition, FilterAction,
-    ConditionType, Operator, ActionType, LogicType,
+    ConditionType, Operator, ActionType, LogicType, empty_value_problem,
 )
 
 logger = logging.getLogger(__name__)
@@ -229,7 +229,18 @@ class SieveGenerator:
         return f"{joiner} (\n        {inner}\n    )"
 
     def _condition_to_sieve(self, cond: FilterCondition) -> str:
-        """Convert a single condition to Sieve syntax."""
+        """Convert a single condition to Sieve syntax.
+
+        Raises SieveGenerationError for an empty value, which would match
+        every message (the model flags such a filter incomplete, so this
+        only fires for a condition built some other way).
+        """
+        problem = empty_value_problem(cond)
+        if problem:
+            raise SieveGenerationError(
+                f"Condition {cond.type.value} {cond.operator.value} has an {problem}, "
+                "which would match every message. Refusing to generate it."
+            )
         comparator = self._operator_to_sieve(cond.operator)
 
         # Handle pipe-delimited values (from merge_conditions strategy)

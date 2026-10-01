@@ -104,6 +104,8 @@ When multiple filters are consolidated, their condition groups are OR'd together
 
 Every generated rule is an `if` block. A filter with no conditions (or one whose conditions were all dropped as unreadable) would apply its actions to every incoming message, so the generator refuses it with an error naming the filter instead of writing top-level actions or an always-true test.
 
+A condition with an empty or whitespace-only value is treated the same way: `header :contains "Subject" ""` matches every message. When a backup or scrape has one, the condition is dropped and the filter is flagged incomplete (like an unknown condition type), so `consolidate` leaves it out and `cleanup` keeps it. "Has attachment" is the only condition that takes no value.
+
 ## Action Mapping
 
 | ProtonMail UI | Sieve Action |
