@@ -89,6 +89,12 @@ python -m src.main analyze --backup latest
 python -m src.main consolidate --backup latest
 ```
 
+`--output PATH` writes the script elsewhere. Every output file is written
+through a temp file next to the target (`<name>.XXXXXXXX`) and renamed into
+place; a crash mid-write can leave that temp file behind. Inside a git working
+tree it would then show up as untracked, so keep outputs in `snapshots/`
+(gitignored, the default) or outside the repository.
+
 ### 7. Review and upload
 
 Review the generated Sieve script in the snapshot dir, then:
