@@ -14,6 +14,14 @@ def pytest_addoption(parser):
         help="Path to ProtonMail credentials file for e2e tests",
     )
 
+
+from src.models.filter_models import (
+    ProtonMailFilter, FilterCondition, FilterAction, ConsolidatedFilter,
+    ConditionGroup, ConditionType, Operator, ActionType, LogicType, FilterStatus,
+)
+from src.models.backup_models import Backup, BackupMetadata, ArchiveEntry, Archive
+
+
 @pytest.fixture(autouse=True)
 def _isolate_saved_session(request, tmp_path, monkeypatch):
     """Keep tests away from a real saved session in ~/.config/protonfusion.
@@ -23,13 +31,6 @@ def _isolate_saved_session(request, tmp_path, monkeypatch):
     if request.node.get_closest_marker("e2e"):
         return
     monkeypatch.setenv("PROTONFUSION_STORAGE_STATE", str(tmp_path / "no-saved-session.json"))
-
-
-from src.models.filter_models import (
-    ProtonMailFilter, FilterCondition, FilterAction, ConsolidatedFilter,
-    ConditionGroup, ConditionType, Operator, ActionType, LogicType, FilterStatus,
-)
-from src.models.backup_models import Backup, BackupMetadata, ArchiveEntry, Archive
 
 
 @pytest.fixture
