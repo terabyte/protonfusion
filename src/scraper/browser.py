@@ -190,6 +190,49 @@ class ProtonMailBrowser:
         await self._after_login()
         return True
 
+    async def interactive_login(self, timeout_ms: int):
+        """Sign in with a human at the keyboard (the `login` command).
+
+        Pre-fills and submits the form when credentials were given, then waits
+        for the human to clear whatever Proton asks for (CAPTCHA, 2FA) until the
+        mail app has loaded. Raises RuntimeError on timeout.
+        """
+        page = self.page
+        await page.goto(PROTONMAIL_LOGIN_URL, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
+        if self.credentials:
+            await self._prefill_credentials()
+        print(
+            "\n>>> Finish signing in to Proton in the browser window "
+            f"(CAPTCHA, 2FA, ...). Waiting up to {timeout_ms // 60000} min. <<<\n"
+            ">>> If Proton shows its app picker, open Mail. <<<\n"
+        )
+        try:
+            await page.wait_for_selector(selectors.COMPOSE_BUTTON, timeout=timeout_ms)
+        except Exception:
+            raise RuntimeError(
+                f"Timed out after {timeout_ms // 1000}s waiting for the Proton Mail inbox to load. "
+                "Run 'login' again (raise --timeout if you need longer)."
+            )
+        logger.info("Signed in (mail app at %s)", page.url)
+        await self._after_login()
+
+    async def _prefill_credentials(self):
+        """Best-effort: fill and submit the login form. Never raises, never logs the password."""
+        page = self.page
+        try:
+            await page.wait_for_selector(selectors.USERNAME_INPUT, timeout=ELEMENT_TIMEOUT_MS)
+            await page.fill(selectors.USERNAME_INPUT, self.credentials.username)
+            password = await page.query_selector(selectors.PASSWORD_INPUT)
+            if not password or not await password.is_visible():
+                # Two-step form: username first, then the password page.
+                await page.click(selectors.LOGIN_BUTTON)
+                await page.wait_for_selector(selectors.PASSWORD_INPUT, timeout=ELEMENT_TIMEOUT_MS)
+            await page.fill(selectors.PASSWORD_INPUT, self.credentials.password)
+            await page.click(selectors.LOGIN_BUTTON)
+            logger.info("Submitted credentials for %s", self.credentials.username)
+        except Exception as e:
+            logger.warning("Could not pre-fill the login form (%s); finish signing in by hand", type(e).__name__)
+
     async def _after_login(self):
         """Settle into the signed-in app: record the slot, clear onboarding, read the email.
 

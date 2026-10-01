@@ -60,6 +60,50 @@ def _get_credentials(credentials_file: str, manual_login: bool):
     return None
 
 
+DEFAULT_LOGIN_TIMEOUT_S = 600
+
+
+@app.command()
+def login(
+    credentials_file: str = typer.Option("", "--credentials-file", help="Pre-fill the login form from this credentials file"),
+    state: str = typer.Option("", "--state", help="Where to save the session (default: $PROTONFUSION_STORAGE_STATE, else ~/.config/protonfusion/storage_state.json)"),
+    timeout: int = typer.Option(DEFAULT_LOGIN_TIMEOUT_S, "--timeout", help="Seconds to wait for you to finish signing in"),
+):
+    """Sign in once in a visible browser and save the session for other commands.
+
+    Proton shows a Human Verification CAPTCHA to automated logins, so sign in
+    here by hand (CAPTCHA, 2FA); the saved session then lets backup, show,
+    sync, etc. run without logging in, headless included, until Proton
+    expires it. The session file holds live auth cookies and is written 0600.
+    """
+    from src.scraper.browser import ProtonMailBrowser
+
+    creds = _get_credentials(credentials_file, False)
+
+    async def _run():
+        browser = ProtonMailBrowser(headless=False, credentials=creds, storage_state_path=state or None)
+        try:
+            await browser.initialize(load_storage_state=False)
+            await browser.interactive_login(timeout_ms=timeout * 1000)
+            path = await browser.save_storage_state()
+            return path, browser.account_slot, browser.account_email
+        finally:
+            await browser.close()
+
+    try:
+        path, slot, email = asyncio.run(_run())
+    except RuntimeError as e:
+        console.print(f"[red]{e}")
+        raise typer.Exit(1)
+
+    lines = [f"[bold green]Session saved to {path}[/]"]
+    if email:
+        lines.append(f"Account: {email}")
+    lines.append(f"Session slot: /u/{slot}/")
+    lines.append("\nOther commands will reuse it; run 'login' again when it expires.")
+    console.print(Panel("\n".join(lines), title="Logged In"))
+
+
 @app.command()
 def backup(
     headless: bool = typer.Option(False, "--headless", help="Run browser in headless mode"),
