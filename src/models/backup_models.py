@@ -16,7 +16,8 @@ class BackupMetadata(BaseModel):
 # 1.0: filters only.
 # 1.1: filters carry raw scrape evidence (ProtonMailFilter.raw) and
 #      scrape_issues. 1.0 backups still load; see BackupManager checksums.
-BACKUP_FORMAT_VERSION = "1.1"
+# 1.2: filters carry is_sieve (Edit opened the Sieve editor, not the wizard).
+BACKUP_FORMAT_VERSION = "1.2"
 
 
 class Backup(BaseModel):

@@ -85,3 +85,8 @@ def test_sieve_filter_keeps_script(edge_filters):
     f = edge_filters["My Sieve"]
     assert f["scrape_issues"] == []
     assert 'fileinto "X"' in f["raw"]["sieve_text"]
+    assert f["is_sieve"] is True
+
+
+def test_wizard_filter_not_marked_sieve(edge_filters):
+    assert edge_filters["Clean Labelled"]["is_sieve"] is False

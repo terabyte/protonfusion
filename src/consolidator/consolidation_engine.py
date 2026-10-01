@@ -27,6 +27,7 @@ class ConsolidationReport:
     disabled_included: int = 0
     archived_count: int = 0
     excluded_count: int = 0
+    sieve_skipped: int = 0  # Sieve filters, never consolidated
     groups: Dict[str, int] = field(default_factory=dict)  # action -> count of merged filters
     reduction_percent: float = 0.0
 
@@ -37,20 +38,29 @@ def _select_filters(
     synced_filter_hashes: Optional[Set[str]] = None,
     archived_filters: Optional[List[ProtonMailFilter]] = None,
     exclude_names: Optional[Set[str]] = None,
-) -> tuple[List[ProtonMailFilter], int, int, int, int]:
+) -> tuple[List[ProtonMailFilter], int, int, int, int, int]:
     """Select which filters to process based on status and sync manifest.
 
-    Returns (selected_filters, disabled_skipped, disabled_included, archived_count, excluded_count).
+    Sieve filters are never selected: their conditions and actions are empty
+    because the filter is a script, so consolidating one would emit an
+    unconditional `keep;` that says nothing about what the script does.
+
+    Returns (selected_filters, disabled_skipped, disabled_included, archived_count,
+    excluded_count, sieve_skipped).
     """
     _exclude_names = exclude_names or set()
     selected = []
     disabled_skipped = 0
     disabled_included = 0
     excluded_count = 0
+    sieve_skipped = 0
 
     # Always include archived filters from archive param
     _archived = archived_filters or []
     for f in _archived:
+        if f.is_sieve:
+            sieve_skipped += 1
+            continue
         if f.name in _exclude_names:
             excluded_count += 1
             continue
@@ -59,6 +69,10 @@ def _select_filters(
         selected.append(f)
 
     for f in filters:
+        if f.is_sieve:
+            sieve_skipped += 1
+            continue
+
         # DEPRECATED → always skip
         if f.status == FilterStatus.DEPRECATED:
             continue
@@ -80,7 +94,7 @@ def _select_filters(
         else:
             disabled_skipped += 1
 
-    return selected, disabled_skipped, disabled_included, len(_archived), excluded_count
+    return selected, disabled_skipped, disabled_included, len(_archived), excluded_count, sieve_skipped
 
 
 class ConsolidationEngine:
@@ -98,7 +112,7 @@ class ConsolidationEngine:
         report = ConsolidationReport()
         report.original_count = len(filters)
 
-        selected, disabled_skipped, disabled_included, archived_count, excluded_count = _select_filters(
+        selected, disabled_skipped, disabled_included, archived_count, excluded_count, sieve_skipped = _select_filters(
             filters, include_disabled, synced_filter_hashes, archived_filters, exclude_names,
         )
         report.enabled_count = len(selected)
@@ -106,6 +120,7 @@ class ConsolidationEngine:
         report.disabled_included = disabled_included
         report.archived_count = archived_count
         report.excluded_count = excluded_count
+        report.sieve_skipped = sieve_skipped
 
         logger.info("Starting consolidation: %d total, %d selected, %d disabled-skipped, %d disabled-included, %d archived, %d excluded",
                      len(filters), len(selected), disabled_skipped, disabled_included, archived_count, excluded_count)
@@ -145,7 +160,7 @@ class ConsolidationEngine:
         exclude_names: Optional[Set[str]] = None,
     ) -> dict:
         """Analyze filters without consolidating. Returns statistics."""
-        selected, disabled_skipped, disabled_included, archived_count, excluded_count = _select_filters(
+        selected, disabled_skipped, disabled_included, archived_count, excluded_count, sieve_skipped = _select_filters(
             filters, include_disabled, synced_filter_hashes, archived_filters, exclude_names,
         )
         disabled = len(filters) - len(selected)

@@ -4,7 +4,7 @@ import pytest
 from typer.testing import CliRunner
 
 import src.utils.config
-from src.main import app
+from src.main import app, SIEVE_FILTER_NAME
 from src.backup.backup_manager import BackupManager
 from src.generator.sieve_generator import SieveGenerator
 from src.models.filter_models import (
@@ -262,3 +262,63 @@ class TestCleanupOnlyDeletesCoveredFilters:
         result = runner.invoke(app, ["cleanup"], input="y\n")
         assert result.exit_code == 0
         assert fake_sync.calls == []
+
+
+class TestSieveFiltersLeftAlone:
+    """A Sieve filter is a script, so it is never consolidated or deleted.
+
+    The failure this guards: a sync disables every filter, including
+    SIEVE_FILTER_NAME, then fails to upload. The scraped Sieve filter has no
+    conditions or actions, so it used to read as an unconditional `keep;`.
+    Once any earlier consolidation had folded a Sieve filter in the same way,
+    the live section held that `keep;` too, so the coverage guard called the
+    filter covered and cleanup deleted it.
+    """
+
+    @staticmethod
+    def _protonfusion_filter(script: str, enabled: bool = False) -> ProtonMailFilter:
+        # Built the way a backup written before is_sieve existed reads back:
+        # only the captured script marks it as a Sieve filter.
+        return ProtonMailFilter(name=SIEVE_FILTER_NAME, enabled=enabled, raw=ScrapeEvidence(sieve_text=script))
+
+    def test_cleanup_keeps_disabled_protonfusion_filter(self, cli_snapshots_dir, fake_sync, fake_scraper):
+        covered = _filter("in-sieve@x.com", enabled=False)
+        # The `keep;` an earlier run emitted for a Sieve filter it consolidated
+        earlier_sieve = ProtonMailFilter(name="Earlier Sieve filter")
+        fake_sync.live_script = _section_for([covered, earlier_sieve])
+        pf = self._protonfusion_filter(fake_sync.live_script)
+        fake_scraper.filters = [covered, pf]
+        BackupManager(cli_snapshots_dir).create_backup([covered, pf], sieve_script=fake_sync.live_script)
+
+        result = runner.invoke(app, ["cleanup"], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert ("delete", covered.name) in fake_sync.calls
+        assert ("delete", SIEVE_FILTER_NAME) not in fake_sync.calls
+        assert "Leaving disabled Sieve filters alone" in result.output
+
+    def test_include_uncovered_still_keeps_sieve_filters(self, cli_snapshots_dir, fake_sync, fake_scraper):
+        # An empty script: only the explicit flag marks it
+        pf = ProtonMailFilter(
+            name=SIEVE_FILTER_NAME, enabled=False, is_sieve=True, raw=ScrapeEvidence(sieve_text=""),
+        )
+        fake_scraper.filters = [pf]
+        BackupManager(cli_snapshots_dir).create_backup([pf])
+
+        result = runner.invoke(app, ["cleanup", "--include-uncovered", "--allow-incomplete"], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert fake_sync.calls == []
+
+    def test_consolidate_skips_sieve_filter(self, cli_snapshots_dir, fake_sync):
+        wizard = _filter("a@x.com")
+        live = _section_for([wizard])
+        pf = self._protonfusion_filter(live, enabled=True)
+        manager = BackupManager(cli_snapshots_dir)
+        manager.create_backup([wizard, pf], sieve_script=live)
+
+        result = runner.invoke(app, ["consolidate"])
+        assert result.exit_code == 0, result.output
+        assert "Sieve filters (left as they are): 1" in result.output
+        script = (manager.snapshot_dir_for("latest") / "consolidated.sieve").read_text()
+        assert SIEVE_FILTER_NAME not in script
+        archived = [e.filter.name for e in manager.load_archive(manager.snapshot_dir_for("latest"))]
+        assert SIEVE_FILTER_NAME not in archived

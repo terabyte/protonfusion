@@ -384,3 +384,11 @@ class TestParseEvidence:
         f = parse_filter({"name": "X"})
         assert f.raw is None
         assert f.is_complete
+
+    def test_sieve_flag_passthrough(self):
+        f = parse_filter({"name": "S", "raw": {"sieve_text": ""}, "is_sieve": True})
+        assert f.is_sieve is True
+
+    def test_sieve_flag_absent_derives_from_script(self):
+        f = parse_filter({"name": "S", "raw": {"sieve_text": "keep;"}})
+        assert f.is_sieve is True

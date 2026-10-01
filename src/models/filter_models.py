@@ -80,6 +80,11 @@ class ProtonMailFilter(BaseModel):
     # Anything the scraper saw but could not parse. Non-empty means the
     # conditions/actions above may not be the whole filter.
     scrape_issues: List[str] = Field(default_factory=list)
+    # True when Edit opened the Sieve code editor instead of the wizard. Such
+    # a filter is a script (raw.sieve_text), not conditions and actions, so
+    # its empty conditions/actions say nothing about what it does. It is
+    # never consolidated, never counted as covered, and never deleted.
+    is_sieve: bool = False
 
     @property
     def is_complete(self) -> bool:
@@ -102,11 +107,28 @@ class ProtonMailFilter(BaseModel):
                 data['enabled'] = status == FilterStatus.ENABLED
         return data
 
+    @model_validator(mode='before')
+    @classmethod
+    def derive_is_sieve_from_evidence(cls, data):
+        """Backward compat: backups written before is_sieve existed mark a
+        Sieve filter only by its captured script, so derive the flag from it."""
+        if isinstance(data, dict) and 'is_sieve' not in data:
+            raw = data.get('raw')
+            if isinstance(raw, dict):
+                sieve_text = raw.get('sieve_text', '')
+            else:
+                sieve_text = getattr(raw, 'sieve_text', '')
+            if sieve_text:
+                data['is_sieve'] = True
+        return data
+
     @property
     def content_hash(self) -> str:
         """Content-addressable hash of filter identity (name + logic + conditions + actions).
 
         Excludes enabled/status/priority since those don't define the filter's purpose.
+        A Sieve filter's identity is its script, so that is hashed too; otherwise
+        every Sieve filter with the same name would share one hash.
         """
         parts = [
             f"name={self.name}",
@@ -117,6 +139,8 @@ class ProtonMailFilter(BaseModel):
         for a in self.actions:
             params = ",".join(f"{k}={v}" for k, v in sorted(a.parameters.items()))
             parts.append(f"act:{a.type.value}|{params}")
+        if self.is_sieve:
+            parts.append(f"sieve={self.raw.sieve_text if self.raw else ''}")
         raw = "\n".join(parts)
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 

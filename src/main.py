@@ -671,6 +671,8 @@ def consolidate(
         report_lines.append(f"Archived (included): {report.archived_count}")
     if report.excluded_count > 0:
         report_lines.append(f"Excluded by name: {report.excluded_count}")
+    if report.sieve_skipped > 0:
+        report_lines.append(f"Sieve filters (left as they are): {report.sieve_skipped}")
     if carried_count > 0:
         report_lines.append(f"Carried forward from live Sieve (new archived filters): {carried_count}")
     report_lines.append(f"Consolidated rules: {report.consolidated_count}")
@@ -1158,7 +1160,8 @@ def cleanup(
 
     A disabled filter is only deleted if every one of its conditions and actions
     is present in the live ProtonFusion section, so deleting it never removes
-    the last copy of a rule (e.g. after a refused or failed sync). Auto-archives
+    the last copy of a rule (e.g. after a refused or failed sync). Sieve filters
+    (including the ProtonFusion one) are never deleted. Auto-archives
     disabled filters before deletion to preserve them for future consolidation.
     Also refuses (exit 1) to delete any filter without a complete backup copy in the
     latest snapshot, unless --allow-incomplete is given.
@@ -1182,7 +1185,15 @@ def cleanup(
         finally:
             await scraper.close()
 
-        disabled = [f for f in filters if not f.enabled]
+        # A Sieve filter's rules live in its script, which the coverage and
+        # backup checks below cannot see, so it is never a deletion candidate.
+        # This includes SIEVE_FILTER_NAME itself, disabled by a failed sync.
+        disabled_sieve = [f for f in filters if not f.enabled and f.is_sieve]
+        if disabled_sieve:
+            console.print("[cyan]Leaving disabled Sieve filters alone (cleanup never deletes these):")
+            for f in disabled_sieve:
+                console.print(f"  [cyan]- {escape(f.name)}")
+        disabled = [f for f in filters if not f.enabled and not f.is_sieve]
 
         if not disabled:
             console.print("[green]No disabled filters to clean up.")

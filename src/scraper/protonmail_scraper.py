@@ -339,6 +339,7 @@ class ProtonMailScraper(ProtonMailBrowser):
         logic = "and"
         issues: List[str] = []
         raw = {"conditions_text": "", "actions_text": "", "sieve_text": ""}
+        is_sieve = False
 
         try:
             edit_btn = await item.query_selector(
@@ -355,6 +356,7 @@ class ProtonMailScraper(ProtonMailBrowser):
                     # A Sieve filter: Edit opens the code editor, not the
                     # wizard. The script itself is the whole filter.
                     raw["sieve_text"] = sieve_text
+                    is_sieve = True
                 else:
                     # Wizard opens on Name step - click Next to go to Conditions
                     next_btn = await page.query_selector(selectors.FILTER_MODAL_NEXT)
@@ -416,6 +418,7 @@ class ProtonMailScraper(ProtonMailBrowser):
             "actions": actions,
             "raw": raw,
             "scrape_issues": issues,
+            "is_sieve": is_sieve,
         }
 
     async def _read_sieve_editor(self, page: Page) -> Optional[str]:
