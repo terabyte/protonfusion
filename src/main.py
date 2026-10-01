@@ -1143,17 +1143,23 @@ async def _reenable_after_failed_upload(
         console.print(f"[yellow]To re-enable them, run: restore --backup {backup_id}")
 
 
-def _scraped_row_names(live_filters: List[ProtonMailFilter]) -> Optional[List[str]]:
-    """Every scraped row's name in list order, or None if the scrape has gaps.
+def _scraped_row_names(live_filters: List[ProtonMailFilter]) -> List[Optional[str]]:
+    """Every scraped row's name in list order, with None for a row the scrape missed.
 
     Lets set_row_enabled check the live list is the one scraped before it
     trusts a stored row position. If any row did not make it into
     `live_filters` (its priorities are not exactly 0..n-1) there is no full
-    list to compare, so positions fall back to unique-name matching.
+    list to compare, so each missing position holds None, which no live row
+    name equals: the list never matches and set_row_enabled falls back to
+    unique-name matching. (None itself would mean "do not check the list"
+    and so trust every position.)
     """
     by_priority = sorted(live_filters, key=lambda f: f.priority)
     if [f.priority for f in by_priority] != list(range(len(by_priority))):
-        return None
+        names: List[Optional[str]] = [None] * (max(f.priority for f in by_priority) + 1)
+        for f in by_priority:
+            names[f.priority] = f.name
+        return names
     return [f.name for f in by_priority]
 
 
