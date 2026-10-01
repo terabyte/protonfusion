@@ -7,7 +7,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from src.backup.backup_manager import BackupManager, compute_checksum, unverified_for_deletion
+from src.backup.backup_manager import (
+    BackupManager, BackupIntegrityError, compute_checksum, unverified_for_deletion,
+)
 from src.models.backup_models import Backup, BackupMetadata, ArchiveEntry, Archive
 from src.models.filter_models import (
     ProtonMailFilter, FilterCondition, FilterAction, FilterStatus,
@@ -638,7 +640,11 @@ class TestUnknownValuesOnLoad:
             data["filters"][0]["conditions"].append({"type": "body", "operator": "contains", "value": "sale"})
         self._edit_json(path, edit)
 
-        backup = manager.load_backup("latest")
+        # The edit no longer matches the checksum, so a plain load refuses;
+        # the explicit override loads it with the bad filter flagged.
+        with pytest.raises(BackupIntegrityError):
+            manager.load_backup("latest")
+        backup = manager.load_backup("latest", ignore_checksum=True)
         bad, other = backup.filters
         assert not bad.is_complete
         assert "condition 2: unknown condition type 'body'" in bad.scrape_issues[0]
@@ -657,7 +663,7 @@ class TestUnknownValuesOnLoad:
             data["filters"][0]["conditions"].append({"type": "sender", "operator": "is not", "value": "boss@x"})
         self._edit_json(path, edit)
 
-        copy = manager.load_backup("latest").filters[0]
+        copy = manager.load_backup("latest", ignore_checksum=True).filters[0]
         live = self._delete_rule()
         [(f, reason)] = unverified_for_deletion([live], [copy])
         assert "incomplete" in reason and "unknown operator 'is not'" in reason
@@ -675,6 +681,80 @@ class TestUnknownValuesOnLoad:
         [entry] = manager.load_archive(snapshot_dir)
         assert entry.filter.actions == []
         assert any("action 1: missing action type" in i for i in entry.filter.scrape_issues)
+
+
+class TestChecksumVerifiedOnLoad:
+    """load_backup refuses a backup that no longer matches its checksum (P15)."""
+
+    def _snapshot(self, snapshots_dir):
+        manager = BackupManager(snapshots_dir)
+        manager.create_backup([ProtonMailFilter(
+            name="Keep Work",
+            raw=ScrapeEvidence(conditions_text="c", actions_text="a"),
+            conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="a@x")],
+            actions=[FilterAction(type=ActionType.LABEL, parameters={"label": "Work"})],
+        )], sieve_script="keep;")
+        return manager, manager.snapshot_dir_for("latest") / "backup.json"
+
+    def _edit(self, path, edit):
+        data = json.loads(path.read_text())
+        edit(data)
+        path.write_text(json.dumps(data))
+
+    def test_untouched_backup_loads(self, temp_snapshots_dir):
+        manager, _ = self._snapshot(temp_snapshots_dir)
+        assert manager.load_backup("latest").filters[0].name == "Keep Work"
+
+    @pytest.mark.parametrize("edit", [
+        lambda d: d["filters"][0]["actions"][0]["parameters"].update(label="Other"),
+        lambda d: d.update(sieve_script="discard;"),
+        lambda d: d.update(checksum=""),
+    ], ids=["filter edited", "sieve script edited", "checksum removed"])
+    def test_changed_backup_refused(self, temp_snapshots_dir, edit):
+        manager, path = self._snapshot(temp_snapshots_dir)
+        self._edit(path, edit)
+        with pytest.raises(BackupIntegrityError, match="--ignore-checksum"):
+            manager.load_backup("latest")
+
+    def test_override_loads_changed_backup(self, temp_snapshots_dir, monkeypatch):
+        manager, path = self._snapshot(temp_snapshots_dir)
+        self._edit(path, lambda d: d.update(sieve_script="discard;"))
+        assert manager.load_backup("latest", ignore_checksum=True).sieve_script == "discard;"
+        # The class-wide default, which the CLI's --ignore-checksum sets
+        monkeypatch.setattr(BackupManager, "ignore_checksum", True)
+        assert manager.load_backup("latest").sieve_script == "discard;"
+
+    def test_cli_refuses_with_clear_message(self, temp_snapshots_dir, monkeypatch):
+        """A command loading a changed backup exits 1 with the message, not a traceback;
+        the global --ignore-checksum lets it through."""
+        import src.utils.config
+        import src.backup.backup_manager
+        from rich.console import Console
+        from typer.testing import CliRunner
+        import src.main
+        monkeypatch.setattr(src.utils.config, "SNAPSHOTS_DIR", temp_snapshots_dir)
+        monkeypatch.setattr(src.backup.backup_manager, "SNAPSHOTS_DIR", temp_snapshots_dir)
+        monkeypatch.setattr(src.main, "console", Console(width=400))
+        monkeypatch.setattr(BackupManager, "ignore_checksum", False)  # restored after the test
+        _, path = self._snapshot(temp_snapshots_dir)
+        self._edit(path, lambda d: d["filters"][0]["actions"][0]["parameters"].update(label="Other"))
+
+        runner = CliRunner()
+        result = runner.invoke(src.main.app, ["consolidate"])
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "does not match its checksum" in result.output
+        assert "--ignore-checksum" in result.output
+        assert not (path.parent / "consolidated.sieve").exists()
+
+        result = runner.invoke(src.main.app, ["--ignore-checksum", "consolidate"])
+        assert result.exit_code == 0, result.output
+        assert 'fileinto "Other"' in (path.parent / "consolidated.sieve").read_text()
+
+        # The override does not outlive the invocation that gave it
+        result = runner.invoke(src.main.app, ["show-backup"])
+        assert result.exit_code == 1
+        assert "does not match its checksum" in result.output
 
 
 class TestUnverifiedForDeletion:

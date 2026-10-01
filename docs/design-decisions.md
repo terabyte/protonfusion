@@ -18,7 +18,7 @@ Every design choice prioritizes reversibility:
 - **Refuse rather than drop.** `sync` compares the live ProtonFusion section with the new one and refuses, before disabling or uploading anything, if any rule would disappear. See [Refusing to Drop Live Rules](#refusing-to-drop-live-rules).
 - **Never delete the last copy.** `cleanup` only deletes a disabled UI filter whose rules are all present in the live ProtonFusion section.
 - **Dry-run mode.** The `sync` and `cleanup` commands support `--dry-run` to preview changes before committing.
-- **Checksums.** Every backup includes a SHA-256 checksum so corruption can be detected.
+- **Checksums.** Every backup includes a SHA-256 checksum, and `load_backup` verifies it, so every command refuses a `backup.json` that changed after it was written. A hand edit fails this too, on purpose: it can change what a filter does. The global `--ignore-checksum` (before the command name) loads one anyway, with unknown values flagged incomplete rather than guessed.
 - **Incomplete reads are loud.** The scraper once read only the folder and mark-as rows of the Actions step, so every "Label as" action was silently dropped from backups and Sieve, and `cleanup` then deleted the only copy. Now anything the scraper cannot parse marks the filter incomplete, `backup` refuses to save it without `--allow-incomplete`, each filter keeps the wizard's raw text as evidence, and `cleanup` refuses to delete a filter without a complete, evidence-bearing backup copy.
 
 ## Snapshot Architecture (vs. Single Backup File)

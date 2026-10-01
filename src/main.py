@@ -2,6 +2,7 @@
 
 import asyncio
 import difflib
+import functools
 import json
 import logging
 import sys
@@ -22,7 +23,7 @@ from src.utils.config import (
 )
 from src.models.filter_models import ProtonMailFilter, FilterStatus
 from src.models.backup_models import Backup, ArchiveEntry
-from src.backup.backup_manager import BackupManager, unverified_for_deletion
+from src.backup.backup_manager import BackupManager, BackupIntegrityError, unverified_for_deletion
 from src.backup.diff_engine import DiffEngine
 from src.backup.sync_plan import DisablePlan, carried_hashes, plan_disable
 from src.utils.private_files import write_private_file
@@ -47,6 +48,20 @@ app = typer.Typer(
 snapshot_app = typer.Typer(help="Manage snapshot contents.")
 app.add_typer(snapshot_app, name="snapshot")
 console = Console()
+
+
+@app.callback()
+def _global_options(
+    ignore_checksum: bool = typer.Option(
+        False, "--ignore-checksum",
+        help="Load backups whose checksum does not match (e.g. hand-edited) instead of refusing. "
+             "Give it before the command name.",
+    ),
+):
+    """ProtonFusion - safely consolidate your ProtonMail filters into Sieve scripts."""
+    # Set (not just enabled) on every run, so one invocation's override
+    # never carries into the next in the same process.
+    BackupManager.ignore_checksum = ignore_checksum
 
 # Configure logging
 logging.basicConfig(
@@ -1776,6 +1791,27 @@ def snapshot_remove(
 
     manager.write_archive(snapshot_dir, new_entries)
     console.print(f"[green]Removed '{name}' from archive ({len(archive_entries) - len(new_entries)} entries removed)")
+
+
+def _refuse_damaged_backups(command):
+    """Wrap a command so a failed backup checksum ends it with a clear message.
+
+    load_backup raises BackupIntegrityError from many commands; this turns
+    it into the message and exit 1 in one place, instead of a traceback.
+    """
+    @functools.wraps(command)
+    def wrapper(*args, **kwargs):
+        try:
+            return command(*args, **kwargs)
+        except BackupIntegrityError as e:
+            console.print(f"[bold red]{escape(str(e))}")
+            raise typer.Exit(1)
+    return wrapper
+
+
+for _typer_app in (app, snapshot_app):
+    for _command_info in _typer_app.registered_commands:
+        _command_info.callback = _refuse_damaged_backups(_command_info.callback)
 
 
 if __name__ == "__main__":

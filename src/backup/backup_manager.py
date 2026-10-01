@@ -40,6 +40,15 @@ def compute_checksum(filters: List[ProtonMailFilter], sieve_script: str, version
     return "sha256:" + hashlib.sha256(checksum_json.encode()).hexdigest()
 
 
+class BackupIntegrityError(Exception):
+    """backup.json does not match its checksum (or has none).
+
+    Raised by load_backup so no command builds a script from, restores
+    from, or verifies a deletion against a backup that changed after
+    'backup' wrote it. The message says how to proceed.
+    """
+
+
 def unverified_for_deletion(
     live_filters: List[ProtonMailFilter], backed_up: List[ProtonMailFilter],
 ) -> List[Tuple[ProtonMailFilter, str]]:
@@ -84,6 +93,12 @@ def unverified_for_deletion(
 
 class BackupManager:
     """Manages filter backups inside timestamped snapshot directories."""
+
+    # When True, load_backup loads a backup whose checksum does not match
+    # instead of raising. Set for a whole CLI run by the global
+    # --ignore-checksum option; the escape hatch for a deliberately
+    # hand-edited backup.
+    ignore_checksum: bool = False
 
     def __init__(self, snapshots_dir: Optional[Path] = None):
         self.snapshots_dir = snapshots_dir or SNAPSHOTS_DIR
@@ -150,8 +165,15 @@ class BackupManager:
             return candidate
         raise FileNotFoundError(f"Snapshot not found: {identifier}")
 
-    def load_backup(self, identifier: str = "latest") -> Backup:
-        """Load a backup by timestamp or 'latest'."""
+    def load_backup(self, identifier: str = "latest", ignore_checksum: Optional[bool] = None) -> Backup:
+        """Load a backup by timestamp or 'latest', verifying its checksum.
+
+        Raises BackupIntegrityError if backup.json has no checksum or does
+        not match it, unless ignore_checksum (default: the class-wide
+        BackupManager.ignore_checksum) is set, in which case it only warns.
+        A hand-edited backup fails this too, by design: the edit may have
+        changed what the filters do.
+        """
         snapshot_dir = self.snapshot_dir_for(identifier)
         filepath = snapshot_dir / "backup.json"
         if not filepath.exists():
@@ -161,6 +183,20 @@ class BackupManager:
             data = json.load(f)
 
         backup = Backup.model_validate(data)
+        if not self.verify_backup(backup):
+            if ignore_checksum is None:
+                ignore_checksum = self.ignore_checksum
+            problem = "has no checksum" if not backup.checksum else "does not match its checksum"
+            if not ignore_checksum:
+                raise BackupIntegrityError(
+                    f"{filepath} {problem}: it was changed after 'backup' wrote it, "
+                    "by a hand edit or by corruption. Refusing to use it, since a changed "
+                    "backup could drop or alter rules. Run 'backup' again for a fresh snapshot, "
+                    "or, if you edited it on purpose, re-run with the global option before the "
+                    "command name: 'python -m src.main --ignore-checksum <command> ...'. "
+                    "Filters holding values ProtonFusion does not know then load flagged incomplete."
+                )
+            logger.warning("%s %s; loading it anyway (--ignore-checksum)", filepath, problem)
         logger.info("Loaded backup: %s (%d filters)", filepath, len(backup.filters))
         return backup
 
