@@ -45,3 +45,79 @@ class TestAccountSlot:
         browser.account_slot = 2
         browser._record_account_slot()
         assert browser.account_slot == 2
+
+
+class TestNavigateToFilters:
+    """Direct URL first; the settings-menu click path only as a fallback."""
+
+    @pytest.mark.asyncio
+    async def test_direct_navigation_uses_slot(self, monkeypatch):
+        browser = make_browser()
+        browser.account_slot = 1
+        calls = []
+
+        async def wait():
+            calls.append("wait")
+
+        async def check():
+            calls.append("assert")
+
+        async def menu():
+            calls.append("menu")
+
+        monkeypatch.setattr(browser, "_wait_for_filters_page", wait)
+        monkeypatch.setattr(browser, "_assert_filter_page_structure", check)
+        monkeypatch.setattr(browser, "_navigate_to_filters_via_menu", menu)
+
+        await browser.navigate_to_filters()
+
+        assert browser.page.visited == ["https://account.proton.me/u/1/mail/filters"]
+        assert calls == ["wait", "assert"]
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_menu_when_direct_fails(self, monkeypatch):
+        browser = make_browser()
+        calls = []
+
+        async def direct():
+            calls.append("direct")
+            raise RuntimeError("page did not render")
+
+        async def menu():
+            calls.append("menu")
+
+        async def wait():
+            calls.append("wait")
+
+        async def check():
+            calls.append("assert")
+
+        monkeypatch.setattr(browser, "_open_filters_directly", direct)
+        monkeypatch.setattr(browser, "_navigate_to_filters_via_menu", menu)
+        monkeypatch.setattr(browser, "_wait_for_filters_page", wait)
+        monkeypatch.setattr(browser, "_assert_filter_page_structure", check)
+
+        await browser.navigate_to_filters()
+
+        assert calls == ["direct", "menu", "wait", "assert"]
+
+    @pytest.mark.asyncio
+    async def test_fallback_structure_failure_propagates(self, monkeypatch):
+        browser = make_browser()
+
+        async def direct():
+            raise RuntimeError("direct failed")
+
+        async def noop():
+            pass
+
+        async def check():
+            raise RuntimeError("Missing 'Custom filters' heading")
+
+        monkeypatch.setattr(browser, "_open_filters_directly", direct)
+        monkeypatch.setattr(browser, "_navigate_to_filters_via_menu", noop)
+        monkeypatch.setattr(browser, "_wait_for_filters_page", noop)
+        monkeypatch.setattr(browser, "_assert_filter_page_structure", check)
+
+        with pytest.raises(RuntimeError, match="Custom filters"):
+            await browser.navigate_to_filters()

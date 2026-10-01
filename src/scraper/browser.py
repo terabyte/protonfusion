@@ -9,7 +9,7 @@ from playwright.async_api import async_playwright, Browser, Page, BrowserContext
 from src.scraper import selectors
 from src.utils.config import (
     Credentials,
-    PROTONMAIL_LOGIN_URL, MAIL_HOST, ACCOUNT_HOST, INBOX_PATH,
+    PROTONMAIL_LOGIN_URL, MAIL_HOST, ACCOUNT_HOST, INBOX_PATH, FILTERS_PATH,
     DEFAULT_ACCOUNT_SLOT, proton_url, slot_from_url,
     LOGIN_TIMEOUT_MS, PAGE_LOAD_TIMEOUT_MS, ELEMENT_TIMEOUT_MS,
 )
@@ -28,6 +28,7 @@ COMPOSE_WAIT_MS = 30000
 SETTINGS_DRAWER_MS = 2000
 ALL_SETTINGS_LOAD_MS = 5000
 FILTERS_PAGE_LOAD_MS = 3000
+FILTERS_PAGE_WAIT_MS = 30000
 MODAL_TRANSITION_MS = 1500
 DROPDOWN_MS = 500
 
@@ -119,6 +120,7 @@ class ProtonMailBrowser:
             logger.warning("Saved session did not reach the mail app (%s); logging in normally", page.url)
             return False
         self._record_account_slot()
+        await self._capture_account_email()
         logger.info("Reused saved session")
         return True
 
@@ -167,13 +169,51 @@ class ProtonMailBrowser:
             raise RuntimeError("Login timed out. Please try again.")
 
     async def navigate_to_filters(self):
-        """Navigate to filter settings page via the UI.
+        """Open the filter settings page and assert its structure.
 
-        ProtonMail settings are at account.proton.me. We navigate by:
-        1. Ensuring the mail app is loaded
-        2. Clicking the settings gear icon
-        3. Clicking "All settings"
-        4. Clicking "Filters" in the sidebar
+        Goes straight to account.proton.me/u/<slot>/mail/filters. The old click
+        path through the mail app (gear -> All settings -> Filters) is kept only
+        as a fallback for when the direct URL stops working.
+        """
+        try:
+            await self._open_filters_directly()
+        except Exception as e:
+            logger.warning("Direct navigation to filters failed (%s); trying the settings menu", e)
+            await self._navigate_to_filters_via_menu()
+            await self._wait_for_filters_page()
+            await self._assert_filter_page_structure()
+        logger.info("Navigated to filter settings at %s", self.page.url)
+
+    async def _open_filters_directly(self):
+        """Load the filters page by URL; raises if it does not render as expected."""
+        await self.page.goto(
+            self.account_url(FILTERS_PATH),
+            wait_until="domcontentloaded",
+            timeout=PAGE_LOAD_TIMEOUT_MS,
+        )
+        await self._wait_for_filters_page()
+        await self._assert_filter_page_structure()
+
+    async def _wait_for_filters_page(self):
+        """Wait until the Custom filters section has rendered."""
+        await self.page.wait_for_selector(
+            selectors.CUSTOM_FILTERS_HEADING, timeout=FILTERS_PAGE_WAIT_MS,
+        )
+
+    async def _capture_account_email(self):
+        """Read the account email from the mail app's user dropdown, if present."""
+        email_el = await self.page.query_selector(selectors.USER_DROPDOWN_EMAIL)
+        if email_el:
+            self.account_email = (await email_el.inner_text()).strip()
+            logger.info("Account email: %s", self.account_email)
+
+    async def _navigate_to_filters_via_menu(self):
+        """Fallback: reach the filters page by clicking through the mail app UI.
+
+        1. Load the mail app inbox
+        2. Click the settings gear icon
+        3. Click "All settings"
+        4. Click "Filters" in the sidebar
         """
         page = self.page
 
@@ -183,12 +223,7 @@ class ProtonMailBrowser:
             timeout=PAGE_LOAD_TIMEOUT_MS,
         )
         await page.wait_for_selector(selectors.COMPOSE_BUTTON, timeout=COMPOSE_WAIT_MS)
-
-        # Capture account email from the user dropdown in the sidebar
-        email_el = await page.query_selector(selectors.USER_DROPDOWN_EMAIL)
-        if email_el:
-            self.account_email = (await email_el.inner_text()).strip()
-            logger.info("Account email: %s", self.account_email)
+        await self._capture_account_email()
 
         await page.click(selectors.SETTINGS_GEAR)
         await page.wait_for_timeout(SETTINGS_DRAWER_MS)
@@ -207,7 +242,45 @@ class ProtonMailBrowser:
         else:
             raise RuntimeError("Could not find 'Filters' link in settings sidebar")
 
-        logger.info("Navigated to filter settings at %s", page.url)
+    async def _assert_filter_page_structure(self):
+        """Assert that the filter settings page has the expected structure.
+
+        Fails loudly if ProtonMail changed their UI, rather than silently
+        scraping the wrong data.
+        """
+        page = self.page
+
+        # Page heading
+        h1 = await page.query_selector(selectors.PAGE_HEADING)
+        if not h1:
+            raise RuntimeError("Filter page missing <h1> heading. URL: " + page.url)
+        h1_text = (await h1.inner_text()).strip()
+        if h1_text != "Filters":
+            raise RuntimeError(
+                f"Expected h1 'Filters', got {h1_text!r}. "
+                "ProtonMail may have changed their settings page."
+            )
+
+        # Custom filters section heading
+        custom_h2 = await page.query_selector(selectors.CUSTOM_FILTERS_HEADING)
+        if not custom_h2:
+            raise RuntimeError(
+                "Missing 'Custom filters' heading on filters page. "
+                "ProtonMail may have changed their UI layout."
+            )
+
+        # Spam/allow section heading (must exist so we know we're scoping correctly)
+        spam_h2 = await page.query_selector(selectors.SPAM_LISTS_HEADING)
+        if not spam_h2:
+            raise RuntimeError(
+                "Missing 'Spam, block, and allow lists' heading on filters page. "
+                "ProtonMail may have changed their UI layout."
+            )
+
+        # Add filter button
+        add_btn = await page.query_selector(selectors.ADD_FILTER_BUTTON)
+        if not add_btn:
+            logger.warning("'Add filter' button not found (may be hidden on free tier)")
 
     async def read_sieve_script(self, filter_name: str = "") -> str:
         """Read an existing Sieve filter's script from ProtonMail.
