@@ -125,7 +125,7 @@ A condition with an empty or whitespace-only value is treated the same way: `hea
 | Apply label | `fileinto "LabelName";` |
 | Mark as read | `addflag "\\Seen";` |
 | Star message | `addflag "\\Flagged";` |
-| Move to Archive | `fileinto "Archive";` |
+| Move to Archive | `fileinto "archive";` |
 | Move to Trash | `fileinto "trash";` |
 | Move to Spam | `fileinto "spam";` |
 | Move to Inbox | `fileinto "inbox";` |
@@ -134,7 +134,9 @@ A condition with an empty or whitespace-only value is treated the same way: `hea
 
 Proton's Sieve documentation (<https://proton.me/support/sieve-advanced-custom-filters>) says `discard` "deletes the email immediately and permanently" and gives `fileinto "trash";` for a move to Trash; Proton's own wizard-to-Sieve translator ([ProtonMail/sieve.js](https://github.com/ProtonMail/sieve.js)) writes the Trash destination the same way. ProtonFusion therefore never generates `discard`. Proton's filter wizard has no permanent-delete action (its Actions step has the folder, label, mark-as and auto-reply rows only, see [protonmail-ui.md](protonmail-ui.md)), so there is no wizard choice that `discard` would be correct for. Any other action row the scraper finds marks the filter incomplete instead of being guessed at.
 
-The system folders in the "Move to" dropdown map as follows: Trash and Archive have their own action types (`trash`, `archive`); Spam and Inbox are folder moves to `spam` and `inbox`, the names sieve.js uses. Archive is still written as `fileinto "Archive"` as earlier versions did.
+The system folders in the "Move to" dropdown map as follows: Trash and Archive have their own action types (`trash`, `archive`); Spam and Inbox are folder moves to `spam` and `inbox`. All four use the lowercase names sieve.js writes (its `test/fixtures/archive.js` files into `archive`).
+
+Older versions wrote Archive as `fileinto "Archive";`. The rule comparison reads a `fileinto` to "archive" in any case as the same action, so a live section in the old form compares equal to the new one (no drop, no correction listed), `cleanup` counts it as covering an archive filter, and carry-forward turns it back into an archive action. Every other folder name is compared exactly.
 
 Older versions wrote "Move to Trash" as `discard;` and Spam/Inbox as `fileinto "Spam";` / `fileinto "Inbox - Default";`. Backups that recorded the old action (`delete`, or a `move_to` "Spam" / "Inbox - Default") are read as the corrected one, and the rule preservation check lists a live rule in the old form under "Corrected" when the new section has the corrected form (see [Limits](#limits)).
 

@@ -44,7 +44,9 @@ import itertools
 from dataclasses import dataclass, field
 from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple, Union
 
-from src.generator.sieve_generator import SECTION_BEGIN, SECTION_END, escape_match_literal
+from src.generator.sieve_generator import (
+    ARCHIVE_FOLDER, SECTION_BEGIN, SECTION_END, escape_match_literal,
+)
 
 # A single test atom, e.g. ("address", ":is", ":all", "", ("from",), "a@x.com").
 # Opaque constructs are ("opaque", <canonical text>).
@@ -418,6 +420,23 @@ class ParsedRule:
     opaque: bool = False
 
 
+def _action_text(cmd: _Command) -> str:
+    """Canonical text of one action, as it appears in a Fact.
+
+    A `fileinto` to the Archive folder is written in Proton's lowercase form
+    whatever its case: older versions wrote "Archive", the current generator
+    and Proton's own sieve.js write "archive", and both name the same system
+    folder. Normalising here makes the two compare equal everywhere (section
+    comparison, cleanup coverage, carry-forward). Every other folder name is
+    compared exactly.
+    """
+    if (cmd.name == "fileinto" and len(cmd.args) == 1 and not cmd.tests and cmd.block is None
+            and isinstance(cmd.args[0], _Token) and cmd.args[0].kind == "string"
+            and cmd.args[0].value.lower() == ARCHIVE_FOLDER):
+        return f"fileinto {_quote(ARCHIVE_FOLDER)};"
+    return _format_command(cmd)
+
+
 def _is_simple_action(cmd: _Command) -> bool:
     return cmd.block is None and not cmd.tests and cmd.name not in ("if", "elsif", "else", "require")
 
@@ -449,7 +468,7 @@ def parse_rules(section_text: str) -> List[ParsedRule]:
                 and all(_is_simple_action(a) for a in cmd.block)
             )
             if simple:
-                actions = frozenset(_format_command(a) for a in cmd.block)
+                actions = frozenset(_action_text(a) for a in cmd.block)
                 facts = {Fact(clause, actions) for clause in _test_clauses(cmd.tests[0])}
                 rules.append(ParsedRule(text=text, facts=facts))
             else:
@@ -462,7 +481,7 @@ def parse_rules(section_text: str) -> List[ParsedRule]:
         text = _format_command(cmd)
         if _is_simple_action(cmd):
             # Unconditional action at section top level
-            rules.append(ParsedRule(text=text, facts={Fact(_ALWAYS, frozenset({text}))}))
+            rules.append(ParsedRule(text=text, facts={Fact(_ALWAYS, frozenset({_action_text(cmd)}))}))
         else:
             opaque = Fact(frozenset({("rule", text)}), frozenset())
             rules.append(ParsedRule(text=text, facts={opaque}, opaque=True))

@@ -340,3 +340,29 @@ class TestLegacySystemFolderActions:
         assert not result.is_safe
         assert result.folder_fixes == []
         assert len(result.dropped) == 1
+
+
+class TestArchiveCase:
+    """Older versions wrote fileinto "Archive"; it is the same action as "archive"."""
+
+    def _new_archive(self):
+        return SieveGenerator().generate([ConsolidatedFilter(
+            name="r",
+            condition_groups=[ConditionGroup(conditions=[
+                FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="a")])],
+            actions=[FilterAction(type=ActionType.ARCHIVE)],
+        )])
+
+    def test_generator_writes_lowercase_archive(self):
+        assert 'fileinto "archive";' in self._new_archive()
+
+    @pytest.mark.parametrize("target", ["Archive", "archive", "ARCHIVE"])
+    def test_any_case_compares_equal(self, target):
+        live = _wrap(f'if address :is "From" "a" {{ fileinto "{target}"; }}')
+        result = compare_sections(live, self._new_archive())
+        assert result.is_safe
+        assert result.dropped == [] and result.added == []
+        assert result.folder_fixes == [] and result.wildcard_fixes == []
+
+    def test_other_folder_case_still_matters(self):
+        assert script_facts('if true { fileinto "Work"; }') != script_facts('if true { fileinto "work"; }')

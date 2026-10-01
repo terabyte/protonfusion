@@ -135,7 +135,8 @@ class TestSieveGenerator:
         script = gen.generate([cf])
 
         assert "fileinto" in script
-        assert '"Archive"' in script
+        assert 'fileinto "archive";' in script
+        assert '"Archive"' not in script
 
     def test_generate_label(self):
         """Test generating label action."""
@@ -389,7 +390,7 @@ class TestSieveGenerator:
         script = gen.generate(filters)
 
         assert 'fileinto "trash";' in script
-        assert "Archive News" in script or "Archive" in script
+        assert 'fileinto "archive";' in script
         assert script.count("if ") == 2
 
     def test_generate_no_conditions_refused(self):

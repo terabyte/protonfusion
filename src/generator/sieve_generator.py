@@ -31,6 +31,11 @@ EXTENSION_MAP = {
 # ProtonMail/sieve.js both write `fileinto "trash";`).
 TRASH_FOLDER = "trash"
 
+# Proton's Sieve name for the Archive folder, as ProtonMail/sieve.js writes
+# it (test/fixtures/archive.js). Older versions wrote "Archive"; the rule
+# comparison treats the two as the same action (see sieve_rules).
+ARCHIVE_FOLDER = "archive"
+
 
 # The wizard's "has attachment" condition, exactly as Proton's own
 # wizard-to-Sieve translator writes it: ProtonMail/sieve.js,
@@ -314,7 +319,7 @@ class SieveGenerator:
             elif action.type == ActionType.STAR:
                 lines.append('addflag "\\\\Flagged";')
             elif action.type == ActionType.ARCHIVE:
-                lines.append('fileinto "Archive";')
+                lines.append(f'fileinto "{ARCHIVE_FOLDER}";')
             elif action.type == ActionType.TRASH:
                 # Proton: discard deletes "immediately and permanently";
                 # a Trash move is `fileinto "trash";` and stays recoverable.

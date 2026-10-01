@@ -353,3 +353,23 @@ class TestMultiValueCarryForward:
         assert unconvertible == []
         assert sorted(f.conditions[0].values) == ["a|b", "c"]
         assert _generated_facts([f]) == facts
+
+
+@pytest.mark.parametrize("target", ["Archive", "archive"])
+def test_archive_any_case_carries_as_archive(target):
+    facts = script_facts(f'if address :is "From" "a" {{ fileinto "{target}"; }}')
+    (f,), unconvertible = facts_to_filters(facts)
+    assert unconvertible == []
+    assert [a.type for a in f.actions] == [ActionType.ARCHIVE]
+    assert _generated_facts([f]) == facts
+
+
+def test_live_archive_counts_as_covering_archive_filter():
+    """cleanup coverage: an old live "Archive" rule covers a current archive filter."""
+    f = ProtonMailFilter(
+        name="arch",
+        conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="a")],
+        actions=[FilterAction(type=ActionType.ARCHIVE)],
+    )
+    live = script_facts('if address :is "From" "a" { fileinto "Archive"; }')
+    assert filter_facts(f) <= live

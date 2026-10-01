@@ -45,8 +45,8 @@ class ActionType(str, Enum):
 # mapped to the action the scraper records. Names are the ones Proton's own
 # wizard-to-Sieve generator (github.com/ProtonMail/sieve.js) writes in
 # `fileinto`, which Proton's Sieve docs also use (`fileinto "trash";`).
-# Archive keeps its own action type, generated as `fileinto "Archive";` as
-# it always has been.
+# Trash and Archive have their own action types, generated as
+# `fileinto "trash";` and `fileinto "archive";`.
 SYSTEM_FOLDER_ACTIONS = {
     "Trash": {"type": "trash", "parameters": {}},
     "Archive": {"type": "archive", "parameters": {}},

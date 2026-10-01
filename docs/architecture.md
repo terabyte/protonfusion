@@ -213,7 +213,7 @@ The generator converts `ConsolidatedFilter` objects into RFC 5228 Sieve scripts.
 | label "X" | `fileinto "X";` |
 | mark as read | `addflag "\\Seen";` |
 | star | `addflag "\\Flagged";` |
-| archive | `fileinto "Archive";` |
+| archive | `fileinto "archive";` (a live `"Archive"` compares equal) |
 | trash | `fileinto "trash";` (never `discard;`, which Proton documents as a permanent delete) |
 
 ## Snapshot System

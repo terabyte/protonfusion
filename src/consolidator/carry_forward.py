@@ -29,7 +29,7 @@ from typing import AbstractSet, Dict, Iterable, List, Optional, Set, Tuple
 from src.generator.sieve_generator import (
     SieveGenerationError, SieveGenerator, escape_match_literal, unescape_match_literal,
 )
-from src.generator.sieve_generator import ATTACHMENT_TEST, TRASH_FOLDER
+from src.generator.sieve_generator import ARCHIVE_FOLDER, ATTACHMENT_TEST, TRASH_FOLDER
 from src.generator.sieve_rules import (
     Atom, Fact, _tokenize, correct_legacy_actions, describe_atom, script_facts,
 )
@@ -117,7 +117,8 @@ def _action_text_to_action(text: str, label_names: AbstractSet[str] = frozenset(
     words = [(t.kind, t.value) for t in tokens]
     if len(words) == 3 and words[0] == ("ident", "fileinto") and words[1][0] == "string" and words[2][0] == ";":
         folder = words[1][1]
-        if folder == "Archive":
+        if folder.lower() == ARCHIVE_FOLDER:
+            # Facts already hold the lowercase form; any case is the Archive folder
             return FilterAction(type=ActionType.ARCHIVE)
         if folder == TRASH_FOLDER:
             return FilterAction(type=ActionType.TRASH)
