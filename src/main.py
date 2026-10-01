@@ -324,11 +324,21 @@ def show(
 @app.command("show-backup")
 def show_backup(
     backup_id: str = typer.Option("latest", "--backup", help="Backup identifier (timestamp or 'latest')"),
+    show_raw: bool = typer.Option(
+        False, "--show-raw",
+        help="Also print each filter's raw scrape evidence (the wizard text or Sieve script) and scrape issues",
+    ),
 ):
-    """Display filters from a backup file (offline, no login needed)."""
+    """Display filters from a backup file (offline, no login needed).
+
+    With --show-raw, also prints what the scraper saw for each filter, so a
+    field the parser missed or misread can be recovered by hand.
+    """
     manager = BackupManager()
     bkup = manager.load_backup(backup_id)
     _display_filters(bkup.filters, source=f"backup '{backup_id}'")
+    if show_raw:
+        _display_raw_evidence(bkup.filters)
     if bkup.sieve_script:
         console.print(f"\n[cyan]Backup includes Sieve script ({len(bkup.sieve_script)} chars)")
         has_markers = SECTION_BEGIN in bkup.sieve_script
@@ -377,14 +387,14 @@ def _display_filters(filters: list, source: str = "ProtonMail account"):
         # Format conditions
         cond_parts = []
         for c in f.conditions:
-            cond_parts.append(f"{c.type.value} {c.operator.value} \"{c.value}\"")
+            cond_parts.append(f"{c.type.value} {c.operator.value} \"{escape(c.value)}\"")
         conds_str = f" {f.logic.value.upper()} ".join(cond_parts) if cond_parts else "[dim]none[/]"
 
         # Format actions
         action_parts = []
         for a in f.actions:
             if a.parameters:
-                params = ", ".join(f"{v}" for v in a.parameters.values())
+                params = ", ".join(escape(f"{v}") for v in a.parameters.values())
                 action_parts.append(f"{a.type.value}({params})")
             else:
                 action_parts.append(a.type.value)
@@ -394,6 +404,34 @@ def _display_filters(filters: list, source: str = "ProtonMail account"):
         table.add_row(str(i), name_str, status, conds_str, actions_str)
 
     console.print(table)
+
+
+def _display_raw_evidence(filters: list) -> None:
+    """Print each filter's raw scrape evidence and scrape issues, numbered as in the table.
+
+    This is the recovery path the raw text exists for: what the wizard (or
+    the Sieve editor) showed when the filter was backed up, verbatim.
+    """
+    console.print("\n[bold]Raw scrape evidence[/]")
+    for i, f in enumerate(filters, 1):
+        lines = []
+        if f.scrape_issues:
+            lines.append("[red]Scrape issues:[/]")
+            lines.extend(f"  [red]- {escape(issue)}[/]" for issue in f.scrape_issues)
+        if f.raw is None:
+            lines.append("[yellow]No raw evidence (backed up before format 1.1).[/]")
+        else:
+            for label, text in (
+                ("Conditions text", f.raw.conditions_text),
+                ("Actions text", f.raw.actions_text),
+                ("Sieve script", f.raw.sieve_text),
+            ):
+                if text:
+                    lines.append(f"[cyan]{label}:[/]")
+                    lines.append(escape(text))
+            if not (f.raw.conditions_text or f.raw.actions_text or f.raw.sieve_text):
+                lines.append("[dim]Raw evidence is empty.[/]")
+        console.print(Panel("\n".join(lines), title=f"#{i} {escape(f.name)}", title_align="left"))
 
 
 @app.command("list-snapshots")
@@ -1794,17 +1832,17 @@ def snapshot_view(
             FilterStatus.ARCHIVED: "cyan",
             FilterStatus.DEPRECATED: "dim",
         }.get(f.status, "")
-        name_str = f"[{name_style}]{f.name}[/]" if name_style else f.name
+        name_str = f"[{name_style}]{escape(f.name)}[/]" if name_style else escape(f.name)
 
         cond_parts = []
         for c in f.conditions:
-            cond_parts.append(f"{c.type.value} {c.operator.value} \"{c.value}\"")
+            cond_parts.append(f"{c.type.value} {c.operator.value} \"{escape(c.value)}\"")
         conds_str = f" {f.logic.value.upper()} ".join(cond_parts) if cond_parts else "[dim]none[/]"
 
         action_parts = []
         for a in f.actions:
             if a.parameters:
-                params = ", ".join(f"{v}" for v in a.parameters.values())
+                params = ", ".join(escape(f"{v}") for v in a.parameters.values())
                 action_parts.append(f"{a.type.value}({params})")
             else:
                 action_parts.append(a.type.value)

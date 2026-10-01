@@ -166,6 +166,7 @@ A GitHub Actions workflow runs unit + integration tests on every push and pull r
 | `login` | Sign in by hand in a visible browser and save the session for the other commands |
 | `show` | Read and display your current filters (read-only, no changes) |
 | `show-backup` | Display filters from a backup file (offline, no login) |
+| `show-backup --show-raw` | Also print each filter's raw scrape evidence (wizard text or Sieve script) and scrape issues |
 | `backup` | Scrape current filters and save to a timestamped backup |
 | `list-snapshots` | Show all available snapshots with statistics |
 | `analyze` | View filter statistics and consolidation opportunities |
@@ -260,7 +261,7 @@ ProtonFusion is designed to be non-destructive:
 - **Refuse rather than drop**: `sync` refuses to upload a ProtonFusion section that would lose any rule in the live one, and `cleanup` never deletes a filter whose rules are not in the live ProtonFusion section (override: `--include-uncovered`).
 - **Dry-run mode**: Preview what `sync` and `cleanup` will do before committing.
 - **Checksums**: Backups include a SHA-256 checksum, verified every time one is loaded. A `backup.json` changed after it was written (corruption, or a hand edit) is refused; run `backup` again, or, for a deliberate edit, put the global `--ignore-checksum` before the command name (`python -m src.main --ignore-checksum consolidate`). Values in an edited backup that ProtonFusion does not know load flagged incomplete rather than guessed.
-- **Incomplete reads are loud**: A filter the scraper cannot fully read stops `backup` (override: `--allow-incomplete`). Each backed-up filter also keeps the wizard's raw text, so a field the parser missed can still be recovered.
+- **Incomplete reads are loud**: A filter the scraper cannot fully read stops `backup` (override: `--allow-incomplete`). Each backed-up filter also keeps the wizard's raw text, so a field the parser missed can still be recovered: `show-backup --show-raw` prints it with each filter's scrape issues.
 - **Cleanup needs a verified copy**: `cleanup` only deletes a disabled filter if the latest snapshot holds an identical, complete copy with raw text. Others are listed and kept (override: `--allow-incomplete`). Backups made before format 1.1 have no raw text, so run `backup` again after upgrading. `consolidate` warns about such filters and `sync` refuses a script built from them (override: `--allow-incomplete`).
 - **Shared names are never deleted**: deletion works by name, so `cleanup` keeps any filter whose name another filter (enabled or not) also uses, and only ever deletes a disabled filter in the Custom filters list.
 - **Sieve filters are left alone**: `consolidate` skips filters written in Sieve (including ProtonFusion's own), and `cleanup` never deletes them.
