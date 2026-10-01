@@ -225,3 +225,33 @@ class TestProtonUrls:
     ])
     def test_slot_from_url_none(self, url):
         assert slot_from_url(url) is None
+
+
+class TestStorageStatePath:
+    """--state beats $PROTONFUSION_STORAGE_STATE beats the XDG default."""
+
+    def test_cli_value_wins(self, monkeypatch, tmp_path):
+        from src.utils.config import resolve_storage_state_path
+        monkeypatch.setenv("PROTONFUSION_STORAGE_STATE", str(tmp_path / "env.json"))
+        assert resolve_storage_state_path(str(tmp_path / "cli.json")) == tmp_path / "cli.json"
+
+    def test_env_used_without_cli(self, monkeypatch, tmp_path):
+        from src.utils.config import resolve_storage_state_path
+        monkeypatch.setenv("PROTONFUSION_STORAGE_STATE", str(tmp_path / "env.json"))
+        assert resolve_storage_state_path(None) == tmp_path / "env.json"
+
+    def test_default_under_xdg_config(self, monkeypatch, tmp_path):
+        from src.utils.config import resolve_storage_state_path
+        monkeypatch.delenv("PROTONFUSION_STORAGE_STATE", raising=False)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        assert resolve_storage_state_path("") == tmp_path / "protonfusion" / "storage_state.json"
+
+    def test_default_without_xdg(self, monkeypatch):
+        from src.utils.config import resolve_storage_state_path
+        monkeypatch.delenv("PROTONFUSION_STORAGE_STATE", raising=False)
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        assert resolve_storage_state_path() == Path.home() / ".config" / "protonfusion" / "storage_state.json"
+
+    def test_tilde_expanded(self, monkeypatch):
+        from src.utils.config import resolve_storage_state_path
+        assert resolve_storage_state_path("~/s.json") == Path.home() / "s.json"

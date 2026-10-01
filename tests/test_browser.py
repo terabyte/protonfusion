@@ -4,6 +4,8 @@ A small fake Page stands in for Playwright so the login/navigation decisions can
 be exercised offline.
 """
 
+import json
+
 import pytest
 
 from src.scraper import selectors
@@ -151,3 +153,92 @@ class TestAfterLogin:
         assert await browser.login() is True
         assert browser.page.visited == []
         assert browser.account_slot == 2
+
+
+class FakeContext:
+    """Stands in for a BrowserContext's storage_state()."""
+
+    def __init__(self, state):
+        self.state = state
+
+    async def storage_state(self):
+        return dict(self.state)
+
+
+SAMPLE_STATE = {"cookies": [{"name": "AUTH-x", "value": "secret"}], "origins": []}
+
+
+class TestSavedSession:
+    @pytest.mark.asyncio
+    async def test_save_is_owner_only_and_records_slot(self, tmp_path):
+        state_file = tmp_path / "newdir" / "storage_state.json"
+        browser = ProtonMailBrowser(headless=True, storage_state_path=state_file)
+        browser.context = FakeContext(SAMPLE_STATE)
+        browser.account_slot = 1
+
+        assert await browser.save_storage_state() == state_file
+
+        assert (state_file.stat().st_mode & 0o777) == 0o600
+        assert (state_file.parent.stat().st_mode & 0o777) == 0o700
+        saved = json.loads(state_file.read_text())
+        assert saved["cookies"] == SAMPLE_STATE["cookies"]
+        assert saved["protonfusion"] == {"account_slot": 1}
+        assert not list(state_file.parent.glob("*.tmp"))
+
+    @pytest.mark.asyncio
+    async def test_save_tightens_existing_file(self, tmp_path):
+        state_file = tmp_path / "storage_state.json"
+        state_file.write_text("{}")
+        state_file.chmod(0o644)
+        browser = ProtonMailBrowser(headless=True, storage_state_path=state_file)
+        browser.context = FakeContext(SAMPLE_STATE)
+        await browser.save_storage_state()
+        assert (state_file.stat().st_mode & 0o777) == 0o600
+
+    def test_load_strips_meta_and_restores_slot(self, tmp_path):
+        state_file = tmp_path / "s.json"
+        state_file.write_text(json.dumps({**SAMPLE_STATE, "protonfusion": {"account_slot": 3}}))
+        browser = ProtonMailBrowser(headless=True, storage_state_path=state_file)
+        state = browser._load_storage_state()
+        assert "protonfusion" not in state
+        assert state["cookies"] == SAMPLE_STATE["cookies"]
+        assert browser.account_slot == 3
+        assert browser.session_loaded
+
+    def test_load_missing_file(self, tmp_path):
+        browser = ProtonMailBrowser(headless=True, storage_state_path=tmp_path / "absent.json")
+        assert browser._load_storage_state() is None
+        assert not browser.session_loaded
+
+    @pytest.mark.parametrize("content", ["not json", "[1, 2]"])
+    def test_load_corrupt_file(self, tmp_path, content):
+        state_file = tmp_path / "s.json"
+        state_file.write_text(content)
+        browser = ProtonMailBrowser(headless=True, storage_state_path=state_file)
+        assert browser._load_storage_state() is None
+        assert not browser.session_loaded
+
+    def test_env_var_still_honoured(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PROTONFUSION_STORAGE_STATE", str(tmp_path / "env.json"))
+        assert ProtonMailBrowser().storage_state_path == tmp_path / "env.json"
+
+    @pytest.mark.asyncio
+    async def test_reuse_skipped_without_loaded_session(self):
+        browser = make_browser()
+        assert await browser._reuse_saved_session() is False
+        assert browser.page.visited == []
+
+    @pytest.mark.asyncio
+    async def test_reused_session_goes_to_saved_slot_and_refreshes_on_close(self, tmp_path):
+        state_file = tmp_path / "s.json"
+        browser = make_browser(present=[selectors.COMPOSE_BUTTON])
+        browser.storage_state_path = state_file
+        browser.session_loaded = True
+        browser.account_slot = 1
+        browser.context = FakeContext(SAMPLE_STATE)
+
+        assert await browser._reuse_saved_session() is True
+        assert browser.page.visited == ["https://mail.proton.me/u/1/inbox"]
+
+        await browser.close()
+        assert json.loads(state_file.read_text())["protonfusion"] == {"account_slot": 1}

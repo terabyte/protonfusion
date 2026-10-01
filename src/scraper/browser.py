@@ -1,8 +1,10 @@
 """Shared browser automation base class for ProtonMail."""
 
+import json
 import logging
 import os
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Union
 from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright, Browser, Page, BrowserContext
@@ -11,7 +13,7 @@ from src.scraper import selectors
 from src.utils.config import (
     Credentials,
     PROTONMAIL_LOGIN_URL, MAIL_HOST, ACCOUNT_HOST, INBOX_PATH, FILTERS_PATH,
-    DEFAULT_ACCOUNT_SLOT, proton_url, slot_from_url,
+    DEFAULT_ACCOUNT_SLOT, proton_url, slot_from_url, resolve_storage_state_path,
     LOGIN_TIMEOUT_MS, PAGE_LOAD_TIMEOUT_MS, ELEMENT_TIMEOUT_MS,
 )
 
@@ -35,12 +37,30 @@ DROPDOWN_MS = 500
 POST_LOGIN_SETTLE_MS = 15000
 MAX_ONBOARDING_MODALS = 6
 
-# Saved Playwright session (cookies + localStorage) from a prior human login.
-# Proton puts a CAPTCHA in front of automated logins, so the practical way to run
-# headless is: a human logs in once in a visible browser, the session is saved,
-# and later runs reuse it until Proton expires it. See docs/plan-session-management.md.
-STORAGE_STATE_ENV = "PROTONFUSION_STORAGE_STATE"
+# How long a saved session gets to open the mail app before it counts as dead.
 SESSION_CHECK_MS = 30000
+# Our own key inside the saved storage-state JSON (Playwright ignores the file's
+# other contents only if we strip this before handing the state over).
+STATE_META_KEY = "protonfusion"
+
+
+def write_private_file(path: Path, text: str):
+    """Write text to path readable only by the owner.
+
+    Any directories created are 0700 and the file is 0600 (via umask), and the
+    write goes through a temp file + rename so a crash never leaves half a file.
+    """
+    old_umask = os.umask(0o077)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    finally:
+        os.umask(old_umask)
 
 
 class ProtonMailBrowser:
@@ -51,9 +71,20 @@ class ProtonMailBrowser:
     ProtonMailSync (write operations).
     """
 
-    def __init__(self, headless: bool = False, credentials: Optional[Credentials] = None):
+    def __init__(
+        self,
+        headless: bool = False,
+        credentials: Optional[Credentials] = None,
+        storage_state_path: Optional[Union[str, Path]] = None,
+    ):
         self.headless = headless
         self.credentials = credentials
+        # Saved session file; see resolve_storage_state_path for the precedence.
+        self.storage_state_path: Path = resolve_storage_state_path(
+            str(storage_state_path) if storage_state_path else None
+        )
+        self.session_loaded = False  # a saved session was put into the context
+        self._save_state_on_close = False
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
@@ -78,18 +109,65 @@ class ProtonMailBrowser:
             logger.info("Account session slot is /u/%d/", slot)
             self.account_slot = slot
 
-    async def initialize(self):
-        """Launch Playwright browser."""
+    async def initialize(self, load_storage_state: bool = True):
+        """Launch Playwright browser, preloading the saved session if there is one.
+
+        load_storage_state=False starts clean (used by the `login` command).
+        """
         self._playwright = await async_playwright().start()
         self.browser = await self._playwright.chromium.launch(headless=self.headless)
-        self.storage_state_path = os.environ.get(STORAGE_STATE_ENV, "")
         context_options = {"viewport": VIEWPORT, "user_agent": USER_AGENT}
-        if self.storage_state_path and os.path.exists(self.storage_state_path):
-            context_options["storage_state"] = self.storage_state_path
-            logger.info("Loading saved session from %s", self.storage_state_path)
-        self.context = await self.browser.new_context(**context_options)
+        state = self._load_storage_state() if load_storage_state else None
+        try:
+            self.context = await self.browser.new_context(
+                **context_options, **({"storage_state": state} if state else {})
+            )
+        except Exception as e:
+            if not state:
+                raise
+            logger.warning("Saved session at %s was rejected (%s); starting fresh", self.storage_state_path, e)
+            self.session_loaded = False
+            self.context = await self.browser.new_context(**context_options)
         self.page = await self.context.new_page()
         logger.info("Browser initialized (headless=%s)", self.headless)
+
+    def _load_storage_state(self) -> Optional[dict]:
+        """Read the saved session file, or None if absent or unreadable.
+
+        Also restores the account slot recorded when the session was saved, so
+        session reuse goes straight to the right /u/<slot>/.
+        """
+        path = self.storage_state_path
+        if not path.exists():
+            return None
+        try:
+            state = json.loads(path.read_text())
+            if not isinstance(state, dict):
+                raise ValueError("not a storage-state object")
+        except (OSError, ValueError) as e:
+            logger.warning("Ignoring unreadable saved session %s: %s", path, e)
+            return None
+        meta = state.pop(STATE_META_KEY, None)
+        meta = meta if isinstance(meta, dict) else {}
+        slot = meta.get("account_slot")
+        if isinstance(slot, int) and slot >= 0:
+            self.account_slot = slot
+        self.session_loaded = True
+        logger.info("Loading saved session from %s", path)
+        return state
+
+    async def save_storage_state(self, path: Optional[Path] = None) -> Path:
+        """Save the context's cookies + localStorage (owner-only) and return the path.
+
+        The file holds live auth cookies: it is written 0600 in a 0700 directory
+        and its contents are never logged.
+        """
+        path = Path(path) if path else self.storage_state_path
+        state = await self.context.storage_state()
+        state[STATE_META_KEY] = {"account_slot": self.account_slot}
+        write_private_file(path, json.dumps(state))
+        logger.info("Saved browser session to %s", path)
+        return path
 
     async def login(self) -> bool:
         """Login to ProtonMail.
@@ -160,7 +238,7 @@ class ProtonMailBrowser:
 
     async def _reuse_saved_session(self) -> bool:
         """True if a saved session was loaded and the mail app opens without a login."""
-        if not self.storage_state_path or not os.path.exists(self.storage_state_path):
+        if not self.session_loaded:
             return False
         page = self.page
         await page.goto(self.mail_url(INBOX_PATH), wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
@@ -170,6 +248,9 @@ class ProtonMailBrowser:
             logger.warning("Saved session did not reach the mail app (%s); logging in normally", page.url)
             return False
         logger.info("Reused saved session")
+        # Proton may rotate tokens during the run; write them back on close so
+        # the saved session stays usable.
+        self._save_state_on_close = True
         return True
 
     async def _automated_login(self) -> bool:
@@ -439,7 +520,12 @@ class ProtonMailBrowser:
         return await self.context.new_page()
 
     async def close(self):
-        """Close the browser."""
+        """Close the browser, first refreshing the saved session if one was reused."""
+        if self._save_state_on_close and self.context:
+            try:
+                await self.save_storage_state()
+            except Exception as e:
+                logger.warning("Could not refresh saved session: %s", e)
         if self.browser:
             await self.browser.close()
         if self._playwright:

@@ -52,6 +52,25 @@ def slot_from_url(url: str) -> Optional[int]:
     return int(match.group(1)) if match else None
 
 
+# Saved browser session (Playwright storage state: cookies + localStorage).
+# Proton puts a Human Verification CAPTCHA in front of automated logins, so a
+# human signs in once with `protonfusion login`, which saves the session here,
+# and later commands reuse it until Proton expires it.
+STORAGE_STATE_ENV = "PROTONFUSION_STORAGE_STATE"
+
+
+def default_storage_state_path() -> Path:
+    """$XDG_CONFIG_HOME/protonfusion/storage_state.json (~/.config if unset)."""
+    config_home = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(config_home) / "protonfusion" / "storage_state.json"
+
+
+def resolve_storage_state_path(cli_value: Optional[str] = None) -> Path:
+    """Where the saved session lives: --state, else $PROTONFUSION_STORAGE_STATE, else the default."""
+    chosen = cli_value or os.environ.get(STORAGE_STATE_ENV) or default_storage_state_path()
+    return Path(chosen).expanduser()
+
+
 # Timeouts
 LOGIN_TIMEOUT_MS = 120000  # 2 minutes for manual login
 PAGE_LOAD_TIMEOUT_MS = 60000

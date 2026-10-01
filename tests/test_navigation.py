@@ -5,6 +5,7 @@ account.proton.me are answered locally from tests/fixtures via route
 interception, so the real goto/wait/assert path runs against a known page.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -109,5 +110,28 @@ async def test_stubborn_modal_never_raises(fast_modals):
         await browser.page.set_content("<div class='modal-two'><p>No buttons here</p></div>")
         dismissed = await browser.dismiss_onboarding_modals()
         assert dismissed > 0  # tried Escape, gave up after the cap, did not raise
+    finally:
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_saved_session_loads_into_real_context(tmp_path):
+    """Playwright accepts the saved file once our metadata key is stripped."""
+    state_file = tmp_path / "storage_state.json"
+    state_file.write_text(json.dumps({
+        "cookies": [{
+            "name": "probe", "value": "1", "domain": "account.proton.me", "path": "/",
+            "expires": -1, "httpOnly": False, "secure": True, "sameSite": "Lax",
+        }],
+        "origins": [],
+        "protonfusion": {"account_slot": 1},
+    }))
+    browser = ProtonMailBrowser(headless=True, storage_state_path=state_file)
+    await browser.initialize()
+    try:
+        assert browser.session_loaded
+        assert browser.account_slot == 1
+        cookies = await browser.context.cookies("https://account.proton.me/")
+        assert [c["name"] for c in cookies] == ["probe"]
     finally:
         await browser.close()

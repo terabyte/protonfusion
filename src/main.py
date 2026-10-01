@@ -27,6 +27,10 @@ from src.consolidator.consolidation_engine import ConsolidationEngine
 from src.generator.sieve_generator import SieveGenerator, SECTION_BEGIN
 
 SIEVE_FILTER_NAME = "ProtonFusion Consolidated"
+STATE_HELP = (
+    "Saved session file from 'login' (default: $PROTONFUSION_STORAGE_STATE, "
+    "else ~/.config/protonfusion/storage_state.json); used when present"
+)
 
 
 app = typer.Typer(
@@ -60,6 +64,7 @@ def _get_credentials(credentials_file: str, manual_login: bool):
 def backup(
     headless: bool = typer.Option(False, "--headless", help="Run browser in headless mode"),
     credentials_file: str = typer.Option("", "--credentials-file", help="Path to credentials file"),
+    state: str = typer.Option("", "--state", help=STATE_HELP),
     manual_login: bool = typer.Option(False, "--manual-login", help="Force manual login"),
     output: str = typer.Option("", "--output", help="Custom output path for backup file"),
     workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
@@ -71,7 +76,7 @@ def backup(
     workers = max(1, min(workers, 10))
 
     async def _run():
-        scraper = ProtonMailScraper(headless=headless, credentials=creds)
+        scraper = ProtonMailScraper(headless=headless, credentials=creds, storage_state_path=state or None)
         try:
             with console.status("[bold green]Initializing browser..."):
                 await scraper.initialize()
@@ -133,6 +138,7 @@ def backup(
 def show(
     headless: bool = typer.Option(False, "--headless", help="Run browser in headless mode"),
     credentials_file: str = typer.Option("", "--credentials-file", help="Path to credentials file"),
+    state: str = typer.Option("", "--state", help=STATE_HELP),
     manual_login: bool = typer.Option(False, "--manual-login", help="Force manual login"),
     workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
 ):
@@ -147,7 +153,7 @@ def show(
     workers = max(1, min(workers, 10))
 
     async def _run():
-        scraper = ProtonMailScraper(headless=headless, credentials=creds)
+        scraper = ProtonMailScraper(headless=headless, credentials=creds, storage_state_path=state or None)
         try:
             with console.status("[bold green]Initializing browser..."):
                 await scraper.initialize()
@@ -489,6 +495,7 @@ def diff(
     backup2: str = typer.Option("", "--backup2", help="Second backup for comparison"),
     headless: bool = typer.Option(False, "--headless", help="Run browser in headless mode"),
     credentials_file: str = typer.Option("", "--credentials-file", help="Credentials file"),
+    state: str = typer.Option("", "--state", help=STATE_HELP),
     workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
 ):
     """Compare backups or current state vs backup."""
@@ -509,7 +516,7 @@ def diff(
         bkup = manager.load_backup(backup_id)
 
         async def _run():
-            scraper = ProtonMailScraper(headless=headless, credentials=creds)
+            scraper = ProtonMailScraper(headless=headless, credentials=creds, storage_state_path=state or None)
             try:
                 await scraper.initialize()
                 await scraper.login()
@@ -577,6 +584,7 @@ def sync(
     backup_id: str = typer.Option("latest", "--backup", help="Backup to reference for disabling filters"),
     headless: bool = typer.Option(False, "--headless", help="Run browser in headless mode"),
     credentials_file: str = typer.Option("", "--credentials-file", help="Credentials file"),
+    state: str = typer.Option("", "--state", help=STATE_HELP),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview changes without applying"),
     show_diff_only: bool = typer.Option(False, "--show-diff-only", help="Log in, fetch live Sieve, show diff, change nothing"),
 ):
@@ -622,7 +630,7 @@ def sync(
 
     if show_diff_only:
         async def _show_diff():
-            sync_client = ProtonMailSync(headless=headless, credentials=creds)
+            sync_client = ProtonMailSync(headless=headless, credentials=creds, storage_state_path=state or None)
             try:
                 await sync_client.initialize()
                 await sync_client.login()
@@ -679,7 +687,7 @@ def sync(
         return
 
     async def _run():
-        sync_client = ProtonMailSync(headless=headless, credentials=creds)
+        sync_client = ProtonMailSync(headless=headless, credentials=creds, storage_state_path=state or None)
         try:
             await sync_client.initialize()
             await sync_client.login()
@@ -741,6 +749,7 @@ def restore(
     backup_id: str = typer.Option(..., "--backup", help="Backup to restore from"),
     headless: bool = typer.Option(False, "--headless", help="Run browser in headless mode"),
     credentials_file: str = typer.Option("", "--credentials-file", help="Credentials file"),
+    state: str = typer.Option("", "--state", help=STATE_HELP),
     workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
 ):
     """Restore filters to previous backup state."""
@@ -754,7 +763,7 @@ def restore(
     bkup = manager.load_backup(backup_id)
 
     async def _run():
-        scraper = ProtonMailScraper(headless=headless, credentials=creds)
+        scraper = ProtonMailScraper(headless=headless, credentials=creds, storage_state_path=state or None)
         try:
             await scraper.initialize()
             await scraper.login()
@@ -764,7 +773,7 @@ def restore(
         finally:
             await scraper.close()
 
-        sync_client = ProtonMailSync(headless=headless, credentials=creds)
+        sync_client = ProtonMailSync(headless=headless, credentials=creds, storage_state_path=state or None)
         try:
             await sync_client.initialize()
             await sync_client.login()
@@ -798,6 +807,7 @@ def restore(
 def cleanup(
     headless: bool = typer.Option(False, "--headless", help="Run browser in headless mode"),
     credentials_file: str = typer.Option("", "--credentials-file", help="Credentials file"),
+    state: str = typer.Option("", "--state", help=STATE_HELP),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview what will be deleted"),
     workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
 ):
@@ -813,7 +823,7 @@ def cleanup(
     manager = BackupManager()
 
     async def _run():
-        scraper = ProtonMailScraper(headless=headless, credentials=creds)
+        scraper = ProtonMailScraper(headless=headless, credentials=creds, storage_state_path=state or None)
         try:
             await scraper.initialize()
             await scraper.login()
@@ -866,7 +876,7 @@ def cleanup(
             console.print("[yellow]Cleanup cancelled.")
             return
 
-        sync_client = ProtonMailSync(headless=headless, credentials=creds)
+        sync_client = ProtonMailSync(headless=headless, credentials=creds, storage_state_path=state or None)
         try:
             await sync_client.initialize()
             await sync_client.login()
