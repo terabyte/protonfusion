@@ -45,6 +45,8 @@ class FakeSync:
     upload_result = True  # False, or an exception instance to raise
     hit_limit = False  # what upload_hit_filter_limit reports after a failed upload
     toggle_fails: set = set()  # (name, enabled) pairs set_row_enabled refuses
+    toggle_raises: set = set()  # (name, enabled) pairs set_row_enabled raises on
+    row_enabled: dict = {}  # name -> live toggle state, for require_current; default enabled
     upload_hit_filter_limit = False
 
     def __init__(self, *args, **kwargs):
@@ -64,8 +66,12 @@ class FakeSync:
             raise type(self).read_error
         return type(self).live_script
 
-    async def set_row_enabled(self, index, name, enabled):
+    async def set_row_enabled(self, index, name, enabled, expected_names=None, require_current=None):
+        if (name, enabled) in type(self).toggle_raises:
+            raise RuntimeError(f"row for {name} detached")
         if (name, enabled) in type(self).toggle_fails:
+            return False
+        if require_current is not None and type(self).row_enabled.get(name, True) != require_current:
             return False
         type(self).calls.append(("enable" if enabled else "disable", name))
         return True
@@ -124,6 +130,8 @@ def fake_sync(monkeypatch):
     FakeSync.upload_result = True
     FakeSync.hit_limit = False
     FakeSync.toggle_fails = set()
+    FakeSync.toggle_raises = set()
+    FakeSync.row_enabled = {}
     FakeScraper.filters = []
     monkeypatch.setattr(src.scraper.protonmail_sync, "ProtonMailSync", FakeSync)
     monkeypatch.setattr(src.scraper.protonmail_scraper, "ProtonMailScraper", FakeScraper)
@@ -703,6 +711,62 @@ class TestSyncDisablesOnlyReplacedFilters:
         assert "Could not re-enable 1 filter(s)" in result.output
         assert f"- {b.name}" in result.output
         assert "restore --backup latest" in result.output
+
+    def test_reenable_continues_after_exception(self, cli_snapshots_dir, fake_sync):
+        a, b, c = _filter("a@x.com"), _filter("b@x.com"), _filter("c@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([a, b, c])
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        FakeScraper.filters = [a, b, c]
+        fake_sync.upload_result = False
+        fake_sync.toggle_raises = {(a.name, True)}
+
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        # The exception on a's row did not stop b and c being re-enabled
+        assert self._toggled(fake_sync, "enable") == [b.name, c.name]
+        assert "Re-enabled 2 of the 3 filters" in result.output
+        assert "Re-enabled 3 of the 3" not in result.output
+        assert f"- {a.name}: row for {a.name} detached" in result.output
+
+    def test_failed_upload_does_not_enable_user_disabled_filter(self, cli_snapshots_dir, fake_sync):
+        """A filter the user switched off is never disabled by sync, so never re-enabled."""
+        on, off = _filter("on@x.com"), _filter("off@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([on, off])
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        FakeScraper.filters = [on, off.model_copy(update={"enabled": False})]
+        fake_sync.upload_result = False
+
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        assert self._toggled(fake_sync, "disable") == [on.name]
+        assert self._toggled(fake_sync, "enable") == [on.name]
+
+    def test_row_switched_off_since_scrape_is_not_reenabled(self, cli_snapshots_dir, fake_sync):
+        """Scraped enabled, but off by the time sync clicks: left alone, never re-enabled."""
+        a, b = _filter("a@x.com"), _filter("b@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([a, b])
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        FakeScraper.filters = [a, b]
+        fake_sync.row_enabled = {b.name: False}
+        fake_sync.upload_result = False
+
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        assert self._toggled(fake_sync, "disable") == [a.name]
+        assert self._toggled(fake_sync, "enable") == [a.name]
+
+    def test_exception_while_disabling_restores_and_uploads_nothing(self, cli_snapshots_dir, fake_sync):
+        a, b = _filter("a@x.com"), _filter("b@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([a, b])
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        FakeScraper.filters = [a, b]
+        fake_sync.toggle_raises = {(b.name, False)}
+
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        assert "Sync stopped while disabling" in result.output
+        assert not any(c[0] == "upload" for c in fake_sync.calls)
+        assert self._toggled(fake_sync, "enable") == [a.name, b.name]
 
     def test_dry_run_lists_plan(self, account, fake_sync):
         result = runner.invoke(app, ["sync", "--dry-run"])

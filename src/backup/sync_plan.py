@@ -34,6 +34,22 @@ class DisablePlan:
         return self.sieve + self.not_in_script + self.after_backup + self.unreadable
 
 
+def check_disable_candidates(filters: Iterable[ProtonMailFilter]) -> None:
+    """Raise ValueError if any filter is one `sync` must never disable.
+
+    A filter the user had switched off must never be in the set sync
+    disables: after a failed upload that set is switched back on, which
+    would turn on a filter the user wanted off. A Sieve filter is never
+    sync's to disable. Called on the plan and again at the call site, so a
+    later change to either cannot quietly break the rule.
+    """
+    for f in filters:
+        if not f.enabled:
+            raise ValueError(f"refusing to disable '{f.name}': it was not enabled")
+        if f.is_sieve:
+            raise ValueError(f"refusing to disable '{f.name}': it is a Sieve filter")
+
+
 def carried_hashes(
     manifest: Optional[dict], sieve_path: Path, backup_filters: Iterable[ProtonMailFilter],
 ) -> tuple[Set[str], bool]:
@@ -79,4 +95,5 @@ def plan_disable(
             plan.not_in_script.append(f)
         else:
             plan.after_backup.append(f)
+    check_disable_candidates(plan.to_disable)
     return plan

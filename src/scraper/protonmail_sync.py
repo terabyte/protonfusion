@@ -1,7 +1,7 @@
 """Playwright automation for sync/restore operations on ProtonMail."""
 
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from src.scraper import selectors
 from src.scraper.browser import (
@@ -430,16 +430,31 @@ class ProtonMailSync(ProtonMailBrowser):
             logger.info("Filter '%s' already %s", name, "enabled" if enabled else "disabled")
         return True
 
-    async def set_row_enabled(self, index: int, name: str, enabled: bool) -> bool:
+    async def set_row_enabled(
+        self, index: int, name: str, enabled: bool, *,
+        expected_names: Optional[Sequence[str]] = None,
+        require_current: Optional[bool] = None,
+    ) -> bool:
         """Set the toggle of one Custom filters row, identified by position and name.
 
         `index` is the row's position when it was scraped (the filter's
         priority) and `name` its name then. Rows can share a name, so the
-        position picks the row and the name confirms it is still the same
-        one. If the row at `index` has a different name (the list moved),
-        a row is used only if it is the single row with that name. Anything
-        else returns False without clicking, so a filter is never toggled
-        on a guess. Returns True once the row is in the requested state.
+        position picks the row and the name confirms it. The position is
+        trusted only when the row there has that name and, if
+        `expected_names` (every row's name, in order, at scrape time) is
+        given, the list as a whole is unchanged: otherwise a list that moved
+        could put a neighbour with the same name at that position. When the
+        position is not trusted, a row is used only if it is the single row
+        with that name.
+
+        `require_current`, if given, is the state the row must be in before
+        the click (True when disabling a filter that was scraped as enabled).
+        A row in any other state is refused, so a filter the user switched
+        off since the scrape is never recorded as one this run disabled, and
+        so never switched on by a failed sync's re-enable.
+
+        Returns True once the row is in the requested state; False, without
+        clicking, whenever the row cannot be identified with certainty.
         """
         page = self.page
         section = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
@@ -447,12 +462,14 @@ class ProtonMailSync(ProtonMailBrowser):
             logger.warning("Custom filters section not found; not toggling '%s'", name)
             return False
         rows = await section.query_selector_all(selectors.FILTER_TABLE_ROWS)
+        names = [await self._get_filter_name(r) for r in rows]
 
+        list_unchanged = expected_names is None or list(expected_names) == names
         row = None
-        if 0 <= index < len(rows) and await self._get_filter_name(rows[index]) == name:
+        if list_unchanged and 0 <= index < len(rows) and names[index] == name:
             row = rows[index]
         else:
-            same_name = [r for r in rows if await self._get_filter_name(r) == name]
+            same_name = [r for r, n in zip(rows, names) if n == name]
             if len(same_name) == 1:
                 row = same_name[0]
         if row is None:
@@ -464,7 +481,14 @@ class ProtonMailSync(ProtonMailBrowser):
         if not toggle_input or not toggle_label:
             logger.warning("No toggle for filter '%s'", name)
             return False
-        if await toggle_input.is_checked() != enabled:
+        is_checked = await toggle_input.is_checked()
+        if require_current is not None and is_checked != require_current:
+            logger.warning(
+                "Filter '%s' is %s, not %s as scraped; not toggling it", name,
+                "enabled" if is_checked else "disabled", "enabled" if require_current else "disabled",
+            )
+            return False
+        if is_checked != enabled:
             await toggle_label.click()
             await page.wait_for_timeout(1000)
         logger.info("%s filter: %s", "Enabled" if enabled else "Disabled", name)

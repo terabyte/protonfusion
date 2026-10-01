@@ -24,7 +24,7 @@ from src.models.filter_models import ProtonMailFilter, FilterStatus
 from src.models.backup_models import Backup, ArchiveEntry
 from src.backup.backup_manager import BackupManager, unverified_for_deletion
 from src.backup.diff_engine import DiffEngine
-from src.backup.sync_plan import DisablePlan, carried_hashes, plan_disable
+from src.backup.sync_plan import DisablePlan, carried_hashes, check_disable_candidates, plan_disable
 from src.utils.private_files import write_private_file
 from src.parser.filter_parser import parse_scraped_filters
 from src.consolidator.consolidation_engine import ConsolidationEngine
@@ -966,12 +966,16 @@ def _print_disable_plan(plan: DisablePlan, backup_id: str, preview: bool) -> Non
             console.print(f"  [{color}]- {escape(f.name)}")
 
 
-async def _reenable_after_failed_upload(sync_client, disabled: List[ProtonMailFilter], backup_id: str) -> None:
+async def _reenable_after_failed_upload(
+    sync_client, disabled: List[ProtonMailFilter], backup_id: str,
+    expected_names: Optional[List[str]] = None,
+) -> None:
     """Turn back on every filter this sync disabled, after its upload failed.
 
     Otherwise a failed upload leaves neither the old UI filters nor the new
-    script handling mail. Anything that cannot be re-enabled is listed with
-    the `restore` command that brings it back.
+    script handling mail. Every filter is attempted even if an earlier one
+    raised, and each one that is not confirmed back on is listed with why,
+    plus the `restore` command that brings it back.
     """
     if not disabled:
         console.print("[yellow]No filters had been disabled, so nothing else changed.")
@@ -982,22 +986,39 @@ async def _reenable_after_failed_upload(sync_client, disabled: List[ProtonMailFi
     except Exception as e:
         logger.warning("Could not reload the filters page before re-enabling: %s", loggable_text(str(e)))
 
-    failed = []
+    failed: List[tuple] = []  # (filter, reason)
     for f in disabled:
         try:
-            enabled = await sync_client.set_row_enabled(f.priority, f.name, True)
+            if await sync_client.set_row_enabled(f.priority, f.name, True, expected_names=expected_names):
+                continue
+            reason = "its row could not be identified with certainty"
         except Exception as e:
-            logger.warning("Re-enabling '%s' failed: %s", f.name, loggable_text(str(e)))
-            enabled = False
-        if not enabled:
-            failed.append(f)
+            reason = loggable_text(str(e)) or type(e).__name__
+            logger.warning("Re-enabling '%s' failed: %s", f.name, reason)
+        failed.append((f, reason))
 
-    console.print(f"[green]Re-enabled {len(disabled) - len(failed)} of the {len(disabled)} filters this sync disabled.")
+    reenabled = len(disabled) - len(failed)
+    color = "green" if not failed else "yellow"
+    console.print(f"[{color}]Re-enabled {reenabled} of the {len(disabled)} filters this sync disabled.")
     if failed:
         console.print(f"[bold red]Could not re-enable {len(failed)} filter(s); they are still disabled:")
-        for f in failed:
-            console.print(f"  [red]- {escape(f.name)}")
+        for f, reason in failed:
+            console.print(f"  [red]- {escape(f.name)}: {escape(reason)}")
         console.print(f"[yellow]To re-enable them, run: restore --backup {backup_id}")
+
+
+def _scraped_row_names(live_filters: List[ProtonMailFilter]) -> Optional[List[str]]:
+    """Every scraped row's name in list order, or None if the scrape has gaps.
+
+    Lets set_row_enabled check the live list is the one scraped before it
+    trusts a stored row position. If any row did not make it into
+    `live_filters` (its priorities are not exactly 0..n-1) there is no full
+    list to compare, so positions fall back to unique-name matching.
+    """
+    by_priority = sorted(live_filters, key=lambda f: f.priority)
+    if [f.priority for f in by_priority] != list(range(len(by_priority))):
+        return None
+    return [f.name for f in by_priority]
 
 
 def _print_carried_source(from_manifest: bool, backup_id: str) -> None:
@@ -1236,18 +1257,39 @@ def sync(
             # Disable the replaced filters first: ProtonMail limits active
             # filters per plan, so a new Sieve filter can fail to save while
             # they are on. Rows are found by scraped position and name.
+            check_disable_candidates(plan.to_disable)
+            expected_names = _scraped_row_names(live_filters)
             disabled: List[ProtonMailFilter] = []
             not_disabled: List[ProtonMailFilter] = []
             for f in plan.to_disable:
-                if await sync_client.set_row_enabled(f.priority, f.name, False):
+                try:
+                    # require_current: a row the user switched off since the
+                    # scrape is left alone and never joins `disabled`.
+                    ok = await sync_client.set_row_enabled(
+                        f.priority, f.name, False,
+                        expected_names=expected_names, require_current=True,
+                    )
+                except Exception as e:
+                    # The row's state is unknown. It was enabled when scraped,
+                    # so re-enabling it with the rest restores the start state.
+                    console.print(
+                        f"[bold red]Sync stopped while disabling '{escape(f.name)}' "
+                        f"({escape(loggable_text(str(e)))}). Nothing was uploaded."
+                    )
+                    await _reenable_after_failed_upload(
+                        sync_client, disabled + [f], backup_id, expected_names,
+                    )
+                    return False
+                if ok:
                     disabled.append(f)
                 else:
                     not_disabled.append(f)
             console.print(f"[green]Disabled {len(disabled)} filters")
             if not_disabled:
                 console.print(
-                    f"[yellow]Could not find {len(not_disabled)} filter(s) to disable; "
-                    "they stay enabled alongside the Sieve script:"
+                    f"[yellow]Could not disable {len(not_disabled)} filter(s): the row could not be "
+                    "identified with certainty, or was already switched off since the scrape. "
+                    "Any still enabled stay enabled alongside the Sieve script:"
                 )
                 for f in not_disabled:
                     console.print(f"  [yellow]- {escape(f.name)}")
@@ -1270,7 +1312,7 @@ def sync(
                         "count toward it. Disable or delete enough of them by hand (or fold them in "
                         "with 'backup' and 'consolidate'), then re-run sync."
                     )
-                await _reenable_after_failed_upload(sync_client, disabled, backup_id)
+                await _reenable_after_failed_upload(sync_client, disabled, backup_id, expected_names)
                 return False
 
             console.print("[green]Sieve script uploaded successfully!")
