@@ -8,7 +8,7 @@ from src.scraper.browser import (
     ProtonMailBrowser, MODAL_TRANSITION_MS, DROPDOWN_MS,
     ALL_SETTINGS_LOAD_MS, SieveReadError, row_filter_name,
 )
-from src.utils.config import ELEMENT_TIMEOUT_MS
+from src.utils.config import ELEMENT_TIMEOUT_MS, loggable_text
 
 # Maps our model condition types to ProtonMail UI dropdown labels
 CONDITION_TYPE_LABELS = {
@@ -152,7 +152,7 @@ class ProtonMailSync(ProtonMailBrowser):
             return False
 
         except Exception as e:
-            logger.error("Failed to upload Sieve script: %s", e)
+            logger.error("Failed to upload Sieve script: %s", loggable_text(str(e)))
             raise
 
     async def _verify_upload(self, intended: str, filter_name: str) -> bool:
@@ -165,7 +165,7 @@ class ProtonMailSync(ProtonMailBrowser):
         try:
             saved = await self.read_sieve_script(filter_name=filter_name)
         except SieveReadError as e:
-            logger.error("Could not read the Sieve filter back after saving: %s", e)
+            logger.error("Could not read the Sieve filter back after saving: %s", loggable_text(str(e)))
             return False
         if normalize_script(saved) != normalize_script(intended):
             logger.error(
@@ -365,7 +365,7 @@ class ProtonMailSync(ProtonMailBrowser):
             return True
 
         except Exception as e:
-            logger.error("Failed to create filter '%s': %s", name, e)
+            logger.error("Failed to create filter '%s': %s", name, loggable_text(str(e)))
             try:
                 close_btn = await page.query_selector(selectors.FILTER_MODAL_CLOSE)
                 if close_btn:

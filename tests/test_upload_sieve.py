@@ -132,3 +132,18 @@ def test_filter_left_disabled_fails():
 ])
 def test_normalize_script_only_ignores_trailing_whitespace(a, b, same):
     assert (normalize_script(a) == normalize_script(b)) is same
+
+
+def test_upload_error_is_logged_without_url_secrets(caplog):
+    """A Playwright error naming a fragment-bearing URL must not reach the log raw."""
+    sync = ProtonMailSync()
+    sync.page = FakeUploadPage()
+
+    async def open_by_name(name):
+        raise TimeoutError('Timeout exceeded, navigated to "https://account.proton.me/x#sk=SECRET"')
+
+    sync._open_sieve_filter_by_name = open_by_name
+    with pytest.raises(TimeoutError):
+        asyncio.run(sync.upload_sieve(SCRIPT))
+    assert "Timeout exceeded" in caplog.text
+    assert "SECRET" not in caplog.text

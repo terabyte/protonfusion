@@ -671,6 +671,14 @@ class TestSyncDisablesOnlyReplacedFilters:
         assert "Re-enabled 1 of the 1 filters" in result.output
         assert "Could not re-enable" not in result.output
 
+    def test_upload_error_printed_without_url_secrets(self, account, fake_sync):
+        fake_sync.upload_result = RuntimeError('navigated to "https://account.proton.me/x#sk=SECRET"')
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 1, result.output
+        assert "Failed to upload Sieve script" in result.output
+        assert "account.proton.me" in result.output
+        assert "SECRET" not in result.output
+
     def test_filter_limit_named_on_failure(self, account, fake_sync):
         fake_sync.upload_result = False
         fake_sync.hit_limit = True

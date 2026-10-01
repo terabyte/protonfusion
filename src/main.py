@@ -18,7 +18,7 @@ from rich.markup import escape
 from rich import print as rprint
 
 from src.utils.config import (
-    load_credentials, SNAPSHOTS_DIR, TOOL_VERSION,
+    load_credentials, loggable_text, SNAPSHOTS_DIR, TOOL_VERSION,
 )
 from src.models.filter_models import ProtonMailFilter, FilterStatus
 from src.models.backup_models import Backup, ArchiveEntry
@@ -980,14 +980,14 @@ async def _reenable_after_failed_upload(sync_client, disabled: List[ProtonMailFi
         # The failed upload may have left the Sieve editor open over the list
         await sync_client.navigate_to_filters()
     except Exception as e:
-        logger.warning("Could not reload the filters page before re-enabling: %s", e)
+        logger.warning("Could not reload the filters page before re-enabling: %s", loggable_text(str(e)))
 
     failed = []
     for f in disabled:
         try:
             enabled = await sync_client.set_row_enabled(f.priority, f.name, True)
         except Exception as e:
-            logger.warning("Re-enabling '%s' failed: %s", f.name, e)
+            logger.warning("Re-enabling '%s' failed: %s", f.name, loggable_text(str(e)))
             enabled = False
         if not enabled:
             failed.append(f)
@@ -1261,7 +1261,7 @@ def sync(
                 upload_error = e
 
             if not success:
-                reason = f" ({escape(str(upload_error))})" if upload_error else ""
+                reason = f" ({escape(loggable_text(str(upload_error)))})" if upload_error else ""
                 console.print(f"[bold red]Failed to upload Sieve script{reason}.")
                 if sync_client.upload_hit_filter_limit:
                     console.print(
