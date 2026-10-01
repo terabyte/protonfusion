@@ -221,6 +221,28 @@ class TestCleanupGuard:
         assert result.exit_code == 0, result.output
         assert fake_sync.deleted == ["Partial"]
 
+    @pytest.mark.parametrize("backed_up, reason", [
+        (_raw_filter("Labelled", enabled=False, actions=[]), "differs from the live filter"),
+        (_raw_filter("Labelled", enabled=False, raw=False), "no raw evidence"),
+    ])
+    def test_second_run_still_refuses(self, cli_snapshots_dir, fake_scraper, fake_sync, backed_up, reason):
+        """The auto-archive must not turn a refused live filter into its own backup copy."""
+        _backup(cli_snapshots_dir, [backed_up])
+        fake_scraper.raw_filters = [_raw_filter("Labelled", enabled=False)]
+        for _ in range(2):
+            result = runner.invoke(app, ["cleanup", "--headless"], input="y\n")
+            assert result.exit_code == 1, result.output
+            assert reason in result.output
+        assert fake_sync.deleted == []
+
+    def test_allow_incomplete_still_archives(self, cli_snapshots_dir, fake_scraper, fake_sync):
+        """With the override the filter is deleted, so the archive keeps the live copy."""
+        _backup(cli_snapshots_dir, [_raw_filter("Partial", enabled=False, issues=["x"])])
+        fake_scraper.raw_filters = [_raw_filter("Partial", enabled=False)]
+        runner.invoke(app, ["cleanup", "--headless", "--allow-incomplete"], input="y\n")
+        archive = BackupManager(cli_snapshots_dir).load_archive(cli_snapshots_dir / "latest")
+        assert [e.filter.name for e in archive] == ["Partial"]
+
     def test_dry_run_reports_refusal(self, cli_snapshots_dir, fake_scraper, fake_sync):
         fake_scraper.raw_filters = [_raw_filter("Orphan", enabled=False)]
         result = runner.invoke(app, ["cleanup", "--headless", "--dry-run"])

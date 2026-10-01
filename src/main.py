@@ -1164,7 +1164,8 @@ def cleanup(
     the last copy of a rule (e.g. after a refused or failed sync). Sieve filters
     (including the ProtonFusion one) are never deleted, and neither is any filter
     whose name another filter shares, since deletion works by name. Auto-archives
-    disabled filters before deletion to preserve them for future consolidation.
+    disabled filters before deletion to preserve them for future consolidation,
+    except those it refuses, so a refusal holds on the next run too.
     Also refuses (exit 1) to delete any filter without a complete backup copy in the
     latest snapshot, unless --allow-incomplete is given.
     """
@@ -1242,7 +1243,9 @@ def cleanup(
         unverified = unverified_for_deletion(disabled, backed_up)
         unverified_ids = {id(f) for f, _ in unverified}
 
-        # Auto-archive any disabled filters missing from the archive
+        # Auto-archive any disabled filters missing from the archive. Filters
+        # this run refuses are left out: archiving the live copy would give
+        # the next run the "verified backup copy" this run found missing.
         try:
             latest_dir = manager.snapshot_dir_for("latest")
             archive_entries = manager.load_archive(latest_dir)
@@ -1250,6 +1253,8 @@ def cleanup(
             now_ts = datetime.now(timezone.utc).isoformat()
             auto_archived = 0
             for f in disabled:
+                if id(f) in unverified_ids and not allow_incomplete:
+                    continue
                 if f.content_hash not in archive_hashes:
                     archived_f = f.model_copy(deep=True)
                     archived_f.status = FilterStatus.ARCHIVED
