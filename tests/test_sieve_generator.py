@@ -1080,3 +1080,42 @@ def test_generator_refuses_empty_value():
     )
     with pytest.raises(SieveGenerationError, match="empty value"):
         SieveGenerator().generate([cf])
+
+
+class TestAttachmentCondition:
+    """"Has attachment" is Proton's `exists "X-Attached"`, never `true`."""
+
+    def _attachment_rule(self, operator=Operator.HAS, ctype=ConditionType.ATTACHMENTS):
+        return ConsolidatedFilter(
+            name="att",
+            condition_groups=[ConditionGroup(conditions=[
+                FilterCondition(type=ctype, operator=operator, value="x" if ctype != ConditionType.ATTACHMENTS else "")])],
+            actions=[FilterAction(type=ActionType.TRASH)],
+        )
+
+    def test_generates_exists_x_attached(self):
+        script = SieveGenerator().generate([self._attachment_rule()])
+        assert 'if exists "X-Attached" {' in script
+        assert "true" not in script
+
+    def test_in_allof_with_sender(self):
+        cf = ConsolidatedFilter(
+            name="att",
+            condition_groups=[ConditionGroup(logic=LogicType.AND, conditions=[
+                FilterCondition(type=ConditionType.ATTACHMENTS, operator=Operator.HAS),
+                FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="a@x.com"),
+            ])],
+            actions=[FilterAction(type=ActionType.TRASH)],
+        )
+        from src.generator.sieve_rules import script_facts
+        (fact,) = script_facts(SieveGenerator().generate([cf]))
+        assert ("opaque", 'exists "X-Attached"') in fact.conditions
+        assert len(fact.conditions) == 2
+
+    @pytest.mark.parametrize("ctype, operator", [
+        (ConditionType.ATTACHMENTS, Operator.CONTAINS),
+        (ConditionType.SENDER, Operator.HAS),
+    ])
+    def test_operator_type_mismatch_refused(self, ctype, operator):
+        with pytest.raises(SieveGenerationError, match="does not apply"):
+            SieveGenerator().generate([self._attachment_rule(operator, ctype)])

@@ -175,6 +175,24 @@ def empty_value_problem(entry) -> Optional[str]:
     return None
 
 
+def operator_mismatch_problem(entry) -> Optional[str]:
+    """Describe a condition whose operator does not apply to its type.
+
+    "has" is the attachment test and the attachment test takes only "has".
+    Any other pairing (attachments contains X, sender has X) has no defined
+    Sieve form, and guessing one could widen the rule.
+    """
+    if isinstance(entry, dict):
+        ctype, operator = entry.get("type"), entry.get("operator")
+    else:
+        ctype, operator = getattr(entry, "type", None), getattr(entry, "operator", None)
+    ctype = getattr(ctype, "value", ctype)
+    operator = getattr(operator, "value", operator)
+    if (ctype == ConditionType.ATTACHMENTS.value) != (operator == Operator.HAS.value):
+        return f"operator {operator!r} does not apply to condition type {ctype!r}"
+    return None
+
+
 class ProtonMailFilter(BaseModel):
     name: str
     enabled: bool = True
@@ -232,7 +250,7 @@ class ProtonMailFilter(BaseModel):
                     entry = migrate_legacy_action(entry)
                 problem = unknown_value_problem(entry, enum_fields) if isinstance(entry, dict) else None
                 if problem is None and key == "conditions":
-                    problem = empty_value_problem(entry)
+                    problem = operator_mismatch_problem(entry) or empty_value_problem(entry)
                 if problem:
                     shown = entry.model_dump(mode="json") if isinstance(entry, BaseModel) else entry
                     issues.append(f"{kind} {index}: {problem}; dropped {json.dumps(shown, default=str)}")

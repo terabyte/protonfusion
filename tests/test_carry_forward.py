@@ -313,3 +313,25 @@ class TestFilterFactsOfUngeneratableFilter:
             SieveGenerator().generate(ConsolidationEngine().consolidate(
                 [_filter("a@x.com")], include_disabled=True)[0]), ""))
         assert not facts <= live
+
+
+class TestAttachmentCarryForward:
+    """Only the generator's `exists "X-Attached"` maps back to an attachment condition."""
+
+    def test_exists_x_attached_round_trips(self):
+        facts = script_facts('if exists "X-Attached" { fileinto "Receipts"; }')
+        (f,), unconvertible = facts_to_filters(facts)
+        assert unconvertible == []
+        (cond,) = f.conditions
+        assert (cond.type, cond.operator) == (ConditionType.ATTACHMENTS, Operator.HAS)
+        assert _generated_facts([f]) == facts
+
+    @pytest.mark.parametrize("sieve", [
+        'if true { fileinto "trash"; }',
+        'fileinto "trash";',
+        'if allof (true, address :is "From" "a") { fileinto "trash"; }',
+    ])
+    def test_true_is_not_an_attachment_condition(self, sieve):
+        filters, unconvertible = facts_to_filters(script_facts(sieve))
+        assert filters == []
+        assert unconvertible

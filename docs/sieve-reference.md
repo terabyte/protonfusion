@@ -59,6 +59,9 @@ Sieve extensions are declared via `require` statements at the top of the script.
 | Subject matches "X*" | `header :matches "Subject" "X*"` |
 | Sender begins with "X" | `address :matches "From" "X*"` |
 | Sender ends with "X" | `address :matches "From" "*X"` |
+| Has attachment | `exists "X-Attached"` |
+
+"Has attachment" is written exactly as Proton's own wizard-to-Sieve translator writes it ([ProtonMail/sieve.js](https://github.com/ProtonMail/sieve.js), `TEST_NODES.attachment` in `src/constants.js`): Proton sets an `X-Attached` header on mail with attachments, and `exists` is a base RFC 5228 test. Older versions wrote it as `true`, which matches every message. The attachment test takes only the "has" operator, and "has" applies only to attachments; any other pairing marks the filter incomplete and the generator refuses it.
 
 A "matches" value is the user's own pattern and is written as is. A begins-with or ends-with value is literal text, so any `*`, `?` or `\` in it is escaped (`\*`, `\?`, `\\`) before the wildcard is added; "begins with `a*b`" becomes `"a\\*b*"` in the script (the backslash is doubled again by Sieve string quoting).
 
@@ -195,6 +198,7 @@ Only the marked section is compared. User rules outside the markers are kept by 
 - **Case.** Test values are compared case-insensitively, as the default `i;ascii-casemap` comparator matches them, and are listed lowercased. Action arguments such as folder names are compared exactly.
 - **A section that does not parse** at all causes a refusal, and so does a BEGIN marker with no END marker after it.
 - **Begins-with / ends-with written by older versions.** Before the wildcard fix these were emitted without the `*` (`address :matches "From" "news"`, an exact match). When the new section has the same rule with the corrected pattern (`"news*"` or `"*news"`) and the same actions, the check lists it under "Corrected" instead of as a drop plus an add: the corrected pattern matches everything the old one did. `cleanup` does not treat the old form as covering a begins-with filter, so run `sync` first.
+- **Attachment conditions written by older versions** were `true`, which matches every message. The new section has `exists "X-Attached"` instead, so the old rule shows as a dropped pair (it is not listed as a correction, because the new test is narrower: mail without attachments stops matching, which is the intended behaviour). Review it and pass `--allow-rule-removal`. `consolidate --keep-live-rules` does not carry a `true` test forward.
 - **Trash, Spam and Inbox written by older versions.** A live rule whose action is `discard;` (the old "Move to Trash"), `fileinto "Spam";` or `fileinto "Inbox - Default";` is listed under "Corrected" when the new section has the same rule with `fileinto "trash";` / `"spam"` / `"inbox"`. `consolidate --keep-live-rules` carries such a rule forward in its corrected form. As with the wildcard fix, `cleanup` does not treat the old form as covering the filter, so run `sync` first.
 
 ## Rule Ordering

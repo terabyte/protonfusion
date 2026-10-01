@@ -7,6 +7,7 @@ from typing import List, Optional, Set
 from src.models.filter_models import (
     ConsolidatedFilter, ConditionGroup, FilterCondition, FilterAction,
     ConditionType, Operator, ActionType, LogicType, empty_value_problem,
+    operator_mismatch_problem,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,14 @@ EXTENSION_MAP = {
 # Proton's Sieve name for the Trash folder (Proton's Sieve docs and
 # ProtonMail/sieve.js both write `fileinto "trash";`).
 TRASH_FOLDER = "trash"
+
+
+# The wizard's "has attachment" condition, exactly as Proton's own
+# wizard-to-Sieve translator writes it: ProtonMail/sieve.js,
+# src/constants.js TEST_NODES.attachment = {Type: 'Exists', Headers:
+# ['X-Attached']}, used by toTree.js buildCondition for 'attachments'.
+# `exists` is a base RFC 5228 test (section 5.5), so it needs no require.
+ATTACHMENT_TEST = 'exists "X-Attached"'
 
 
 class SieveGenerationError(ValueError):
@@ -235,11 +244,11 @@ class SieveGenerator:
         every message (the model flags such a filter incomplete, so this
         only fires for a condition built some other way).
         """
-        problem = empty_value_problem(cond)
+        problem = operator_mismatch_problem(cond) or empty_value_problem(cond)
         if problem:
             raise SieveGenerationError(
-                f"Condition {cond.type.value} {cond.operator.value} has an {problem}, "
-                "which would match every message. Refusing to generate it."
+                f"Condition {cond.type.value} {cond.operator.value}: {problem}. "
+                "It has no Sieve form that would not widen the rule; refusing to generate it."
             )
         comparator = self._operator_to_sieve(cond.operator)
 
@@ -276,7 +285,7 @@ class SieveGenerator:
         elif cond.type == ConditionType.SUBJECT:
             return f'header {comparator} "Subject" {value_str}'
         elif cond.type == ConditionType.ATTACHMENTS:
-            return "true"  # Simplified - ProtonMail handles attachments differently
+            return ATTACHMENT_TEST
         elif cond.type == ConditionType.HEADER:
             return f'header {comparator} "X-Custom" {value_str}'
 
@@ -290,9 +299,9 @@ class SieveGenerator:
             Operator.MATCHES: ":matches",      # value is the user's own pattern
             Operator.STARTS_WITH: ":matches",  # value* (see _condition_to_sieve)
             Operator.ENDS_WITH: ":matches",    # *value
-            Operator.HAS: ":contains",
         }
-        return mapping.get(op, ":contains")
+        # HAS is only valid for attachments, which uses no comparator
+        return mapping.get(op, "")
 
     def _generate_actions(self, f: ConsolidatedFilter) -> List[str]:
         """Generate Sieve action statements."""

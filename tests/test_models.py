@@ -673,3 +673,14 @@ class TestEmptyConditionValue:
         })
         assert f.is_complete
         assert len(f.conditions) == 1
+
+
+@pytest.mark.parametrize("cond", [
+    {"type": "attachments", "operator": "contains", "value": "pdf"},
+    {"type": "sender", "operator": "has", "value": "a@x.com"},
+])
+def test_operator_type_mismatch_is_quarantined(cond):
+    f = ProtonMailFilter.model_validate({"name": "m", "conditions": [cond]})
+    assert not f.is_complete
+    assert f.conditions == []
+    assert "does not apply" in f.scrape_issues[0]

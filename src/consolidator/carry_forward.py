@@ -29,7 +29,7 @@ from typing import AbstractSet, Dict, Iterable, List, Optional, Set, Tuple
 from src.generator.sieve_generator import (
     SieveGenerationError, SieveGenerator, escape_match_literal, unescape_match_literal,
 )
-from src.generator.sieve_generator import TRASH_FOLDER
+from src.generator.sieve_generator import ATTACHMENT_TEST, TRASH_FOLDER
 from src.generator.sieve_rules import (
     Atom, Fact, _tokenize, correct_legacy_actions, describe_atom, script_facts,
 )
@@ -69,8 +69,10 @@ _HEADERS_TO_TYPE = {
 
 def _atom_to_condition(atom: Atom) -> Optional[FilterCondition]:
     """Map one test atom back to a FilterCondition, or None if not representable."""
-    if atom == ("true",):
-        # SieveGenerator emits a bare `true` test for attachment conditions
+    if atom == ("opaque", ATTACHMENT_TEST):
+        # The generator's "has attachment" test. A bare `true` (what older
+        # versions wrote for it, and what a top-level action parses to)
+        # matches every message, so it maps to no condition at all.
         return FilterCondition(type=ConditionType.ATTACHMENTS, operator=Operator.HAS, value="")
     if len(atom) != 6:
         return None
