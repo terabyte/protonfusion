@@ -2,7 +2,7 @@
 
 import logging
 import re
-from typing import List, Set
+from typing import List, Optional, Set
 
 from src.models.filter_models import (
     ConsolidatedFilter, ConditionGroup, FilterCondition, FilterAction,
@@ -24,6 +24,48 @@ EXTENSION_MAP = {
     ActionType.STAR: "imap4flags",
     ActionType.ARCHIVE: "fileinto",
 }
+
+
+# Characters with special meaning in a :matches pattern (RFC 5228 section
+# 2.7.1): "*" and "?" are wildcards and backslash escapes the next character.
+_MATCH_SPECIAL = ("\\", "*", "?")
+
+
+def escape_match_literal(value: str) -> str:
+    """Escape a literal value so a :matches pattern matches it verbatim.
+
+    Used for begins-with / ends-with, whose values are plain text that the
+    generator wraps in a "*" wildcard. Without this, a "*" or "?" typed in the
+    value would act as a wildcard. The result still needs the usual Sieve
+    string escaping when it is written into a quoted string.
+    """
+    out = []
+    for ch in value:
+        if ch in _MATCH_SPECIAL:
+            out.append("\\")
+        out.append(ch)
+    return "".join(out)
+
+
+def unescape_match_literal(pattern: str) -> Optional[str]:
+    """Inverse of escape_match_literal, or None if the pattern has a live wildcard.
+
+    A trailing lone backslash is kept as a literal backslash, matching how
+    Sieve implementations treat it.
+    """
+    out = []
+    i = 0
+    while i < len(pattern):
+        ch = pattern[i]
+        if ch == "\\" and i + 1 < len(pattern):
+            out.append(pattern[i + 1])
+            i += 2
+            continue
+        if ch in ("*", "?"):
+            return None
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 class SieveGenerator:
@@ -164,6 +206,13 @@ class SieveGenerator:
             else:
                 values.append(v)
 
+        # begins-with / ends-with become a :matches pattern around the literal
+        # value, so the value's own wildcard characters must be escaped first.
+        if cond.operator == Operator.STARTS_WITH:
+            values = [escape_match_literal(v) + "*" for v in values]
+        elif cond.operator == Operator.ENDS_WITH:
+            values = ["*" + escape_match_literal(v) for v in values]
+
         if len(values) == 1:
             value_str = f'"{self._escape_sieve(values[0])}"'
         else:
@@ -188,9 +237,9 @@ class SieveGenerator:
         mapping = {
             Operator.CONTAINS: ":contains",
             Operator.IS: ":is",
-            Operator.MATCHES: ":matches",
-            Operator.STARTS_WITH: ":matches",  # Uses wildcard pattern
-            Operator.ENDS_WITH: ":matches",    # Uses wildcard pattern
+            Operator.MATCHES: ":matches",      # value is the user's own pattern
+            Operator.STARTS_WITH: ":matches",  # value* (see _condition_to_sieve)
+            Operator.ENDS_WITH: ":matches",    # *value
             Operator.HAS: ":contains",
         }
         return mapping.get(op, ":contains")

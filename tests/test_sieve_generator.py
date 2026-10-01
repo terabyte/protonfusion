@@ -956,3 +956,40 @@ def test_scraped_labels_end_to_end():
     assert script.count('fileinto "Red";') == 2  # one per rule, both rules keep it
     assert script.count('fileinto "Blue";') == 1
     assert script.count('fileinto "Work";') == 2
+
+
+def _single_condition(operator, value, ctype=ConditionType.SENDER):
+    return ConsolidatedFilter(
+        name="Test",
+        condition_groups=[ConditionGroup(conditions=[
+            FilterCondition(type=ctype, operator=operator, value=value)
+        ])],
+        actions=[FilterAction(type=ActionType.DELETE)],
+    )
+
+
+class TestWildcardOperators:
+    """begins with / ends with become :matches patterns with an explicit wildcard."""
+
+    def test_starts_with_appends_wildcard(self):
+        script = SieveGenerator().generate([_single_condition(Operator.STARTS_WITH, "news")])
+        assert 'address :matches "From" "news*"' in script
+
+    def test_ends_with_prepends_wildcard(self):
+        script = SieveGenerator().generate([_single_condition(Operator.ENDS_WITH, "@x.com")])
+        assert 'address :matches "From" "*@x.com"' in script
+
+    def test_each_value_in_a_list_gets_the_wildcard(self):
+        script = SieveGenerator().generate([_single_condition(Operator.STARTS_WITH, "a|b")])
+        assert 'address :matches "From" ["a*", "b*"]' in script
+
+    def test_literal_wildcard_characters_are_escaped(self):
+        """A "*" or "?" typed into a begins-with value is matched literally."""
+        script = SieveGenerator().generate(
+            [_single_condition(Operator.STARTS_WITH, "a*b?c\\d", ctype=ConditionType.SUBJECT)])
+        # Pattern a\*b\?c\\d* , then Sieve string escaping doubles each backslash
+        assert r'header :matches "Subject" "a\\*b\\?c\\\\d*"' in script
+
+    def test_matches_value_is_the_users_pattern(self):
+        script = SieveGenerator().generate([_single_condition(Operator.MATCHES, "*@spam.?om")])
+        assert 'address :matches "From" "*@spam.?om"' in script

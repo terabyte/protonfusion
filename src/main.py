@@ -840,6 +840,18 @@ def _rule_preservation_check(
         f"({result.new_fact_count} condition/action pairs)\n"
         f"Added: {len(result.added)}   Dropped: {len(result.dropped)}"
     )
+    if result.wildcard_fixes:
+        fix_lines = [
+            "",
+            f"[yellow]Corrected: {len(result.wildcard_fixes)} begins-with/ends-with conditions.[/]",
+            "Older ProtonFusion versions wrote these without the * wildcard, so they "
+            "only matched the exact value. The new section adds the wildcard; these "
+            "are not dropped rules.",
+        ]
+        for old, new in result.wildcard_fixes:
+            fix_lines.append(f"  [yellow]~ {escape(old.describe())}[/]")
+            fix_lines.append(f"    [green]{escape(new.describe())}[/]")
+        summary += "\n" + "\n".join(fix_lines)
     if result.is_safe:
         console.print(Panel(
             f"[bold green]No rules dropped.[/]\n\n{summary}",

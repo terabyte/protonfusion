@@ -56,6 +56,10 @@ Sieve extensions are declared via `require` statements at the top of the script.
 | Recipient is "X" | `address :is "To" "X"` |
 | Subject contains "X" | `header :contains "Subject" "X"` |
 | Subject matches "X*" | `header :matches "Subject" "X*"` |
+| Sender begins with "X" | `address :matches "From" "X*"` |
+| Sender ends with "X" | `address :matches "From" "*X"` |
+
+A "matches" value is the user's own pattern and is written as is. A begins-with or ends-with value is literal text, so any `*`, `?` or `\` in it is escaped (`\*`, `\?`, `\\`) before the wildcard is added; "begins with `a*b`" becomes `"a\\*b*"` in the script (the backslash is doubled again by Sieve string quoting).
 
 ### Array Values
 
@@ -173,6 +177,7 @@ Only the marked section is compared. User rules outside the markers are kept by 
 - **Constructs ProtonFusion does not generate are compared by text.** `not`, `size`, `exists`, relational matches, `elsif`/`else` chains and nested `if` blocks become opaque entries that only count as kept if the new section contains the identical construct. This fails closed: hand edits inside the section cause a refusal rather than a silent loss.
 - **Case.** Test values are compared case-insensitively, as the default `i;ascii-casemap` comparator matches them, and are listed lowercased. Action arguments such as folder names are compared exactly.
 - **A section that does not parse** at all causes a refusal.
+- **Begins-with / ends-with written by older versions.** Before the wildcard fix these were emitted without the `*` (`address :matches "From" "news"`, an exact match). When the new section has the same rule with the corrected pattern (`"news*"` or `"*news"`) and the same actions, the check lists it under "Corrected" instead of as a drop plus an add: the corrected pattern matches everything the old one did. `cleanup` does not treat the old form as covering a begins-with filter, so run `sync` first.
 
 ## Rule Ordering
 

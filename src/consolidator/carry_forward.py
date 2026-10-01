@@ -20,7 +20,9 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
-from src.generator.sieve_generator import SieveGenerator
+from src.generator.sieve_generator import (
+    SieveGenerator, escape_match_literal, unescape_match_literal,
+)
 from src.generator.sieve_rules import Atom, Fact, _tokenize, describe_atom, script_facts
 from src.models.filter_models import (
     ActionType, ConditionGroup, ConditionType, ConsolidatedFilter, FilterAction,
@@ -59,10 +61,33 @@ def _atom_to_condition(atom: Atom) -> Optional[FilterCondition]:
     operator = _MATCH_TO_OPERATOR.get(match)
     if ctype is None or operator is None or addrpart != ":all" or comparator != "i;ascii-casemap":
         return None
+    if operator == Operator.MATCHES:
+        operator, value = _matches_operator(value)
     # The generator splits values on "|" and ", ", so such values cannot round-trip
     if "|" in value or ", " in value or not value:
         return None
     return FilterCondition(type=ctype, operator=operator, value=value)
+
+
+def _matches_operator(pattern: str) -> Tuple[Operator, str]:
+    """Classify a :matches pattern as begins-with, ends-with, or a raw pattern.
+
+    SieveGenerator writes begins-with as ``escaped*`` and ends-with as
+    ``*escaped``, so a pattern of exactly that shape maps back to the friendlier
+    operator and its literal value. Anything else stays a MATCHES pattern. The
+    re-escape check keeps the mapping exact, so regeneration reproduces the
+    same pattern byte for byte.
+    """
+    for operator, literal_part, wrap in (
+        (Operator.STARTS_WITH, pattern[:-1], lambda v: v + "*"),
+        (Operator.ENDS_WITH, pattern[1:], lambda v: "*" + v),
+    ):
+        if len(pattern) < 2 or wrap(literal_part) != pattern:
+            continue
+        literal = unescape_match_literal(literal_part)
+        if literal and wrap(escape_match_literal(literal)) == pattern:
+            return operator, literal
+    return Operator.MATCHES, pattern
 
 
 def _action_text_to_action(text: str) -> Optional[FilterAction]:

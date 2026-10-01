@@ -189,3 +189,39 @@ class TestConsolidateKeepLiveRules:
         result = runner.invoke(app, ["consolidate", "--keep-live-rules"])
         assert result.exit_code == 0
         assert "could not be converted" in result.output
+
+
+class TestWildcardOperatorsCarryForward:
+    """Live :matches patterns of the generated begins/ends-with shape come back as those operators."""
+
+    @pytest.mark.parametrize("pattern, operator, value", [
+        ("news*", Operator.STARTS_WITH, "news"),
+        ("*@x.com", Operator.ENDS_WITH, "@x.com"),
+        ("a\\\\*b*", Operator.STARTS_WITH, "a*b"),
+        ("a*b*", Operator.MATCHES, "a*b*"),
+        ("*news*", Operator.MATCHES, "*news*"),
+        ("news", Operator.MATCHES, "news"),
+        ("*", Operator.MATCHES, "*"),
+    ])
+    def test_pattern_maps_to_operator(self, pattern, operator, value):
+        sieve = f'if address :matches "From" "{pattern}" {{ discard; }}'
+        (f,), unconvertible = facts_to_filters(script_facts(sieve))
+        assert unconvertible == []
+        (cond,) = f.conditions
+        assert (cond.operator, cond.value) == (operator, value)
+        assert _generated_facts([f]) == script_facts(sieve)
+
+    def test_round_trip_of_generated_begins_and_ends_with(self):
+        filters = [
+            ProtonMailFilter(
+                name=f"{op.value}",
+                conditions=[FilterCondition(type=ConditionType.SUBJECT, operator=op, value=v)],
+                actions=[FilterAction(type=ActionType.DELETE)],
+            )
+            for op, v in [(Operator.STARTS_WITH, "Re: [x]"), (Operator.ENDS_WITH, "?!*")]
+        ]
+        facts = _generated_facts(filters)
+        carried, unconvertible = facts_to_filters(facts)
+        assert unconvertible == []
+        assert {c.operator for f in carried for c in f.conditions} == {Operator.STARTS_WITH, Operator.ENDS_WITH}
+        assert _generated_facts(carried) == facts
