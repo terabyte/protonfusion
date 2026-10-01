@@ -30,6 +30,23 @@ class ConsolidationReport:
     sieve_skipped: int = 0  # Sieve filters, never consolidated
     groups: Dict[str, int] = field(default_factory=dict)  # action -> count of merged filters
     reduction_percent: float = 0.0
+    # Filters that would have been selected but were not fully read
+    # (not is_complete). Left out unless allow_incomplete; listed either way.
+    incomplete_excluded: List[ProtonMailFilter] = field(default_factory=list)
+    incomplete_included: List[ProtonMailFilter] = field(default_factory=list)
+
+
+@dataclass
+class _Selection:
+    """What _select_filters chose, and the counts of what it passed over."""
+    selected: List[ProtonMailFilter] = field(default_factory=list)
+    disabled_skipped: int = 0
+    disabled_included: int = 0
+    archived_count: int = 0
+    excluded_count: int = 0
+    sieve_skipped: int = 0
+    incomplete_excluded: List[ProtonMailFilter] = field(default_factory=list)
+    incomplete_included: List[ProtonMailFilter] = field(default_factory=list)
 
 
 def _select_filters(
@@ -38,63 +55,75 @@ def _select_filters(
     synced_filter_hashes: Optional[Set[str]] = None,
     archived_filters: Optional[List[ProtonMailFilter]] = None,
     exclude_names: Optional[Set[str]] = None,
-) -> tuple[List[ProtonMailFilter], int, int, int, int, int]:
+    allow_incomplete: bool = False,
+) -> _Selection:
     """Select which filters to process based on status and sync manifest.
 
     Sieve filters are never selected: their conditions and actions are empty
     because the filter is a script, so consolidating one would emit an
     unconditional `keep;` that says nothing about what the script does.
 
-    Returns (selected_filters, disabled_skipped, disabled_included, archived_count,
-    excluded_count, sieve_skipped).
+    A filter that was not fully read (not is_complete) is left out unless
+    allow_incomplete: what was read of it is only part of the rule, and a
+    part can be wider than the whole. An AND filter missing one condition
+    matches more mail, and one whose only condition was dropped matches all
+    of it, so a delete action would delete everything.
     """
     _exclude_names = exclude_names or set()
-    selected = []
-    disabled_skipped = 0
-    disabled_included = 0
-    excluded_count = 0
-    sieve_skipped = 0
+    selection = _Selection()
+
+    def take(f: ProtonMailFilter) -> bool:
+        """Select f unless it is incomplete and not allowed; True if selected."""
+        if f.is_complete:
+            selection.selected.append(f)
+            return True
+        if allow_incomplete:
+            selection.selected.append(f)
+            selection.incomplete_included.append(f)
+            return True
+        selection.incomplete_excluded.append(f)
+        return False
 
     # Always include archived filters from archive param
     _archived = archived_filters or []
     for f in _archived:
         if f.is_sieve:
-            sieve_skipped += 1
+            selection.sieve_skipped += 1
             continue
         if f.name in _exclude_names:
-            excluded_count += 1
+            selection.excluded_count += 1
             continue
         if f.status == FilterStatus.DEPRECATED:
             continue
-        selected.append(f)
+        take(f)
+    selection.archived_count = len(_archived)
 
     for f in filters:
         if f.is_sieve:
-            sieve_skipped += 1
+            selection.sieve_skipped += 1
             continue
 
-        # DEPRECATED → always skip
+        # DEPRECATED -> always skip
         if f.status == FilterStatus.DEPRECATED:
             continue
 
         # Skip if excluded by name
         if f.name in _exclude_names:
-            excluded_count += 1
+            selection.excluded_count += 1
             continue
 
         if include_disabled:
-            selected.append(f)
-            if not f.enabled:
-                disabled_included += 1
+            if take(f) and not f.enabled:
+                selection.disabled_included += 1
         elif f.enabled:
-            selected.append(f)
+            take(f)
         elif synced_filter_hashes and f.content_hash in synced_filter_hashes:
-            selected.append(f)
-            disabled_included += 1
+            if take(f):
+                selection.disabled_included += 1
         else:
-            disabled_skipped += 1
+            selection.disabled_skipped += 1
 
-    return selected, disabled_skipped, disabled_included, len(_archived), excluded_count, sieve_skipped
+    return selection
 
 
 class ConsolidationEngine:
@@ -107,23 +136,34 @@ class ConsolidationEngine:
         synced_filter_hashes: Optional[Set[str]] = None,
         archived_filters: Optional[List[ProtonMailFilter]] = None,
         exclude_names: Optional[Set[str]] = None,
+        allow_incomplete: bool = False,
     ) -> tuple[List[ConsolidatedFilter], ConsolidationReport]:
-        """Apply all consolidation strategies and return optimized filters + report."""
+        """Apply all consolidation strategies and return optimized filters + report.
+
+        Incomplete filters are left out (and listed in the report) unless
+        allow_incomplete; see _select_filters.
+        """
         report = ConsolidationReport()
         report.original_count = len(filters)
 
-        selected, disabled_skipped, disabled_included, archived_count, excluded_count, sieve_skipped = _select_filters(
+        selection = _select_filters(
             filters, include_disabled, synced_filter_hashes, archived_filters, exclude_names,
+            allow_incomplete=allow_incomplete,
         )
+        selected = selection.selected
         report.enabled_count = len(selected)
-        report.disabled_skipped = disabled_skipped
-        report.disabled_included = disabled_included
-        report.archived_count = archived_count
-        report.excluded_count = excluded_count
-        report.sieve_skipped = sieve_skipped
+        report.disabled_skipped = selection.disabled_skipped
+        report.disabled_included = selection.disabled_included
+        report.archived_count = selection.archived_count
+        report.excluded_count = selection.excluded_count
+        report.sieve_skipped = selection.sieve_skipped
+        report.incomplete_excluded = selection.incomplete_excluded
+        report.incomplete_included = selection.incomplete_included
 
-        logger.info("Starting consolidation: %d total, %d selected, %d disabled-skipped, %d disabled-included, %d archived, %d excluded",
-                     len(filters), len(selected), disabled_skipped, disabled_included, archived_count, excluded_count)
+        logger.info("Starting consolidation: %d total, %d selected, %d disabled-skipped, %d disabled-included, "
+                    "%d archived, %d excluded, %d incomplete left out",
+                    len(filters), len(selected), selection.disabled_skipped, selection.disabled_included,
+                    selection.archived_count, selection.excluded_count, len(selection.incomplete_excluded))
 
         # Strategy 1: Group by action
         consolidated = group_by_action(selected)
@@ -159,10 +199,15 @@ class ConsolidationEngine:
         archived_filters: Optional[List[ProtonMailFilter]] = None,
         exclude_names: Optional[Set[str]] = None,
     ) -> dict:
-        """Analyze filters without consolidating. Returns statistics."""
-        selected, disabled_skipped, disabled_included, archived_count, excluded_count, sieve_skipped = _select_filters(
+        """Analyze filters without consolidating. Returns statistics.
+
+        Selects as consolidate does, so incomplete filters are not counted.
+        """
+        selection = _select_filters(
             filters, include_disabled, synced_filter_hashes, archived_filters, exclude_names,
         )
+        selected = selection.selected
+        disabled_included = selection.disabled_included
         disabled = len(filters) - len(selected)
 
         # Count by action type

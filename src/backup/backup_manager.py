@@ -295,13 +295,25 @@ class BackupManager:
     def write_manifest(
         self, snapshot_dir: Path, filters: list, sieve_file: str,
         without_evidence: Optional[List[str]] = None,
+        incomplete_excluded: Optional[List[ProtonMailFilter]] = None,
+        incomplete_included: Optional[List[ProtonMailFilter]] = None,
     ):
         """Write manifest.json into a snapshot directory.
 
         `without_evidence` names the filters in the script that have no raw
         scrape evidence (backed up before format 1.1); `sync` refuses while
-        it is non-empty.
+        it is non-empty. `incomplete_excluded` and `incomplete_included`
+        are the filters not fully read when backed up that consolidate left
+        out of the script, or put in under --allow-incomplete; each is
+        recorded with its hash and scrape issues.
         """
+        def describe(incomplete: Optional[List[ProtonMailFilter]]) -> List[dict]:
+            """Name, hash and scrape issues of each incomplete filter."""
+            return [
+                {"name": f.name, "content_hash": f.content_hash, "scrape_issues": list(f.scrape_issues)}
+                for f in incomplete or []
+            ]
+
         manifest = {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "filter_hashes": sorted(set(f.content_hash for f in filters)),
@@ -309,6 +321,8 @@ class BackupManager:
             "filter_count": len(filters),
             "sieve_file": sieve_file,
             "without_evidence": sorted(set(without_evidence or [])),
+            "incomplete_excluded": describe(incomplete_excluded),
+            "incomplete_included": describe(incomplete_included),
             "synced_at": None,
         }
         manifest_path = snapshot_dir / "manifest.json"

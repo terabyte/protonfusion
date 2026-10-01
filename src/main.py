@@ -511,8 +511,18 @@ def consolidate(
         help="Carry forward rules from the live ProtonFusion Sieve section (as captured in the backup) "
              "that this consolidation would otherwise drop, saving them to archive.json",
     ),
+    allow_incomplete: bool = typer.Option(
+        False, "--allow-incomplete",
+        help="Also build rules from filters that were not fully read when backed up "
+             "(what was read may be wider than the real filter)",
+    ),
 ):
     """Generate optimized Sieve script from backup (local only, no ProtonMail changes).
+
+    Filters that were not fully read when backed up are left out of the
+    script and listed (and recorded in manifest.json), since what was read
+    of one can match more mail than the real filter. --allow-incomplete
+    includes them anyway, with a warning.
 
     After 'cleanup', the live ProtonFusion section may be the only copy of some
     rules. Without --keep-live-rules, consolidation warns when it would drop any
@@ -557,14 +567,6 @@ def consolidate(
         else:
             backup_filters.append(f)
 
-    incomplete = [f for f in backup_filters + archived_filters if not f.is_complete and f.name not in exclude_names]
-    if incomplete:
-        _print_incomplete(
-            incomplete,
-            "Warning: these filters were not fully read when backed up; "
-            "the generated Sieve may be missing their unread parts:",
-        )
-
     if archived_filters:
         console.print(f"[cyan]Including {len(archived_filters)} archived filters from archive")
     if exclude_names:
@@ -586,6 +588,7 @@ def consolidate(
             synced_filter_hashes=synced_filter_hashes,
             archived_filters=archived_filters,
             exclude_names=exclude_names,
+            allow_incomplete=allow_incomplete,
         )
         return consolidated, report, generator.generate(consolidated)
 
@@ -667,6 +670,25 @@ def consolidate(
                 title="Live Rules Would Be Dropped", border_style="red",
             ))
 
+    if report.incomplete_excluded:
+        _print_incomplete(
+            report.incomplete_excluded,
+            f"Left out of the script: {len(report.incomplete_excluded)} filter(s) not fully read "
+            "when backed up. Their rules are NOT in the generated Sieve:",
+        )
+        console.print(
+            "[yellow]What was read of a filter can match more mail than the filter itself (a "
+            "dropped condition widens it), so it is not used. 'sync' leaves these filters enabled. "
+            "Fix the cause and run 'backup' again, or pass --allow-incomplete to include them as read."
+        )
+    if report.incomplete_included:
+        _print_incomplete(
+            report.incomplete_included,
+            f"WARNING: --allow-incomplete given: {len(report.incomplete_included)} filter(s) not fully "
+            "read are IN the script as read. Their rules may be missing parts, or match more mail "
+            "than the real filter (a delete rule would delete more). Check them before 'sync':",
+        )
+
     if output_file:
         out_path = Path(output_file)
     else:
@@ -697,6 +719,8 @@ def consolidate(
     manager.write_manifest(
         snapshot_dir, processed_filters, str(out_path),
         without_evidence=[f.name for f in without_evidence],
+        incomplete_excluded=report.incomplete_excluded,
+        incomplete_included=report.incomplete_included,
     )
     console.print(f"[cyan]Manifest written to snapshot ({len(processed_filters)} filters)")
 
@@ -719,6 +743,7 @@ def consolidate(
         "exclude": sorted(exclude_names) if exclude_names else [],
         "include_disabled": include_disabled,
         "keep_live_rules": keep_live_rules,
+        "allow_incomplete": allow_incomplete,
         "carried_forward": carried_count,
         "created_at": now_ts,
     }
@@ -739,6 +764,10 @@ def consolidate(
         report_lines.append(f"Excluded by name: {report.excluded_count}")
     if report.sieve_skipped > 0:
         report_lines.append(f"Sieve filters (left as they are): {report.sieve_skipped}")
+    if report.incomplete_excluded:
+        report_lines.append(f"[red]Not fully read (left out): {len(report.incomplete_excluded)}[/]")
+    if report.incomplete_included:
+        report_lines.append(f"[red]Not fully read (INCLUDED, --allow-incomplete): {len(report.incomplete_included)}[/]")
     if carried_count > 0:
         report_lines.append(f"Carried forward from live Sieve (new archived filters): {carried_count}")
     report_lines.append(f"Consolidated rules: {report.consolidated_count}")

@@ -72,7 +72,9 @@ If any filter could not be fully read (an action it cannot express such as
 auto-reply, a row it cannot parse, an unknown condition operator),
 `backup` lists each one with the reason and exits with status 1 without
 saving. Pass `--allow-incomplete` to save anyway; those filters are flagged in
-`backup.json` and `cleanup` will not delete them.
+`backup.json`, `consolidate` leaves them out of the script (listing them and
+recording them in `manifest.json`; `--allow-incomplete` includes them as read,
+with a warning) and `cleanup` will not delete them.
 
 ### 5. Analyze consolidation opportunities
 
@@ -162,6 +164,7 @@ A GitHub Actions workflow runs unit + integration tests on every push and pull r
 | `list-snapshots` | Show all available snapshots with statistics |
 | `analyze` | View filter statistics and consolidation opportunities |
 | `consolidate` | Generate optimized Sieve script from a backup |
+| `consolidate --allow-incomplete` | Also build rules from filters not fully read when backed up (left out by default, since what was read can match more mail than the filter) |
 | `consolidate --keep-live-rules` | Also carry forward rules that exist only in the live Sieve section (saved to the archive) |
 | `diff` | Compare two backups or a backup vs current state |
 | `sync` | Upload Sieve script and disable the UI filters whose rules it carries (Sieve filters and filters newer than the backup stay on; all are re-enabled if the upload fails); refuses if the new script drops live rules (`--allow-rule-removal` to override) or was built from pre-1.1 filters with no raw text (`--allow-incomplete` to override) |
