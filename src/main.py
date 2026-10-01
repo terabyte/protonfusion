@@ -35,8 +35,9 @@ from src.utils.private_files import write_private_file
 from src.parser.filter_parser import parse_scraped_filters
 from src.consolidator.consolidation_engine import ConsolidationEngine
 from src.generator.sieve_generator import SieveGenerator, SieveGenerationError, SECTION_BEGIN
-from src.generator.sieve_rules import SieveParseError, compare_sections, extract_section, script_facts
-from src.generator.sieve_rules import _Parser as _SieveParser, _tokenize as _sieve_tokenize
+from src.generator.sieve_rules import (
+    SieveParseError, compare_sections, extract_section, script_facts, validate_script,
+)
 from src.consolidator.carry_forward import facts_to_filters, filter_facts, is_carried, label_targets
 
 SIEVE_FILTER_NAME = "ProtonFusion Consolidated"
@@ -1165,27 +1166,17 @@ def _uploaded_facts(merged_script: str) -> set:
 
 
 def _merged_script_problem(script: str) -> Optional[str]:
-    """Why the merged script is not valid Sieve, or None if it parses.
+    """Why the merged script is not valid Sieve, or None if it is.
 
-    Stand-in for the generator's script validator (validate_script), which
-    is landing separately; once it exists this body should call it. Until
-    then: the whole script must tokenize and parse with the sieve_rules
-    parser, and every `require` must come before any other command
-    (RFC 5228 section 3.2), which is what a merge mishandling an unusual
-    `require` breaks. Constructs that parser does not support, such as
-    multi-line `text:` literals, are reported as problems too, so a script
-    is never uploaded unchecked.
+    sieve_rules.validate_script is the check: the script must parse
+    (including multi-line text: literals), every require must come before
+    any other command (RFC 5228 section 3.2), and the extensions
+    ProtonFusion's own commands need must be required.
     """
     try:
-        commands = _SieveParser(_sieve_tokenize(script)).parse_commands()
+        validate_script(script)
     except SieveParseError as e:
         return str(e)
-    seen_other_command = False
-    for command in commands:
-        if command.name != "require":
-            seen_other_command = True
-        elif seen_other_command:
-            return "a 'require' comes after other commands (RFC 5228 section 3.2)"
     return None
 
 

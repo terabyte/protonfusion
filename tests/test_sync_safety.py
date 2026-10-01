@@ -639,12 +639,39 @@ class TestSyncRefusesUnparsableMergedScript:
         assert fake_sync.calls == []
 
 
+class TestSyncKeepsUserVacationRule:
+    """A live script with a text: literal (vacation rule) merges, validates and uploads."""
+
+    VACATION = (
+        'require ["vacation"];\n'
+        'if header :contains "Subject" "hello" {\n'
+        '  vacation :days 1 text:\nAway until Monday.\n.\n;\n'
+        '}\n'
+    )
+
+    def test_sync_uploads_with_vacation_rule_kept(self, cli_snapshots_dir, fake_sync):
+        f = _filter("a@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([f], sieve_script=self.VACATION)
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        FakeScraper.filters = [f]
+        fake_sync.live_script = self.VACATION
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 0, result.output
+        (uploaded,) = [arg for op, arg in fake_sync.calls if op == "upload"]
+        assert "Away until Monday." in uploaded
+        assert '"vacation"' in uploaded
+
+
 @pytest.mark.parametrize("script,ok", [
     ('require ["fileinto"];\nif header :is "From" "a" { fileinto "X"; }', True),
     ('require "fileinto";\nrequire ["imap4flags"];\nkeep;', True),
     ('keep;\nrequire ["fileinto"];', False),
     ('if header :is "From" "a" { fileinto "X";', False),
     ('', True),
+    # A user vacation rule: multi-line text: literals are valid Sieve.
+    ('require ["vacation"];\nvacation :days 1 text:\nAway until Monday.\n.\n;\n', True),
+    # fileinto used without being required
+    ('if header :is "From" "a" { fileinto "X"; }', False),
 ])
 def test_merged_script_problem(script, ok):
     from src.main import _merged_script_problem
