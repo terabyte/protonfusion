@@ -151,6 +151,15 @@ def test_engine_excludes_incomplete_by_default():
     assert report.incomplete_included == [bad]
 
 
+def test_manifest_records_absolute_script_path(snapshots_dir, tmp_path, monkeypatch):
+    """A relative --output is stored resolved, so sync matches it from any directory."""
+    BackupManager(snapshots_dir).create_backup([_filter("Good", [SENDER_A], [LABEL_WORK])])
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["consolidate", "--output", "out/rules.sieve"])
+    assert result.exit_code == 0, result.output
+    assert _manifest(snapshots_dir)["sieve_file"] == str((tmp_path / "out" / "rules.sieve").resolve())
+
+
 class TestTrackedByContentHash:
     """P9: the script, archive and manifest follow content_hash, never the name."""
 

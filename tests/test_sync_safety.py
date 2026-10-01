@@ -992,6 +992,7 @@ class TestSyncDisablesOnlyReplacedFilters:
     def test_relative_manifest_path_from_other_directory(
         self, cli_snapshots_dir, fake_sync, tmp_path, monkeypatch,
     ):
+        """consolidate stores the resolved path, so a relative --output still matches from elsewhere."""
         a, b = _filter("a@x.com"), _filter("b@x.com")
         BackupManager(cli_snapshots_dir).create_backup([a, b])
         work = tmp_path / "work"
@@ -1003,7 +1004,9 @@ class TestSyncDisablesOnlyReplacedFilters:
         elsewhere.mkdir()
         monkeypatch.chdir(elsewhere)
         result = runner.invoke(app, ["sync", "--sieve", str(work / "out.sieve")])
-        self._assert_b_kept(fake_sync, result, a, b)
+        assert result.exit_code == 0, result.output
+        assert "No consolidate manifest describes this script" not in result.output
+        assert self._toggled(fake_sync, "disable") == [a.name]
 
     def test_relative_manifest_path_same_directory_uses_manifest(
         self, cli_snapshots_dir, fake_sync, tmp_path, monkeypatch,

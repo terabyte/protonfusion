@@ -787,8 +787,10 @@ def consolidate(
             "[yellow]'sync' will refuse this script unless given --allow-incomplete. "
             "Run 'backup' again, then 'consolidate', to fix it."
         )
+    # Absolute, so sync matches the manifest to this script from any
+    # working directory (a relative --output would only match from here).
     manager.write_manifest(
-        snapshot_dir, processed_filters, str(out_path),
+        snapshot_dir, processed_filters, str(out_path.resolve()),
         without_evidence=[f.name for f in without_evidence],
         incomplete_excluded=report.incomplete_excluded,
         incomplete_included=report.incomplete_included,
