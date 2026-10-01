@@ -9,6 +9,8 @@ snapshots/
 .test-acct-recovery-phrase
 # Saved browser session (live auth cookies)
 storage_state*.json
+# write_private_file temp files (storage_state.json.<random>) left by a crash
+storage_state*.json.*
 
 # Python
 __pycache__/
