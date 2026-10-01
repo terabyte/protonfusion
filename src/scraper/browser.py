@@ -3,7 +3,6 @@
 import asyncio
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Optional, Union
 from urllib.parse import urlparse
@@ -17,6 +16,7 @@ from src.utils.config import (
     DEFAULT_ACCOUNT_SLOT, proton_url, slot_from_url, resolve_storage_state_path,
     LOGIN_TIMEOUT_MS, PAGE_LOAD_TIMEOUT_MS, ELEMENT_TIMEOUT_MS,
 )
+from src.utils.private_files import write_private_file
 
 logger = logging.getLogger(__name__)
 
@@ -48,25 +48,6 @@ SESSION_POLL_S = 0.5
 
 class SessionExpiredError(RuntimeError):
     """No usable saved session, and logging in here would need a human."""
-
-
-def write_private_file(path: Path, text: str):
-    """Write text to path readable only by the owner.
-
-    Any directories created are 0700 and the file is 0600 (via umask), and the
-    write goes through a temp file + rename so a crash never leaves half a file.
-    """
-    old_umask = os.umask(0o077)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(text)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    finally:
-        os.umask(old_umask)
 
 
 class ProtonMailBrowser:
@@ -165,8 +146,9 @@ class ProtonMailBrowser:
     async def save_storage_state(self, path: Optional[Path] = None) -> Path:
         """Save the context's cookies + localStorage (owner-only) and return the path.
 
-        The file holds live auth cookies: it is written 0600 in a 0700 directory
-        and its contents are never logged.
+        The file holds live auth cookies: it is written 0600 (a directory this
+        creates is 0700; an existing one is left as is) and its contents are
+        never logged.
         """
         path = Path(path) if path else self.storage_state_path
         state = await self.context.storage_state()

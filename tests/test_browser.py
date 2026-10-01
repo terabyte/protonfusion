@@ -183,7 +183,7 @@ class TestSavedSession:
         saved = json.loads(state_file.read_text())
         assert saved["cookies"] == SAMPLE_STATE["cookies"]
         assert saved["protonfusion"] == {"account_slot": 1}
-        assert not list(state_file.parent.glob("*.tmp"))
+        assert [p.name for p in state_file.parent.iterdir()] == ["storage_state.json"]
 
     @pytest.mark.asyncio
     async def test_save_tightens_existing_file(self, tmp_path):
