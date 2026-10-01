@@ -1693,6 +1693,77 @@ def _print_restore_filter_preview(plan) -> None:
             console.print(f"  [yellow]- {escape(name)}")
 
 
+def _restore_keeps_live_rules(
+    plan, to_disable, current_filters, live_pf, live_script, target_script, script_action,
+    allow_rule_removal: bool,
+) -> bool:
+    """Check no live ProtonFusion rule would end up in neither the script nor an enabled filter.
+
+    After `cleanup` (which deletes UI filters whose rules the live section
+    holds) or an edit since the backup, the backed-up script can lack rules
+    whose filters this restore cannot switch back on, so mail they handled
+    would be filtered by nothing. Lists any such rule and returns False
+    (refuse) unless `allow_rule_removal`, in which case it warns and
+    returns True. Nothing is checked when ProtonFusion's filter is off now,
+    since its rules are not filtering mail to begin with.
+    """
+    from src.backup.restore_engine import uncovered_live_rules
+    from src.generator.sieve_rules import SieveParseError
+
+    # Unread (no row scraped) counts as on: the script was read, so it exists
+    pf_on_now = not live_pf or any(f.enabled for f in live_pf)
+    if not live_script or not pf_on_now:
+        return True
+    pf_ends_off = script_action == "disable" or any(
+        live.is_sieve and live.name == SIEVE_FILTER_NAME for _, live in to_disable
+    )
+    if pf_ends_off:
+        script_after = ""
+    elif script_action == "upload":
+        script_after = target_script
+    else:
+        script_after = live_script
+    switched_off = {id(live) for _, live in to_disable}
+    on_after = [f for f in current_filters if f.enabled and id(f) not in switched_off]
+    on_after += [live for _, live in plan.to_enable]
+
+    try:
+        uncovered = uncovered_live_rules(live_script, script_after, on_after)
+    except SieveParseError as e:
+        console.print(Panel(
+            f"[bold red]Could not parse the ProtonFusion section: {escape(loggable_text(str(e)))}[/]\n"
+            "Without a rule-by-rule comparison there is no way to tell whether this restore "
+            "leaves some mail unfiltered.",
+            title="Rule Preservation Check", border_style="red",
+        ))
+        uncovered = None
+    else:
+        if not uncovered:
+            return True
+        lines = [
+            f"[bold red]{len(uncovered)} condition/action pairs in the live ProtonFusion section would "
+            "end up in neither the restored script nor a filter that is on afterwards, so the mail "
+            "they handle would be filtered by nothing.[/]",
+            "Their UI filter is not in the backup, was deleted (by 'cleanup', for example), was edited "
+            "since the backup, or cannot be matched unambiguously, so this restore cannot switch it "
+            "back on.",
+            "",
+        ]
+        lines += [f"  [red]- {escape(fact.describe())}[/]" for fact in uncovered]
+        console.print(Panel("\n".join(lines), title="Rule Preservation Check", border_style="red"))
+
+    if allow_rule_removal:
+        console.print("[yellow]--allow-rule-removal given: proceeding anyway.")
+        return True
+    console.print(
+        "[yellow]To keep them: restore a later backup whose script holds them, or re-create their "
+        "filters by hand. To capture them in a snapshot first, run 'backup' and then "
+        "'consolidate --keep-live-rules'. To remove them anyway, re-run restore with "
+        "--allow-rule-removal."
+    )
+    return False
+
+
 @app.command()
 def restore(
     backup_id: str = typer.Option(..., "--backup", help="Backup to restore from"),
@@ -1705,6 +1776,11 @@ def restore(
         False, "--allow-empty-script",
         help=f"The backup holds no Sieve script but the account does: restore by disabling "
              f"'{SIEVE_FILTER_NAME}' (stops every rule in it)",
+    ),
+    allow_rule_removal: bool = typer.Option(
+        False, "--allow-rule-removal",
+        help="Proceed even if rules in the live ProtonFusion section would end up in neither the "
+             "restored script nor a filter that is on afterwards",
     ),
 ):
     """Roll the account back to a backup: UI filter states AND the ProtonFusion Sieve script.
@@ -1721,10 +1797,17 @@ def restore(
     Order, chosen so a failure part-way never leaves mail unfiltered: first
     enable the filters the backup has on, then replace the script, then
     disable the filters the backup has off. Until the last step every rule
-    from both the old and the current state is active, so a failure leaves
-    extra filtering (possibly the same rule twice), never a rule off. It
-    stops at the first failed enable or a failed upload and reports
-    exactly what state the account is in.
+    that was active before the restore is still active, so a failure leaves
+    extra filtering (possibly the same rule twice). It stops at the first
+    failed enable or a failed upload and reports exactly what state the
+    account is in.
+
+    A completed restore does switch rules off: the ones the backed-up state
+    does not have. Before changing anything it checks that every rule of
+    the live ProtonFusion section ends up in the restored script or in a
+    filter that is on afterwards, and refuses with the list of any that
+    would not (a filter 'cleanup' deleted, or one edited since the backup,
+    cannot be switched back on), unless --allow-rule-removal.
 
     Refuses if the live script cannot be read, and if the backup holds no
     script while the account does, unless --allow-empty-script.
@@ -1813,6 +1896,16 @@ def restore(
             console.print(f"[bold yellow]Will DISABLE the '{SIEVE_FILTER_NAME}' filter (last step).")
         else:
             console.print("[cyan]Sieve script: already as in the backup, unchanged.")
+
+        if not _restore_keeps_live_rules(
+            plan, to_disable, current_filters, live_pf, live_script, target_script, script_action,
+            allow_rule_removal,
+        ):
+            if dry_run:
+                console.print("[bold red]A real restore would REFUSE and change nothing.")
+            else:
+                console.print("[bold red]Restore refused. Nothing was changed.")
+            return False
 
         restorable_ok = not plan.unrestorable
         if not (plan.to_enable or to_disable or script_action != "none"):

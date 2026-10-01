@@ -9,8 +9,10 @@ never creates, deletes or edits one.
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 
+from src.consolidator.carry_forward import filter_facts
+from src.generator.sieve_rules import Fact, compare_sections, current_forms
 from src.models.backup_models import Backup
 from src.models.filter_models import ProtonMailFilter, FilterStatus
 from src.scraper.protonmail_sync import ProtonMailSync
@@ -65,6 +67,32 @@ class RestorePlan:
     def unrestorable(self) -> List[str]:
         """Every backed-up filter this plan cannot put back, with the reason."""
         return self.not_found + self.ambiguous
+
+
+def uncovered_live_rules(
+    live_script: str, script_active_after: str, filters_on_after: Iterable[ProtonMailFilter],
+) -> List[Fact]:
+    """Rules of the live ProtonFusion section that nothing would carry after the restore.
+
+    A restore replaces (or switches off) ProtonFusion's script, so every
+    fact of its live section must end up either in `script_active_after`
+    (the script that filters mail once the restore is done: the backed-up
+    one, the live one if it is unchanged, or "" if the filter ends off) or
+    in a wizard filter that is on afterwards. A fact in neither is mail the
+    restore leaves unfiltered: a filter `cleanup` deleted, or one edited
+    since the backup, so the restore cannot switch it back on. A legacy
+    form of a fact (old Trash action, wildcard-less begins-with) counts as
+    carried when its current form is.
+
+    Raises SieveParseError if either script cannot be parsed.
+    """
+    dropped = compare_sections(live_script, script_active_after).dropped
+    carried = set()
+    for f in filters_on_after:
+        if f.is_sieve or not f.is_complete:
+            continue
+        carried |= filter_facts(f)
+    return [fact for fact in dropped if not (current_forms(fact) & carried)]
 
 
 class RestoreEngine:
@@ -149,8 +177,8 @@ class RestoreEngine:
     async def restore_from_backup(self, backup: Backup, current_filters: List[ProtonMailFilter]) -> dict:
         """Plan, then enable before disabling, and return a report dict.
 
-        Enabling first means a failure part-way leaves extra filters on,
-        never a rule switched off. Report keys (lists): enabled, disabled,
+        Enabling first means a failure among the enables has switched
+        nothing off yet. Report keys (lists): enabled, disabled,
         already_correct, skipped, not_found, ambiguous, errors,
         script_not_restored.
         """
