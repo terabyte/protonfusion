@@ -36,7 +36,7 @@ from src.parser.filter_parser import parse_scraped_filters
 from src.consolidator.consolidation_engine import ConsolidationEngine
 from src.generator.sieve_generator import SieveGenerator, SieveGenerationError, SECTION_BEGIN
 from src.generator.sieve_rules import (
-    SieveParseError, compare_sections, extract_section, script_facts, validate_script,
+    SieveParseError, compare_sections, current_forms, extract_section, script_facts, validate_script,
 )
 from src.consolidator.carry_forward import facts_to_filters, filter_facts, is_carried, label_targets
 
@@ -688,7 +688,10 @@ def consolidate(
             suppressed = set()
             for f in intentionally_removed:
                 suppressed |= filter_facts(f)
-            to_carry = [fact for fact in comparison.dropped if fact not in suppressed]
+            # A live rule written by an older version (discard for Trash, a
+            # begins-with without its wildcard) matches the removed filter
+            # only in its current form.
+            to_carry = [fact for fact in comparison.dropped if not current_forms(fact) & suppressed]
 
             # The backup and archive say which fileinto targets are labels
             known_labels = label_targets(list(bkup.filters) + [e.filter for e in archive_entries])

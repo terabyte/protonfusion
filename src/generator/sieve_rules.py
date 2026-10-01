@@ -771,6 +771,22 @@ def correct_legacy_actions(fact: Fact) -> Fact:
     return Fact(fact.conditions, actions)
 
 
+def current_forms(fact: Fact) -> Set[Fact]:
+    """`fact` plus every form the current generator may write for the same rule.
+
+    A live fact written by an older version (a `discard;` Trash move, a
+    begins/ends-with pattern without its wildcard) is never equal to the
+    fact the same filter generates today. Anything that asks "is this live
+    fact the rule of that filter?" should intersect these forms with the
+    filter's facts instead of testing plain membership.
+    """
+    corrected = correct_legacy_actions(fact)
+    forms = {fact, corrected}
+    for form in (fact, corrected):
+        forms |= _legacy_wildcard_variants(form)
+    return forms
+
+
 def compare_sections(live_script: str, new_script: str) -> SectionComparison:
     """Compare the rules of a live script's ProtonFusion section with a new one.
 

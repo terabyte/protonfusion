@@ -226,6 +226,35 @@ class TestConsolidateKeepLiveRules:
         sieve = (manager.snapshot_dir_for("latest") / "consolidated.sieve").read_text()
         assert "drop@x.com" not in sieve
 
+    @pytest.mark.parametrize("operator, value, generated, legacy", [
+        # Old Move to Trash: discard
+        (Operator.IS, "drop@x.com", 'fileinto "trash";', "discard;"),
+        # Old begins-with: no wildcard, and discard for Trash
+        (Operator.STARTS_WITH, "drop", '"drop*"', '"drop"'),
+    ])
+    def test_deprecated_filter_not_resurrected_from_legacy_live_rule(
+        self, cli_snapshots_dir, fake_sync, operator, value, generated, legacy,
+    ):
+        """The live rule an older version wrote for a deprecated filter stays dropped."""
+        keep = _filter("keep@x.com")
+        drop = ProtonMailFilter(
+            name="Drop", raw=ScrapeEvidence(conditions_text="the sender", actions_text="Move to Trash"),
+            conditions=[FilterCondition(type=ConditionType.SENDER, operator=operator, value=value)],
+            actions=[FilterAction(type=ActionType.TRASH)],
+        )
+        current = _section_for([keep, drop])
+        assert generated in current
+        live = current.replace(generated, legacy).replace('fileinto "trash";', "discard;")
+        manager = BackupManager(cli_snapshots_dir)
+        manager.create_backup([keep, drop], sieve_script=live)
+        assert runner.invoke(app, ["snapshot", "set-status", drop.name, "deprecated"]).exit_code == 0
+
+        result = runner.invoke(app, ["consolidate", "--keep-live-rules"])
+        assert result.exit_code == 0, result.output
+        sieve = (manager.snapshot_dir_for("latest") / "consolidated.sieve").read_text()
+        assert "drop" not in sieve
+        assert "Not carried forward (deprecated or --exclude'd on purpose): 1 pairs" in result.output
+
     def test_unconvertible_rule_reported(self, cli_snapshots_dir, fake_sync):
         from src.generator.sieve_generator import SECTION_BEGIN, SECTION_END
         live = (f'{SECTION_BEGIN}\nif address :is "From" "a" {{ fileinto "X"; stop; }}\n'
