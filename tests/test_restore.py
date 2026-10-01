@@ -815,3 +815,26 @@ class TestRestoreFilterLimit:
         result = runner.invoke(app, ["restore", "--backup", "latest"], input="y\n")
         flat = " ".join(result.output.split())
         assert "Switched back off to free their active-filter slots for 'ProtonFusion Consolidated': 1 (A)" in flat
+
+    def test_preview_says_protonfusion_goes_off_first(self, cli_env):
+        """W9: with --allow-empty-script the ProtonFusion filter is switched off in the first
+        step, so the preview must not call it the last step."""
+        a = _filter("A", "a@x", enabled=True, priority=0)
+        script = _section_for([a])
+        BackupManager(cli_env).create_backup([a])  # no script captured
+        FakeBrowser.current = [_filter("A", "a@x", enabled=False, priority=0), _sieve(SIEVE_FILTER_NAME, script, priority=1)]
+        FakeBrowser.live_script = script
+        result = runner.invoke(app, ["restore", "--backup", "latest", "--allow-empty-script"], input="y\n")
+        flat = " ".join(result.output.split())
+        assert result.exit_code == 0, result.output
+        assert FakeBrowser.calls[0] == ("disable", SIEVE_FILTER_NAME)
+        assert "(last step)" not in flat
+        assert "it is switched off FIRST, before any filter is enabled" in flat
+
+    def test_failed_switch_back_on_listed_under_its_own_heading(self, pf_off_in_backup):
+        """W9: a failed switch-back-on is not a failed disable."""
+        FakeBrowser.toggle_fails = {("New", True), (SIEVE_FILTER_NAME, True)}
+        result = runner.invoke(app, ["restore", "--backup", "latest"], input="y\n")
+        assert result.exit_code == 1, result.output
+        assert "Could not switch back on:" in result.output
+        assert "Could not disable:" not in result.output
