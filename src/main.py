@@ -24,7 +24,9 @@ from src.models.filter_models import ProtonMailFilter, FilterStatus
 from src.models.backup_models import Backup, ArchiveEntry
 from src.backup.backup_manager import BackupManager, unverified_for_deletion
 from src.backup.diff_engine import DiffEngine
-from src.backup.sync_plan import DisablePlan, carried_hashes, check_disable_candidates, plan_disable
+from src.backup.sync_plan import (
+    DisablePlan, carried_hashes, check_disable_candidates, manifest_describes, plan_disable,
+)
 from src.utils.private_files import write_private_file
 from src.parser.filter_parser import parse_scraped_filters
 from src.consolidator.consolidation_engine import ConsolidationEngine
@@ -949,6 +951,9 @@ def _print_disable_plan(plan: DisablePlan, backup_id: str, preview: bool) -> Non
 
     leave = "would be left" if preview else "were left"
     groups = [
+        (plan.not_covered, "bold red",
+         f"have rules that are not all in the script being uploaded, so they {leave} enabled. "
+         "The script may come from another consolidate run; re-run 'consolidate' for this backup."),
         (plan.after_backup, "yellow",
          f"created or changed after backup '{backup_id}' {leave} enabled; their rules are not in "
          "this script. Run 'backup' and 'consolidate' to fold them in."),
@@ -1021,6 +1026,19 @@ def _scraped_row_names(live_filters: List[ProtonMailFilter]) -> Optional[List[st
     return [f.name for f in by_priority]
 
 
+def _uploaded_facts(merged_script: str) -> set:
+    """Facts of the ProtonFusion section about to be uploaded (empty if it does not parse).
+
+    plan_disable checks every filter against these before disabling it, so
+    an unparsable section means nothing is disabled.
+    """
+    try:
+        return script_facts(merged_script)
+    except SieveParseError as e:
+        logger.warning("Could not parse the script being uploaded: %s", e)
+        return set()
+
+
 def _print_carried_source(from_manifest: bool, backup_id: str) -> None:
     """Note when the filters to disable are inferred from the backup, not the manifest."""
     if not from_manifest:
@@ -1089,9 +1107,8 @@ def sync(
     # manifest only describes the snapshot's own script, so it is checked
     # only when that is the script being uploaded.
     manifest = manager.load_manifest(snapshot_dir) or {}
-    manifest_script = manifest.get("sieve_file")
     without_evidence = manifest.get("without_evidence", [])
-    if without_evidence and manifest_script and Path(manifest_script).resolve() == sieve_path.resolve():
+    if without_evidence and manifest_describes(manifest, sieve_path):
         console.print(
             f"[bold red]This script was built from {len(without_evidence)} filter(s) with no raw "
             "evidence (backed up before format 1.1); labels or other actions may be missing:"
@@ -1117,7 +1134,11 @@ def sync(
         console.print(Panel("[bold yellow]DRY RUN - No changes will be made"))
         console.print(f"\nWould upload Sieve script ({len(sieve_script)} chars)")
         _print_carried_source(from_manifest, backup_id)
-        _print_disable_plan(plan_disable(bkup.filters, carried, reference, SIEVE_FILTER_NAME), backup_id, preview=True)
+        backed_up_merge = SieveGenerator.merge_with_existing(sieve_script, bkup.sieve_script or "")
+        _print_disable_plan(
+            plan_disable(bkup.filters, carried, reference, SIEVE_FILTER_NAME, _uploaded_facts(backed_up_merge)),
+            backup_id, preview=True,
+        )
         console.print(
             "[cyan]This list comes from the backup. Filters created since then are not in it and "
             "would be left enabled; --show-diff-only lists them from the live account.[/]"
@@ -1176,15 +1197,17 @@ def sync(
                 existing_script, sieve_script, allow_rule_removal,
                 backup_script=bkup.sieve_script,
             )
+            merged_script = SieveGenerator.merge_with_existing(sieve_script, existing_script)
             if not safe:
                 console.print("[bold red]A real sync would REFUSE and change nothing.")
             else:
                 _print_carried_source(from_manifest, backup_id)
                 _print_disable_plan(
-                    plan_disable(live_filters, carried, reference, SIEVE_FILTER_NAME), backup_id, preview=True,
+                    plan_disable(
+                        live_filters, carried, reference, SIEVE_FILTER_NAME, _uploaded_facts(merged_script),
+                    ),
+                    backup_id, preview=True,
                 )
-
-            merged_script = SieveGenerator.merge_with_existing(sieve_script, existing_script)
 
             if existing_script == merged_script:
                 console.print(Panel("[bold green]No changes: the live script already matches."))
@@ -1245,7 +1268,7 @@ def sync(
             console.print("[yellow]User rules detected; preserving them outside ProtonFusion section")
 
         _print_carried_source(from_manifest, backup_id)
-        plan = plan_disable(live_filters, carried, reference, SIEVE_FILTER_NAME)
+        plan = plan_disable(live_filters, carried, reference, SIEVE_FILTER_NAME, _uploaded_facts(merged_script))
         _print_disable_plan(plan, backup_id, preview=False)
 
         sync_client = ProtonMailSync(headless=headless, credentials=creds, storage_state_path=state or None)

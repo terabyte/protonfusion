@@ -768,6 +768,63 @@ class TestSyncDisablesOnlyReplacedFilters:
         assert not any(c[0] == "upload" for c in fake_sync.calls)
         assert self._toggled(fake_sync, "enable") == [a.name, b.name]
 
+    @pytest.fixture
+    def b_excluded(self, cli_snapshots_dir, fake_sync):
+        """Backup of a and b; the snapshot's own consolidated.sieve leaves b out."""
+        a, b = _filter("a@x.com"), _filter("b@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([a, b])
+        assert runner.invoke(app, ["consolidate", "--exclude", b.name]).exit_code == 0
+        FakeScraper.filters = [a, b]
+        return a, b
+
+    @staticmethod
+    def _assert_b_kept(fake_sync, result, a, b):
+        assert result.exit_code == 0, result.output
+        assert TestSyncDisablesOnlyReplacedFilters._toggled(fake_sync, "disable") == [a.name]
+        assert "not all in the script being uploaded" in result.output
+        assert f"- {b.name}" in result.output
+
+    def test_second_consolidate_output_does_not_disable_uncarried(self, b_excluded, fake_sync, tmp_path):
+        """The manifest now names the --output file, so the snapshot's script falls back to the backup."""
+        a, b = b_excluded
+        assert runner.invoke(app, ["consolidate", "--output", str(tmp_path / "all.sieve")]).exit_code == 0
+        self._assert_b_kept(fake_sync, runner.invoke(app, ["sync"]), a, b)
+
+    def test_relative_manifest_path_from_other_directory(
+        self, cli_snapshots_dir, fake_sync, tmp_path, monkeypatch,
+    ):
+        a, b = _filter("a@x.com"), _filter("b@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([a, b])
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        assert runner.invoke(app, ["consolidate", "--exclude", b.name, "--output", "out.sieve"]).exit_code == 0
+        FakeScraper.filters = [a, b]
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        result = runner.invoke(app, ["sync", "--sieve", str(work / "out.sieve")])
+        self._assert_b_kept(fake_sync, result, a, b)
+
+    def test_relative_manifest_path_same_directory_uses_manifest(
+        self, cli_snapshots_dir, fake_sync, tmp_path, monkeypatch,
+    ):
+        a, b = _filter("a@x.com"), _filter("b@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([a, b])
+        monkeypatch.chdir(tmp_path)
+        assert runner.invoke(app, ["consolidate", "--exclude", b.name, "--output", "out.sieve"]).exit_code == 0
+        FakeScraper.filters = [a, b]
+        result = runner.invoke(app, ["sync", "--sieve", str(tmp_path / "out.sieve")])
+        assert result.exit_code == 0, result.output
+        assert "No consolidate manifest describes this script" not in result.output
+        assert self._toggled(fake_sync, "disable") == [a.name]
+
+    def test_sieve_copy_does_not_disable_uncarried(self, b_excluded, fake_sync, cli_snapshots_dir, tmp_path):
+        a, b = b_excluded
+        copy = tmp_path / "copy.sieve"
+        copy.write_text((cli_snapshots_dir / "latest" / "consolidated.sieve").read_text())
+        self._assert_b_kept(fake_sync, runner.invoke(app, ["sync", "--sieve", str(copy)]), a, b)
+
     def test_dry_run_lists_plan(self, account, fake_sync):
         result = runner.invoke(app, ["sync", "--dry-run"])
         assert result.exit_code == 0, result.output

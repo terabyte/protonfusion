@@ -1,10 +1,15 @@
 """Unit tests for src.backup.sync_plan: which live filters sync may disable."""
 
+from pathlib import Path
+
 import pytest
 
-from src.backup.sync_plan import check_disable_candidates, plan_disable
+from src.backup.sync_plan import (
+    carried_hashes, check_disable_candidates, manifest_describes, plan_disable, rules_in_script,
+)
+from src.consolidator.carry_forward import filter_facts
 from src.models.filter_models import (
-    ActionType, ConditionType, FilterAction, FilterCondition, Operator,
+    ActionType, ConditionType, FilterAction, FilterCondition, LogicType, Operator,
     ProtonMailFilter, ScrapeEvidence,
 )
 
@@ -35,7 +40,7 @@ def _buckets(plan):
 
 def test_user_disabled_filter_is_in_no_bucket():
     off = _wizard("off@x.com", enabled=False)
-    plan = plan_disable([off], {off.content_hash}, [off], SIEVE_NAME)
+    plan = plan_disable([off], {off.content_hash}, [off], SIEVE_NAME, filter_facts(off))
     for name, bucket in _buckets(plan).items():
         assert off not in bucket, name
 
@@ -43,7 +48,8 @@ def test_user_disabled_filter_is_in_no_bucket():
 def test_plan_disable_sieve_filter_never_disabled_even_if_carried():
     own, other = _sieve(SIEVE_NAME), _sieve("Hand-written")
     carried = {own.content_hash, other.content_hash}
-    plan = plan_disable([own, other], carried, [own, other], SIEVE_NAME)
+    every_fact = filter_facts(own) | filter_facts(other)
+    plan = plan_disable([own, other], carried, [own, other], SIEVE_NAME, every_fact)
     assert plan.to_disable == []
     assert plan.sieve == [own, other]
 
@@ -54,3 +60,66 @@ def test_check_disable_candidates_rejects_disabled_and_sieve():
     with pytest.raises(ValueError, match="Sieve"):
         check_disable_candidates([_sieve("Hand-written")])
     check_disable_candidates([_wizard("a@x.com")])
+
+
+def test_carried_hashes_fallback_excludes_sieve(tmp_path):
+    wizard, sieve = _wizard("a@x.com"), _sieve("Hand-written")
+    hashes, from_manifest = carried_hashes(None, tmp_path / "x.sieve", [wizard, sieve])
+    assert from_manifest is False
+    assert hashes == {wizard.content_hash}
+
+
+def test_carried_hashes_ignores_manifest_for_other_script(tmp_path):
+    a, b = _wizard("a@x.com"), _wizard("b@x.com")
+    own = tmp_path / "consolidated.sieve"
+    other = tmp_path / "other.sieve"
+    own.write_text("keep;")
+    other.write_text("keep;")
+    manifest = {"sieve_file": str(own), "filter_hashes": [a.content_hash]}
+
+    assert carried_hashes(manifest, own, [a, b]) == ({a.content_hash}, True)
+    hashes, from_manifest = carried_hashes(manifest, other, [a, b])
+    assert from_manifest is False
+    assert hashes == {a.content_hash, b.content_hash}
+
+
+def test_carried_filter_whose_rules_are_not_in_the_script_stays_enabled():
+    """Whatever the manifest says, a filter is disabled only if the script holds its rules."""
+    a, b = _wizard("a@x.com"), _wizard("b@x.com")
+    carried = {a.content_hash, b.content_hash}
+    plan = plan_disable([a, b], carried, [a, b], SIEVE_NAME, filter_facts(a))
+    assert plan.to_disable == [a]
+    assert plan.not_covered == [b]
+    assert b in plan.left_enabled
+
+
+def test_partly_covered_filter_is_not_covered():
+    two_senders = _wizard("a@x.com").model_copy(update={
+        "name": "Two senders",
+        "conditions": [
+            FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="a@x.com"),
+            FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="b@x.com"),
+        ],
+        "logic": LogicType.OR,
+    })
+    only_a = filter_facts(_wizard("a@x.com"))
+    assert not rules_in_script(two_senders, only_a)
+    assert rules_in_script(two_senders, filter_facts(two_senders))
+
+
+def test_filter_with_no_rules_is_never_covered(monkeypatch):
+    import src.backup.sync_plan as sync_plan
+    monkeypatch.setattr(sync_plan, "filter_facts", lambda f: set())
+    assert not rules_in_script(_wizard("a@x.com"), set())
+
+
+def test_manifest_describes_relative_and_absolute_spellings(tmp_path, monkeypatch):
+    script = tmp_path / "out.sieve"
+    script.write_text("keep;")
+    monkeypatch.chdir(tmp_path)
+    assert manifest_describes({"sieve_file": "out.sieve"}, script)
+    assert manifest_describes({"sieve_file": str(script)}, Path("out.sieve"))
+    assert manifest_describes({"sieve_file": str(tmp_path / "." / "out.sieve")}, script)
+    assert not manifest_describes({"sieve_file": "other.sieve"}, script)
+    assert not manifest_describes({}, script)
+    assert not manifest_describes(None, script)
