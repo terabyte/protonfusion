@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 from src.scraper import selectors
 from src.scraper.browser import (
     ProtonMailBrowser, MODAL_TRANSITION_MS, DROPDOWN_MS,
-    ALL_SETTINGS_LOAD_MS, row_filter_name,
+    ALL_SETTINGS_LOAD_MS, SieveReadError, row_filter_name,
 )
 from src.utils.config import ELEMENT_TIMEOUT_MS
 
@@ -37,6 +37,29 @@ MOVE_TO_LABELS = {
 
 logger = logging.getLogger(__name__)
 
+# Puts the script into the Sieve editor through the CodeMirror 5 API (which
+# fires the change events the Save button listens for) and says whether it
+# could: "no-editor" when the page has no attached CodeMirror instance.
+_SET_EDITOR_SCRIPT_JS = """(script) => {
+    const cm = document.querySelector('.CodeMirror');
+    if (!cm || !cm.CodeMirror) {
+        return 'no-editor';
+    }
+    cm.CodeMirror.setValue(script);
+    return 'ok';
+}"""
+
+
+def normalize_script(text: str) -> str:
+    """A script with trailing whitespace removed from each line and from the whole text.
+
+    The read-back comparison ignores only that: an editor may trim it, and
+    read_sieve_script strips the text it returns. Anything else that differs
+    means the saved script is not the one intended.
+    """
+    lines = [line.rstrip() for line in text.splitlines()]
+    return "\n".join(lines).strip()
+
 
 class ProtonMailSync(ProtonMailBrowser):
     """Handles sync operations: create/delete/toggle filters, upload Sieve."""
@@ -49,10 +72,15 @@ class ProtonMailSync(ProtonMailBrowser):
     async def upload_sieve(
         self, sieve_script: str, filter_name: str = "ProtonFusion Consolidated",
     ) -> bool:
-        """Upload a Sieve script as a named sieve filter.
+        """Upload a Sieve script as a named sieve filter, then prove it landed.
 
-        Creates a new sieve filter or updates an existing one.
-        Uses CodeMirror 5 JavaScript API for reliable content setting.
+        Creates a new sieve filter or updates an existing one, setting the
+        editor through the CodeMirror 5 JavaScript API. Returns True only
+        once the saved filter has been opened again, its script read back
+        and found equal to `sieve_script` (ignoring trailing whitespace), and
+        the filter is enabled. Any step that fails returns False, so the
+        caller takes its failed-upload path rather than reporting success
+        for a save that did not happen.
         """
         page = self.page
         self.upload_hit_filter_limit = False
@@ -91,15 +119,10 @@ class ProtonMailSync(ProtonMailBrowser):
                 return False
 
             # Set content via CodeMirror 5 API (triggers proper change events)
-            await page.evaluate(
-                """(script) => {
-                    const cm = document.querySelector('.CodeMirror');
-                    if (cm && cm.CodeMirror) {
-                        cm.CodeMirror.setValue(script);
-                    }
-                }""",
-                sieve_script,
-            )
+            status = await page.evaluate(_SET_EDITOR_SCRIPT_JS, sieve_script)
+            if status != "ok":
+                logger.error("The Sieve editor has no CodeMirror instance; the script was not set")
+                return False
             await page.wait_for_timeout(DROPDOWN_MS)
 
             # Wait for Save button to become enabled, then click it
@@ -117,10 +140,12 @@ class ProtonMailSync(ProtonMailBrowser):
 
                 await save_btn.click()
                 await page.wait_for_timeout(3000)
-                logger.info("Sieve script uploaded successfully")
 
                 # Ensure the filter is enabled after save
                 await self._ensure_filter_enabled(filter_name)
+                if not await self._verify_upload(sieve_script, filter_name):
+                    return False
+                logger.info("Sieve script uploaded and verified")
                 return True
 
             logger.warning("Could not find save button for Sieve editor")
@@ -129,6 +154,41 @@ class ProtonMailSync(ProtonMailBrowser):
         except Exception as e:
             logger.error("Failed to upload Sieve script: %s", e)
             raise
+
+    async def _verify_upload(self, intended: str, filter_name: str) -> bool:
+        """True if the saved filter holds `intended` and is enabled.
+
+        Opens the filter again and reads its script back, since the Save
+        button enabling and being clicked says nothing about whether the
+        save went through.
+        """
+        try:
+            saved = await self.read_sieve_script(filter_name=filter_name)
+        except SieveReadError as e:
+            logger.error("Could not read the Sieve filter back after saving: %s", e)
+            return False
+        if normalize_script(saved) != normalize_script(intended):
+            logger.error(
+                "The saved Sieve filter '%s' does not hold the uploaded script "
+                "(read back %d chars, expected %d)", filter_name, len(saved), len(intended),
+            )
+            return False
+        if not await self._filter_is_enabled(filter_name):
+            logger.error("The Sieve filter '%s' is not enabled after saving", filter_name)
+            return False
+        return True
+
+    async def _filter_is_enabled(self, name: str) -> bool:
+        """True if the one filter named exactly `name` has its toggle on."""
+        section = await self.page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
+        if not section:
+            logger.warning("Custom filters section not found")
+            return False
+        row = await self._unique_row_named(section, name)
+        if row is None:
+            return False
+        toggle_input = await row.query_selector(selectors.FILTER_TOGGLE)
+        return bool(toggle_input) and await toggle_input.is_checked()
 
     async def _ensure_filter_enabled(self, name: str):
         """Enable the one filter with exactly this name if it isn't already enabled.
