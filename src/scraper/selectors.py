@@ -19,6 +19,21 @@ FILTERS_NAV_LINK = 'a[href$="/mail/filters"]'  # href is /u/<slot>/mail/filters
 COMPOSE_BUTTON = '[data-testid="sidebar:compose"]'
 USER_DROPDOWN_EMAIL = '[data-testid="heading:userdropdown"] span.user-dropdown-displayName + span'
 
+# First-run / onboarding modals (e.g. the "Welcome to Proton Mail" tour on a
+# fresh account) overlay the app and intercept every click. Dismiss buttons are
+# tried in order; "get started" advances the tour, so dismissal loops.
+ONBOARDING_MODAL = 'div.modal-two'
+ONBOARDING_DISMISS_BUTTONS = (
+    '[data-testid="modal:close"]',
+    'button:has-text("Skip")',
+    'button:has-text("Maybe later")',
+    'button:has-text("Close")',
+    'button:has-text("get started")',
+    'button:has-text("Next")',
+    'button:has-text("Got it")',
+    'button:has-text("Done")',
+)
+
 # Filter list page (account.proton.me/u/<slot>/mail/filters)
 # Page structure: two <section> blocks, each with an <h2>.
 #   Section 1: h2 "Custom filters"   -> user-created filters (table.simple-table)

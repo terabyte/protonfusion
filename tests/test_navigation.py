@@ -52,3 +52,62 @@ async def test_direct_navigation_rejects_wrong_page(monkeypatch):
             await browser._open_filters_directly()
     finally:
         await browser.close()
+
+
+WELCOME_TOUR_HTML = """
+<html><body>
+<button id="behind">Compose</button>
+<div class="modal-two" id="tour">
+  <div id="panel1"><h1>Welcome to Proton Mail</h1>
+    <button onclick="document.getElementById('panel1').remove();
+                     document.getElementById('panel2').style.display='block'">Let’s get started</button>
+  </div>
+  <div id="panel2" style="display:none"><p>Pick a theme</p>
+    <button onclick="document.getElementById('tour').remove()">Skip</button>
+  </div>
+</div>
+</body></html>
+"""
+
+
+@pytest.fixture
+def fast_modals(monkeypatch):
+    """Skip the real inter-step pause so modal tests stay quick."""
+    monkeypatch.setattr("src.scraper.browser.MODAL_TRANSITION_MS", 10)
+
+
+@pytest.mark.asyncio
+async def test_dismisses_multi_step_welcome_tour(fast_modals):
+    browser = ProtonMailBrowser(headless=True)
+    await browser.initialize()
+    try:
+        await browser.page.set_content(WELCOME_TOUR_HTML)
+        dismissed = await browser.dismiss_onboarding_modals()
+        assert dismissed == 2
+        assert await browser.page.query_selector("div.modal-two") is None
+        await browser.page.click("#behind", timeout=1000)
+    finally:
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_no_modal_is_a_no_op(fast_modals):
+    browser = ProtonMailBrowser(headless=True)
+    await browser.initialize()
+    try:
+        await browser.page.set_content("<html><body><p>Inbox</p></body></html>")
+        assert await browser.dismiss_onboarding_modals() == 0
+    finally:
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_stubborn_modal_never_raises(fast_modals):
+    browser = ProtonMailBrowser(headless=True)
+    await browser.initialize()
+    try:
+        await browser.page.set_content("<div class='modal-two'><p>No buttons here</p></div>")
+        dismissed = await browser.dismiss_onboarding_modals()
+        assert dismissed > 0  # tried Escape, gave up after the cap, did not raise
+    finally:
+        await browser.close()

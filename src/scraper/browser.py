@@ -3,6 +3,7 @@
 import logging
 import os
 from typing import Optional
+from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright, Browser, Page, BrowserContext
 
@@ -31,6 +32,8 @@ FILTERS_PAGE_LOAD_MS = 3000
 FILTERS_PAGE_WAIT_MS = 30000
 MODAL_TRANSITION_MS = 1500
 DROPDOWN_MS = 500
+POST_LOGIN_SETTLE_MS = 15000
+MAX_ONBOARDING_MODALS = 6
 
 # Saved Playwright session (cookies + localStorage) from a prior human login.
 # Proton puts a CAPTCHA in front of automated logins, so the practical way to run
@@ -94,19 +97,66 @@ class ProtonMailBrowser:
         Uses stored credentials if available, otherwise waits for manual login.
         """
         page = self.page
-        if await self._reuse_saved_session():
-            return True
-        await page.goto(
-            PROTONMAIL_LOGIN_URL,
-            wait_until="domcontentloaded",
-            timeout=PAGE_LOAD_TIMEOUT_MS,
-        )
-        logger.info("Navigated to login page")
+        if not await self._reuse_saved_session():
+            await page.goto(
+                PROTONMAIL_LOGIN_URL,
+                wait_until="domcontentloaded",
+                timeout=PAGE_LOAD_TIMEOUT_MS,
+            )
+            logger.info("Navigated to login page")
 
-        if self.credentials:
-            return await self._automated_login()
-        else:
-            return await self._manual_login()
+            if self.credentials:
+                await self._automated_login()
+            else:
+                await self._manual_login()
+        await self._after_login()
+        return True
+
+    async def _after_login(self):
+        """Settle into the signed-in app: record the slot, clear onboarding, read the email.
+
+        Best-effort throughout; login has already succeeded by the time this runs.
+        """
+        self._record_account_slot()
+        if urlparse(self.page.url).hostname == MAIL_HOST:
+            try:
+                await self.page.wait_for_selector(selectors.COMPOSE_BUTTON, timeout=POST_LOGIN_SETTLE_MS)
+            except Exception:
+                logger.debug("Mail app did not finish loading after login (%s)", self.page.url)
+        await self.dismiss_onboarding_modals()
+        if not self.account_email:
+            await self._capture_account_email()
+
+    async def dismiss_onboarding_modals(self) -> int:
+        """Close first-run modals (e.g. the Welcome tour) that block clicks.
+
+        Best-effort and never raises: returns the number of dismiss actions taken,
+        0 when no such modal is showing.
+        """
+        page = self.page
+        dismissed = 0
+        try:
+            for _ in range(MAX_ONBOARDING_MODALS):
+                modal = await page.query_selector(selectors.ONBOARDING_MODAL)
+                if not modal or not await modal.is_visible():
+                    break
+                button = None
+                for selector in selectors.ONBOARDING_DISMISS_BUTTONS:
+                    candidate = await modal.query_selector(selector)
+                    if candidate and await candidate.is_visible():
+                        button = candidate
+                        break
+                if button:
+                    await button.click()
+                else:
+                    await page.keyboard.press("Escape")
+                dismissed += 1
+                await page.wait_for_timeout(MODAL_TRANSITION_MS)
+        except Exception as e:
+            logger.debug("Onboarding modal dismissal stopped: %s", e)
+        if dismissed:
+            logger.info("Dismissed %d onboarding modal step(s)", dismissed)
+        return dismissed
 
     async def _reuse_saved_session(self) -> bool:
         """True if a saved session was loaded and the mail app opens without a login."""
@@ -119,8 +169,6 @@ class ProtonMailBrowser:
         except Exception:
             logger.warning("Saved session did not reach the mail app (%s); logging in normally", page.url)
             return False
-        self._record_account_slot()
-        await self._capture_account_email()
         logger.info("Reused saved session")
         return True
 
@@ -145,7 +193,6 @@ class ProtonMailBrowser:
                 timeout=LOGIN_TIMEOUT_MS,
             )
             logger.info("Login successful (redirected to: %s)", page.url)
-            self._record_account_slot()
             return True
 
         except Exception as e:
@@ -163,7 +210,6 @@ class ProtonMailBrowser:
                 timeout=LOGIN_TIMEOUT_MS,
             )
             logger.info("Manual login detected (redirected to: %s)", page.url)
-            self._record_account_slot()
             return True
         except Exception:
             raise RuntimeError("Login timed out. Please try again.")
@@ -192,6 +238,7 @@ class ProtonMailBrowser:
             timeout=PAGE_LOAD_TIMEOUT_MS,
         )
         await self._wait_for_filters_page()
+        await self.dismiss_onboarding_modals()
         await self._assert_filter_page_structure()
 
     async def _wait_for_filters_page(self):
@@ -223,6 +270,7 @@ class ProtonMailBrowser:
             timeout=PAGE_LOAD_TIMEOUT_MS,
         )
         await page.wait_for_selector(selectors.COMPOSE_BUTTON, timeout=COMPOSE_WAIT_MS)
+        await self.dismiss_onboarding_modals()
         await self._capture_account_email()
 
         await page.click(selectors.SETTINGS_GEAR)

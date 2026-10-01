@@ -6,25 +6,34 @@ be exercised offline.
 
 import pytest
 
+from src.scraper import selectors
 from src.scraper.browser import ProtonMailBrowser
 
 
 class FakePage:
     """Minimal stand-in for a Playwright Page: a URL plus scripted behaviour."""
 
-    def __init__(self, url: str = "about:blank"):
+    def __init__(self, url: str = "about:blank", present=()):
         self.url = url
         self.visited = []
+        self.present = set(present)  # selectors that "exist" on the page
 
     async def goto(self, url, **kwargs):
         self.visited.append(url)
         self.url = url
 
+    async def wait_for_selector(self, selector, timeout=None):
+        if selector not in self.present:
+            raise TimeoutError(f"{selector} not found")
 
-def make_browser(url: str = "about:blank") -> ProtonMailBrowser:
+    async def query_selector(self, selector):
+        return None
+
+
+def make_browser(url: str = "about:blank", present=()) -> ProtonMailBrowser:
     """A browser whose page is a FakePage (initialize() is never called)."""
     browser = ProtonMailBrowser(headless=True)
-    browser.page = FakePage(url)
+    browser.page = FakePage(url, present)
     return browser
 
 
@@ -121,3 +130,24 @@ class TestNavigateToFilters:
 
         with pytest.raises(RuntimeError, match="Custom filters"):
             await browser.navigate_to_filters()
+
+
+class TestAfterLogin:
+    @pytest.mark.asyncio
+    async def test_records_slot_and_tolerates_slow_app(self, monkeypatch):
+        monkeypatch.setattr("src.scraper.browser.POST_LOGIN_SETTLE_MS", 1)
+        browser = make_browser("https://mail.proton.me/u/1/inbox")  # compose never appears
+        await browser._after_login()
+        assert browser.account_slot == 1
+
+    @pytest.mark.asyncio
+    async def test_login_with_reused_session_skips_login_page(self, monkeypatch):
+        browser = make_browser("https://mail.proton.me/u/2/inbox", present=[selectors.COMPOSE_BUTTON])
+
+        async def reused():
+            return True
+
+        monkeypatch.setattr(browser, "_reuse_saved_session", reused)
+        assert await browser.login() is True
+        assert browser.page.visited == []
+        assert browser.account_slot == 2
