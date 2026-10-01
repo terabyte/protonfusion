@@ -1645,7 +1645,9 @@ def _print_restore_script_preview(live_script: str, target_script: str, backup_i
         target_rules = _section_rules(target_script)
     except SieveParseError as e:
         live_rules = target_rules = None
-        console.print(f"[yellow]Could not compare the ProtonFusion sections rule by rule: {escape(str(e))}")
+        console.print(
+            f"[yellow]Could not compare the ProtonFusion sections rule by rule: {escape(loggable_text(str(e)))}"
+        )
     else:
         if live_rules is not None and target_rules is None:
             console.print(

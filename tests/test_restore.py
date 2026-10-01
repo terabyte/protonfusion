@@ -139,6 +139,23 @@ class TestRestoreEngine:
         )
         assert report["errors"] and "failed to enable" in report["errors"][0]
 
+    def test_toggle_error_text_is_scrubbed(self, caplog):
+        """V7: a Playwright error can carry the page URL, whose fragment holds a session key."""
+
+        class RaisingSync(FakeSync):
+            async def set_row_enabled(self, index, name, enabled):
+                raise RuntimeError("Timeout navigating to https://account.proton.me/u/0/mail#selector=SECRET")
+
+        with caplog.at_level("ERROR"):
+            report, _ = _restore(
+                [_filter("A", "a@x", enabled=True)],
+                [_filter("A", "a@x", enabled=False, priority=0)],
+                sync=RaisingSync(),
+            )
+        assert report["errors"] == ["A: failed to enable: Timeout navigating to https://account.proton.me/u/0/mail"]
+        assert "SECRET" not in caplog.text
+        assert "A" in caplog.text
+
     def test_switch_that_ignores_the_click_is_an_error(self):
         """V5: the real set_row_enabled, over a page whose switch does not change on click."""
         from src.scraper.protonmail_sync import ProtonMailSync

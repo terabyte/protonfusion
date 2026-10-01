@@ -14,6 +14,7 @@ from typing import Dict, List, Tuple
 from src.models.backup_models import Backup
 from src.models.filter_models import ProtonMailFilter, FilterStatus
 from src.scraper.protonmail_sync import ProtonMailSync
+from src.utils.config import loggable_text
 
 logger = logging.getLogger(__name__)
 
@@ -138,8 +139,11 @@ class RestoreEngine:
                 else:
                     errors.append(f"{backed.name}: failed to {verb} (row {live.priority} not found unambiguously)")
             except Exception as e:
-                errors.append(f"{backed.name}: failed to {verb}: {e}")
-                logger.error("Error restoring filter '%s': %s", backed.name, e)
+                # A Playwright error's call log can carry the page URL, whose
+                # fragment holds a session key during Proton's fork.
+                reason = loggable_text(str(e)) or type(e).__name__
+                errors.append(f"{backed.name}: failed to {verb}: {reason}")
+                logger.error("Error restoring filter '%s': %s", backed.name, reason)
         return done, errors
 
     async def restore_from_backup(self, backup: Backup, current_filters: List[ProtonMailFilter]) -> dict:
