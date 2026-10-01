@@ -15,7 +15,6 @@ from rich.table import Table
 from rich.panel import Panel
 from rich.markup import escape
 from rich import print as rprint
-from rich.markup import escape
 
 from src.utils.config import (
     load_credentials, SNAPSHOTS_DIR, TOOL_VERSION,
