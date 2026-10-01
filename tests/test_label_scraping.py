@@ -52,3 +52,20 @@ async def test_label_shapes():
     assert "move_to" in types
     assert "mark_read" in types
     assert "star" in types
+
+
+@pytest.mark.asyncio
+async def test_default_filters_complete_with_evidence():
+    """Every filter on the default mock page reads cleanly and keeps raw text."""
+    filters = await _scrape_mock()
+
+    for name, f in filters.items():
+        assert f["scrape_issues"] == [], name
+        assert "Conditions" in f["raw"]["conditions_text"], name
+        assert "Actions" in f["raw"]["actions_text"], name
+
+    # The raw text holds what the parser reads, and form state innerText omits.
+    finance = filters["Finance Reports"]["raw"]
+    assert "finance@company.com" in finance["conditions_text"]
+    assert "Finance, Taxes" in finance["actions_text"]
+    assert "[checkbox] Starred: checked" in finance["actions_text"]

@@ -52,6 +52,8 @@ FILTER_CONDITION_ROWS = '[data-testid*="filter-modal:condition"]'
 FILTER_ACTION_FOLDER_ROW = '[data-testid="filter-modal:folder-row"]'
 FILTER_ACTION_LABEL_ROW = '[data-testid="filter-modal:label-row"]'
 FILTER_ACTION_MARK_AS_ROW = '[data-testid="filter-modal:mark-as-row"]'
+# Every action row, used to spot rows the scraper does not understand
+FILTER_ACTION_ANY_ROW = '[data-testid^="filter-modal:"][data-testid$="-row"]'
 
 # "Label as" row internals. UNVERIFIED against the live UI: these are the
 # shapes ProtonFusion's label reader assumes (see

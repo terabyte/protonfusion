@@ -36,6 +36,55 @@ SPECIAL_FOLDERS = {"Do not move", "Inbox - Default", "Trash", "Archive", "Spam"}
 # Bullet characters used by ProtonMail to indicate subfolder nesting
 BULLET_CHARS = " \t•·"
 
+# Model values the scraper can produce for a condition; anything else read
+# from the UI is reported as a scrape issue instead of guessed at.
+KNOWN_CONDITION_TYPES = set(UI_TYPE_TO_MODEL.values())
+KNOWN_OPERATORS = {"contains", "is", "matches", "starts_with", "ends_with"}
+
+# Action rows _scrape_actions understands. Any other visible
+# filter-modal:*-row in the Actions step marks the filter incomplete.
+KNOWN_ACTION_ROW_SELECTORS = [
+    selectors.FILTER_ACTION_FOLDER_ROW,
+    selectors.FILTER_ACTION_LABEL_ROW,
+    selectors.FILTER_ACTION_MARK_AS_ROW,
+]
+KNOWN_ACTION_ROW_TESTIDS = {
+    "filter-modal:folder-row", "filter-modal:label-row", "filter-modal:mark-as-row",
+}
+
+# Mark-as checkboxes we model (mark_read, star), by their label text.
+KNOWN_MARK_AS_LABELS = {"read", "starred"}
+
+# Label text of a checkbox: its enclosing <label>, else its aria-label.
+CHECKBOX_LABEL_JS = (
+    'el => (el.closest("label")?.innerText || el.getAttribute("aria-label") || "").trim()'
+)
+
+# Raw evidence for one wizard step: the enclosing modal's visible text plus
+# the state of its visible form fields, which innerText leaves out.
+STEP_TEXT_JS = """
+(anchor) => {
+  const root = anchor.closest('dialog, [role="dialog"], [class*="modal"]') || document.body;
+  const shown = el => el.offsetParent !== null || el.getClientRects().length > 0;
+  const lines = [root.innerText.trim()];
+  for (const field of root.querySelectorAll('input, textarea, select')) {
+    const wrapper = field.closest('label');
+    // Styled checkboxes hide the input itself but show its <label>
+    if (!shown(field) && !(wrapper && shown(wrapper))) continue;
+    const name = ((wrapper && wrapper.innerText) || field.getAttribute('aria-label') || field.name || '').trim();
+    if (field.type === 'checkbox' || field.type === 'radio') {
+      lines.push(`[${field.type}] ${name}: ${field.checked ? 'checked' : 'unchecked'}`);
+    } else {
+      lines.push(`[${field.tagName.toLowerCase()}] ${name} = ${field.value}`);
+    }
+  }
+  for (const button of root.querySelectorAll('button[aria-label]')) {
+    if (shown(button)) lines.push(`[button] ${button.getAttribute('aria-label')}`);
+  }
+  return lines.join('\\n');
+}
+"""
+
 # Label-row text that means "no label selected" rather than naming a label.
 LABEL_PLACEHOLDERS = {
     "", "do not label", "no label", "no labels", "none",
@@ -93,21 +142,39 @@ def _parse_label_row(
             _add(part)
 
     # Every piece of visible text must be a label we parsed or known chrome.
+    # Inline elements run together in innerText ("Label asDo not label"),
+    # so known tokens are cut out of each line rather than matched whole.
+    known_tokens = sorted((set(labels) | LABEL_ROW_CHROME) - {""}, key=len, reverse=True)
     unexplained = []
     for line in row_text.splitlines():
-        line = line.strip().strip(CHIP_REMOVE_GLYPHS).strip()
-        if not line:
-            continue
-        if line in labels:
-            continue
-        pieces = [piece.strip() for piece in line.split(",")]
-        if all(piece in labels or piece.lower() in LABEL_ROW_CHROME for piece in pieces):
-            continue
-        unexplained.append(line)
+        rest = line
+        for token in known_tokens:
+            rest = re.sub(re.escape(token), " ", rest, flags=re.IGNORECASE)
+        if rest.strip(" ,;\t" + CHIP_REMOVE_GLYPHS):
+            unexplained.append(line.strip())
     if unexplained:
         return labels, f"label row has text the reader did not account for: {unexplained!r}"
 
     return labels, None
+
+
+def _unread_filter_stub(idx: int, reason: str) -> dict:
+    """Placeholder for a filter row that could not be scraped at all.
+
+    Keeps the row visible in the results (flagged incomplete) instead of
+    silently dropping it, which would let a later cleanup treat the live
+    filter as though it had never been backed up.
+    """
+    return {
+        "name": f"Filter {idx} (unread)",
+        "enabled": True,
+        "priority": idx,
+        "logic": "and",
+        "conditions": [],
+        "actions": [],
+        "raw": None,
+        "scrape_issues": [reason],
+    }
 
 
 def _distribute_indices(total: int, workers: int) -> List[List[int]]:
@@ -190,8 +257,13 @@ class ProtonMailScraper(ProtonMailBrowser):
             elif isinstance(result, dict):
                 merged.update(result)
 
-        filters = [merged[idx] for idx in sorted(merged.keys())]
-        logger.info("Parallel scraping complete: %d filters collected", len(filters))
+        # A row no worker returned must not vanish from the backup; it
+        # stays in the list, flagged, so the caller sees it was not read.
+        filters = [
+            merged[idx] if idx in merged else _unread_filter_stub(idx, "no worker returned this filter")
+            for idx in range(total)
+        ]
+        logger.info("Parallel scraping complete: %d filters collected", len(merged))
         return filters
 
     async def _scrape_all_sequential(self, filter_items, total: int) -> List[dict]:
@@ -205,6 +277,7 @@ class ProtonMailScraper(ProtonMailBrowser):
                     logger.info("Scraped filter %d/%d: %s", idx + 1, total, filter_data.get("name", "Unknown"))
             except Exception as e:
                 logger.warning("Failed to scrape filter %d: %s", idx, e)
+                filters.append(_unread_filter_stub(idx, f"scrape failed: {e}"))
         return filters
 
     async def _scrape_worker(self, worker_id: int, indices: List[int]) -> Dict[int, dict]:
@@ -285,7 +358,13 @@ class ProtonMailScraper(ProtonMailBrowser):
             logger.warning("'Add filter' button not found (may be hidden on free tier)")
 
     async def _scrape_single_filter(self, item, idx: int, page: Page = None) -> Optional[dict]:
-        """Scrape a single filter item from the list."""
+        """Scrape a single filter item from the list.
+
+        Anything that stops the wizard being read in full (no Edit button,
+        wizard not opening, a row the scraper cannot parse, an exception) is
+        recorded in the returned "scrape_issues" list instead of being
+        swallowed, and the wizard's visible text is kept in "raw".
+        """
         if page is None:
             page = self.page
 
@@ -317,40 +396,71 @@ class ProtonMailScraper(ProtonMailBrowser):
         conditions = []
         actions = []
         logic = "and"
+        issues: List[str] = []
+        raw = {"conditions_text": "", "actions_text": "", "sieve_text": ""}
 
         try:
             edit_btn = await item.query_selector(
                 f'{selectors.FILTER_EDIT_BUTTON}, {selectors.FILTER_EDIT_BUTTON_ALT}'
             )
-            if edit_btn:
+            if not edit_btn:
+                issues.append("no Edit button in the filter row; wizard not opened")
+            else:
                 await edit_btn.click()
                 await page.wait_for_timeout(MODAL_TRANSITION_MS)
 
-                # Wizard opens on Name step - click Next to go to Conditions
-                next_btn = await page.query_selector(selectors.FILTER_MODAL_NEXT)
-                if next_btn:
-                    await next_btn.click()
-                    await page.wait_for_timeout(MODAL_TRANSITION_MS)
-
-                    conditions = await self._scrape_conditions(page=page)
-                    logic = await self._scrape_logic(page=page)
-
-                    # Click Next to go to Actions step
+                sieve_text = await self._read_sieve_editor(page)
+                if sieve_text is not None:
+                    # A Sieve filter: Edit opens the code editor, not the
+                    # wizard. The script itself is the whole filter.
+                    raw["sieve_text"] = sieve_text
+                else:
+                    # Wizard opens on Name step - click Next to go to Conditions
                     next_btn = await page.query_selector(selectors.FILTER_MODAL_NEXT)
-                    if next_btn:
+                    if not next_btn:
+                        issues.append("filter wizard did not open (no Next button)")
+                    else:
                         await next_btn.click()
                         await page.wait_for_timeout(MODAL_TRANSITION_MS)
-                        actions = await self._scrape_actions(page=page)
 
-                # Close modal
-                close_btn = await page.query_selector(
-                    f'{selectors.FILTER_MODAL_CLOSE}, {selectors.CANCEL_BUTTON}'
-                )
-                if close_btn:
-                    await close_btn.click()
-                    await page.wait_for_timeout(DROPDOWN_MS)
+                        conditions, condition_issues = await self._scrape_conditions(page=page)
+                        issues.extend(condition_issues)
+                        logic = await self._scrape_logic(page=page)
+                        raw["conditions_text"] = await self._read_step_text(
+                            page, [selectors.FILTER_CONDITION_ROWS, selectors.FILTER_MODAL_NEXT],
+                        )
+                        if not raw["conditions_text"]:
+                            issues.append("could not capture the Conditions step's raw text")
+
+                        # Click Next to go to Actions step
+                        next_btn = await page.query_selector(selectors.FILTER_MODAL_NEXT)
+                        if not next_btn:
+                            issues.append("could not reach the Actions step (no Next button)")
+                        else:
+                            await next_btn.click()
+                            await page.wait_for_timeout(MODAL_TRANSITION_MS)
+                            actions, action_issues = await self._scrape_actions(page=page)
+                            issues.extend(action_issues)
+                            raw["actions_text"] = await self._read_step_text(
+                                page, KNOWN_ACTION_ROW_SELECTORS + [selectors.FILTER_MODAL_NEXT],
+                            )
+                            if not raw["actions_text"]:
+                                issues.append("could not capture the Actions step's raw text")
         except Exception as e:
-            logger.debug("Could not open edit modal for filter '%s': %s", name, e)
+            issues.append(f"error while reading the filter wizard: {e}")
+
+        try:
+            close_btn = await page.query_selector(
+                f'{selectors.FILTER_MODAL_CLOSE}, {selectors.CANCEL_BUTTON}'
+            )
+            if close_btn:
+                await close_btn.click()
+                await page.wait_for_timeout(DROPDOWN_MS)
+        except Exception as e:
+            logger.debug("Could not close edit modal for filter '%s': %s", name, e)
+
+        for issue in issues:
+            logger.warning("Filter '%s' incomplete: %s", name, issue)
 
         return {
             "name": name,
@@ -359,34 +469,78 @@ class ProtonMailScraper(ProtonMailBrowser):
             "logic": logic,
             "conditions": conditions,
             "actions": actions,
+            "raw": raw,
+            "scrape_issues": issues,
         }
 
-    async def _scrape_conditions(self, page: Page = None) -> List[dict]:
-        """Scrape conditions from the Conditions step of the filter wizard."""
+    async def _read_sieve_editor(self, page: Page) -> Optional[str]:
+        """Return the Sieve editor's script if Edit opened it, else None."""
+        editor = await page.query_selector(selectors.SIEVE_EDITOR_CM)
+        if not editor or not await editor.is_visible():
+            return None
+        return await page.evaluate(
+            "() => { const cm = document.querySelector('.CodeMirror'); "
+            "return cm && cm.CodeMirror ? cm.CodeMirror.getValue() : cm.innerText; }"
+        )
+
+    async def _read_step_text(self, page: Page, anchor_selectors: List[str]) -> str:
+        """Capture the current wizard step's visible text as raw evidence.
+
+        Finds the modal around the first matching anchor (a row of this step,
+        else the Next button) and returns its innerText plus the state of its
+        visible form fields, which innerText does not include (text input
+        values, checkbox/radio states, dropdown aria-labels). Falls back to
+        the page body if no modal container is found. Never raises: evidence
+        capture must not be the thing that breaks a scrape.
+        """
+        try:
+            for anchor_selector in anchor_selectors:
+                anchor = await page.query_selector(anchor_selector)
+                if anchor:
+                    return await anchor.evaluate(STEP_TEXT_JS)
+            return await page.evaluate(
+                "() => document.body.innerText"
+            )
+        except Exception as e:
+            logger.debug("Could not capture step text: %s", e)
+            return ""
+
+    async def _scrape_conditions(self, page: Page = None) -> Tuple[List[dict], List[str]]:
+        """Scrape conditions from the Conditions step of the filter wizard.
+
+        Returns (conditions, issues). A condition that cannot be read, or
+        whose type/operator is not one the model knows, is an issue rather
+        than a guessed default: a dropped or misread condition widens what a
+        filter matches, which for a delete rule means deleting more mail.
+        """
         if page is None:
             page = self.page
         conditions = []
+        issues = []
 
         condition_rows = await page.query_selector_all(selectors.FILTER_CONDITION_ROWS)
+        if not condition_rows:
+            issues.append("Conditions step has no condition rows")
 
-        for row in condition_rows:
+        for row_index, row in enumerate(condition_rows):
             try:
                 select_btns = await row.query_selector_all(selectors.CUSTOM_SELECT_BUTTON)
-                cond_type = "subject"
-                operator = "contains"
+                type_label = await select_btns[0].get_attribute("aria-label") if select_btns else None
+                operator_label = (
+                    await select_btns[1].get_attribute("aria-label") if len(select_btns) >= 2 else None
+                )
+                if not type_label or not operator_label:
+                    issues.append(f"condition {row_index}: type/operator dropdown not readable")
+                    continue
 
-                if len(select_btns) >= 1:
-                    label = await select_btns[0].get_attribute("aria-label")
-                    if label:
-                        cond_type = label.lower().strip()
-
-                if len(select_btns) >= 2:
-                    label = await select_btns[1].get_attribute("aria-label")
-                    if label:
-                        operator = label.lower().strip()
-
+                cond_type = type_label.lower().strip()
+                operator = operator_label.lower().strip()
                 cond_type = UI_TYPE_TO_MODEL.get(cond_type, cond_type)
                 operator = UI_OPERATOR_TO_MODEL.get(operator, operator)
+                if cond_type not in KNOWN_CONDITION_TYPES:
+                    issues.append(f"condition {row_index}: unknown condition type {type_label!r}")
+                if operator not in KNOWN_OPERATORS:
+                    issues.append(f"condition {row_index}: unknown operator {operator_label!r}")
 
                 # Get values - check for tags/chips first, then input
                 value = ""
@@ -400,6 +554,8 @@ class ProtonMailScraper(ProtonMailBrowser):
                     value_el = await row.query_selector(selectors.CONDITION_VALUE_INPUT)
                     if value_el:
                         value = await value_el.input_value()
+                if not value.strip() and cond_type != "attachments":
+                    issues.append(f"condition {row_index}: no value found")
 
                 conditions.append({
                     "type": cond_type,
@@ -407,46 +563,60 @@ class ProtonMailScraper(ProtonMailBrowser):
                     "value": value.strip(),
                 })
             except Exception as e:
-                logger.debug("Failed to scrape condition: %s", e)
+                issues.append(f"condition {row_index}: could not be read ({e})")
 
-        return conditions
+        return conditions, issues
 
-    async def _scrape_actions(self, page: Page = None) -> List[dict]:
-        """Scrape actions from the Actions step of the filter wizard."""
+    async def _scrape_actions(self, page: Page = None) -> Tuple[List[dict], List[str]]:
+        """Scrape actions from the Actions step of the filter wizard.
+
+        Returns (actions, issues). Understood rows are folder, label and
+        mark-as. Any other visible action row is an issue, as is a known row
+        that cannot be read: an action the scraper does not record would be
+        missing from the Sieve script and lost when the filter is deleted.
+        """
         if page is None:
             page = self.page
         actions = []
+        issues = []
+
+        # Any visible action row we do not know how to read
+        for row in await page.query_selector_all(selectors.FILTER_ACTION_ANY_ROW):
+            testid = await row.get_attribute("data-testid")
+            if testid not in KNOWN_ACTION_ROW_TESTIDS and await row.is_visible():
+                issues.append(f"unsupported action row {testid!r}")
 
         # Check "Move to" folder selection
         folder_row = await page.query_selector(selectors.FILTER_ACTION_FOLDER_ROW)
         if folder_row:
             folder_btn = await folder_row.query_selector(selectors.CUSTOM_SELECT_BUTTON)
-            if folder_btn:
-                raw_label = await folder_btn.get_attribute("aria-label")
-                if raw_label and raw_label.strip() != "Do not move":
-                    # Build folder path map on first encounter
-                    if self._folder_path_map is None:
-                        await self._build_folder_path_map(folder_btn, page=page)
+            raw_label = await folder_btn.get_attribute("aria-label") if folder_btn else None
+            if not raw_label:
+                issues.append("folder row has no readable dropdown")
+            elif raw_label.strip() != "Do not move":
+                # Build folder path map on first encounter
+                if self._folder_path_map is None:
+                    await self._build_folder_path_map(folder_btn, page=page)
 
-                    folder = self._resolve_folder_path(raw_label)
-                    folder_map = {
-                        "Trash": "delete",
-                        "Archive": "archive",
-                        "Spam": "move_to",
-                        "Inbox - Default": "move_to",
-                    }
-                    action_type = folder_map.get(folder, "move_to")
-                    if action_type in ("delete", "archive"):
-                        actions.append({"type": action_type, "parameters": {}})
-                    else:
-                        actions.append({"type": "move_to", "parameters": {"folder": folder}})
+                folder = self._resolve_folder_path(raw_label)
+                folder_map = {
+                    "Trash": "delete",
+                    "Archive": "archive",
+                    "Spam": "move_to",
+                    "Inbox - Default": "move_to",
+                }
+                action_type = folder_map.get(folder, "move_to")
+                if action_type in ("delete", "archive"):
+                    actions.append({"type": action_type, "parameters": {}})
+                else:
+                    actions.append({"type": "move_to", "parameters": {"folder": folder}})
 
         # Check "Label as" selection (a filter can apply several labels)
         label_row = await page.query_selector(selectors.FILTER_ACTION_LABEL_ROW)
         if label_row:
             labels, issue = await self._read_label_row(label_row)
             if issue:
-                logger.warning("Label row: %s", issue)
+                issues.append(issue)
             for label in labels:
                 actions.append({"type": "label", "parameters": {"label": label}})
 
@@ -459,8 +629,16 @@ class ProtonMailScraper(ProtonMailBrowser):
             star_cb = await mark_row.query_selector(selectors.MARK_STARRED_CHECKBOX)
             if star_cb and await star_cb.is_checked():
                 actions.append({"type": "star", "parameters": {}})
+            # Any other ticked box in the row is a mark-as we do not model
+            for checkbox in await mark_row.query_selector_all('input[type="checkbox"]'):
+                box_label = await checkbox.evaluate(CHECKBOX_LABEL_JS)
+                if box_label.lower() not in KNOWN_MARK_AS_LABELS and await checkbox.is_checked():
+                    issues.append(f"unsupported mark-as option {box_label!r} is checked")
 
-        return actions
+        if not (folder_row or label_row or mark_row):
+            issues.append("Actions step has no folder, label or mark-as row")
+
+        return actions, issues
 
     async def _read_label_row(self, label_row) -> Tuple[List[str], Optional[str]]:
         """Read the selected labels from the Actions step's "Label as" row.

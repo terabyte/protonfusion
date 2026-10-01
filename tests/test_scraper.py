@@ -154,3 +154,13 @@ class TestParseLabelRow:
         labels, issue = _parse_label_row(["Work"], "", "", "Work\nPersonal")
         assert labels == ["Work"]
         assert "Personal" in issue
+
+    def test_inline_text_run_together(self):
+        """innerText joins inline elements with no separator."""
+        labels, issue = _parse_label_row([], "Do not label", "Do not label", "Label asDo not label")
+        assert labels == []
+        assert issue is None
+
+    def test_inline_unexplained_text_still_flagged(self):
+        labels, issue = _parse_label_row([], "Do not label", "Do not label", "Label asReceiptsDo not label")
+        assert "Receipts" in issue

@@ -72,6 +72,11 @@
       <div id="actionsContainer"></div>
     </div>
 
+    <!-- Sieve editor: shown instead of the wizard when editing a Sieve filter -->
+    <div id="step-sieve" class="wizard-step hidden">
+      <div class="CodeMirror" id="sieveEditor"></div>
+    </div>
+
     <!-- Single Next/Cancel buttons always visible at bottom of modal -->
     <div id="modalButtons">
       <button data-testid="filter-modal:next-button" id="nextBtn" onclick="advanceStep()">Next</button>
@@ -95,7 +100,7 @@
 
 <script>
 // Filter data - 10 mock filters with varying conditions/actions
-const FILTERS = [
+const DEFAULT_FILTERS = [
   {
     name: "Newsletter Trash",
     enabled: true,
@@ -217,6 +222,81 @@ const FILTERS = [
   }
 ];
 
+// Loaded with ?set=edge: filters the scraper must flag as incomplete,
+// plus one clean filter and one Sieve filter that must not be flagged.
+const EDGE_FILTERS = [
+  {
+    name: "Clean Labelled",
+    enabled: true,
+    logic: "all",
+    conditions: [{ type: "the sender", operator: "contains", values: ["a@example.com"] }],
+    folder: "Do not move",
+    labels: ["Work"],
+    labelShape: "chips",
+    markRead: false,
+    markStarred: false
+  },
+  {
+    name: "Has Autoreply",
+    enabled: false,
+    logic: "all",
+    conditions: [{ type: "the sender", operator: "contains", values: ["b@example.com"] }],
+    folder: "Work",
+    markRead: false,
+    markStarred: false,
+    extraRow: { testid: "filter-modal:autoreply-row", text: "Send auto-reply" }
+  },
+  {
+    name: "Plain Label Text",
+    enabled: true,
+    logic: "all",
+    conditions: [{ type: "the sender", operator: "contains", values: ["c@example.com"] }],
+    folder: "Do not move",
+    labels: ["Receipts"],
+    labelShape: "plain",
+    markRead: false,
+    markStarred: false
+  },
+  {
+    name: "Label Count Only",
+    enabled: true,
+    logic: "all",
+    conditions: [{ type: "the sender", operator: "contains", values: ["d@example.com"] }],
+    folder: "Do not move",
+    labels: ["One", "Two"],
+    labelShape: "count",
+    markRead: false,
+    markStarred: false
+  },
+  {
+    name: "Unknown Operator",
+    enabled: true,
+    logic: "all",
+    conditions: [{ type: "the subject", operator: "does not contain", values: ["hello"] }],
+    folder: "Trash",
+    markRead: false,
+    markStarred: false
+  },
+  {
+    name: "Extra Mark Option",
+    enabled: true,
+    logic: "all",
+    conditions: [{ type: "the sender", operator: "contains", values: ["e@example.com"] }],
+    folder: "Do not move",
+    markRead: true,
+    markStarred: false,
+    markExtra: "Pinned"
+  },
+  {
+    name: "My Sieve",
+    enabled: true,
+    sieve: 'require ["fileinto"];\nif header :contains "Subject" "x" { fileinto "X"; }'
+  }
+];
+
+const FILTERS = new URLSearchParams(location.search).get('set') === 'edge'
+  ? EDGE_FILTERS : DEFAULT_FILTERS;
+
 let currentFilter = null;
 let currentStep = 'name';
 const STEP_ORDER = ['name', 'conditions', 'actions'];
@@ -257,6 +337,17 @@ function buildFilterTable() {
 function openModal(idx) {
   currentFilter = FILTERS[idx];
   document.getElementById('modalFilterName').value = currentFilter.name;
+
+  // Sieve filters open the code editor instead of the wizard
+  if (currentFilter.sieve) {
+    const editor = document.getElementById('sieveEditor');
+    editor.textContent = currentFilter.sieve;
+    editor.CodeMirror = { getValue: () => currentFilter.sieve };
+    document.getElementById('nextBtn').classList.add('hidden');
+    showStep('sieve');
+    document.getElementById('filterModal').classList.add('visible');
+    return;
+  }
 
   // Reset to name step
   currentStep = 'name';
@@ -376,6 +467,25 @@ function buildActions() {
     chooseBtn.className = 'select';
     chooseBtn.textContent = 'Choose labels';
     labelRow.appendChild(chooseBtn);
+  } else if (currentFilter.labelShape === 'plain') {
+    // Labels as bare text next to a placeholder button: a layout the
+    // reader does not know, which it must flag rather than read as none.
+    labels.forEach(l => {
+      const span = document.createElement('span');
+      span.textContent = l;
+      labelRow.appendChild(span);
+    });
+    const labelBtn = document.createElement('button');
+    labelBtn.className = 'select';
+    labelBtn.setAttribute('aria-label', 'Do not label');
+    labelBtn.textContent = 'Do not label';
+    labelRow.appendChild(labelBtn);
+  } else if (currentFilter.labelShape === 'count') {
+    const labelBtn = document.createElement('button');
+    labelBtn.className = 'select';
+    labelBtn.setAttribute('aria-label', `${labels.length} labels`);
+    labelBtn.textContent = `${labels.length} labels`;
+    labelRow.appendChild(labelBtn);
   } else {
     const labelBtn = document.createElement('button');
     labelBtn.className = 'select';
@@ -406,13 +516,38 @@ function buildActions() {
   starLabel.prepend(starCb);
   markRow.appendChild(starLabel);
 
+  if (currentFilter.markExtra) {
+    const extraLabel = document.createElement('label');
+    extraLabel.textContent = currentFilter.markExtra;
+    const extraCb = document.createElement('input');
+    extraCb.type = 'checkbox';
+    extraCb.checked = true;
+    extraLabel.prepend(extraCb);
+    markRow.appendChild(extraLabel);
+  }
+
   container.appendChild(markRow);
+
+  // An action row the scraper has no reader for
+  if (currentFilter.extraRow) {
+    const extra = document.createElement('div');
+    extra.setAttribute('data-testid', currentFilter.extraRow.testid);
+    const extraLabel = document.createElement('label');
+    extraLabel.textContent = currentFilter.extraRow.text;
+    const toggle = document.createElement('input');
+    toggle.type = 'checkbox';
+    toggle.checked = true;
+    extraLabel.prepend(toggle);
+    extra.appendChild(extraLabel);
+    container.appendChild(extra);
+  }
 }
 
 function closeModal() {
   document.getElementById('filterModal').classList.remove('visible');
   currentFilter = null;
   currentStep = 'name';
+  document.getElementById('nextBtn').classList.remove('hidden');
   // Hide folder dropdown too
   document.getElementById('folderDropdown').classList.add('hidden');
 }
