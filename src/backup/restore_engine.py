@@ -180,32 +180,3 @@ class RestoreEngine:
                 errors.append(f"{backed.name}: failed to {verb}: {reason}")
                 logger.error("Error restoring filter '%s': %s", backed.name, reason)
         return done, errors
-
-    async def restore_from_backup(self, backup: Backup, current_filters: List[ProtonMailFilter]) -> dict:
-        """Plan, then enable before disabling, and return a report dict.
-
-        Enabling first means a failure among the enables has switched
-        nothing off yet. Report keys (lists): enabled, disabled,
-        already_correct, skipped, not_found, ambiguous, errors,
-        script_not_restored.
-        """
-        plan = self.plan(backup, current_filters)
-        enabled, enable_errors = await self.apply(plan.to_enable, True)
-        disabled, disable_errors = await self.apply(plan.to_disable, False)
-        report = {
-            "enabled": enabled,
-            "disabled": disabled,
-            "skipped": plan.skipped,
-            "not_found": plan.not_found,
-            "ambiguous": plan.ambiguous,
-            "already_correct": plan.already_correct,
-            "errors": enable_errors + disable_errors,
-            "script_not_restored": plan.script_differs,
-        }
-        logger.info(
-            "Restore complete: %d enabled, %d disabled, %d not found, %d ambiguous, "
-            "%d already correct, %d errors",
-            len(enabled), len(disabled), len(plan.not_found), len(plan.ambiguous),
-            len(plan.already_correct), len(report["errors"]),
-        )
-        return report
