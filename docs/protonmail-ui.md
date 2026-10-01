@@ -132,7 +132,7 @@ On the free plan, only 1 custom filter is allowed. After creating one:
 - "Add sieve filter" button disappears
 - A "Get more filters" upsell replaces both buttons
 
-The sync workflow disables existing UI filters first to free the slot.
+The sync workflow disables the UI filters the script replaces first to free the slot.
 
 ## Delete Confirmation
 

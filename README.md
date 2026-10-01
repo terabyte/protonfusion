@@ -16,7 +16,7 @@ ProtonMail lets you create filters one at a time through the UI. Over time, you 
 2. **Backs them up** to timestamped JSON files (with checksums for integrity)
 3. **Consolidates** redundant filters into optimized Sieve rules (e.g., 50 "delete spam from X" filters become 1 Sieve rule)
 4. **Generates** a clean Sieve script you can upload to ProtonMail
-5. **Syncs** the Sieve script to your account and disables the old UI filters (non-destructively)
+5. **Syncs** the Sieve script to your account and disables the UI filters it replaces (non-destructively)
 
 **Before** (3 separate UI filters):
 ```
@@ -164,7 +164,7 @@ A GitHub Actions workflow runs unit + integration tests on every push and pull r
 | `consolidate` | Generate optimized Sieve script from a backup |
 | `consolidate --keep-live-rules` | Also carry forward rules that exist only in the live Sieve section (saved to the archive) |
 | `diff` | Compare two backups or a backup vs current state |
-| `sync` | Upload Sieve script and disable old UI filters; refuses if the new script drops live rules (`--allow-rule-removal` to override) or was built from pre-1.1 filters with no raw text (`--allow-incomplete` to override) |
+| `sync` | Upload Sieve script and disable the UI filters whose rules it carries (Sieve filters and filters newer than the backup stay on; all are re-enabled if the upload fails); refuses if the new script drops live rules (`--allow-rule-removal` to override) or was built from pre-1.1 filters with no raw text (`--allow-incomplete` to override) |
 | `sync --show-diff-only` | Preview Sieve changes against the live script (no upload) |
 | `restore` | Restore filters to a previous backup state |
 | `cleanup` | Delete disabled filters whose rules are in the live Sieve section and that have a verified backup copy (with confirmation) |
@@ -244,7 +244,8 @@ python -m src.main consolidate --backup latest --include-args-from 2026-02-11_08
 ProtonFusion is designed to be non-destructive:
 
 - **Backup first**: Every operation starts from a backup. Your original filter state is always preserved.
-- **Disable, don't delete**: When syncing, old UI filters are disabled (not deleted). You can re-enable them anytime.
+- **Disable, don't delete**: When syncing, the UI filters whose rules are in the uploaded script are disabled (not deleted). You can re-enable them anytime.
+- **Disable only what the script replaces**: `sync` matches each live filter to the backup by content and leaves Sieve filters, filters created or edited after the backup, and filters it cannot read in full enabled, listing them. If the upload fails it re-enables everything it disabled.
 - **Refuse rather than drop**: `sync` refuses to upload a ProtonFusion section that would lose any rule in the live one, and `cleanup` never deletes a filter whose rules are not in the live ProtonFusion section (override: `--include-uncovered`).
 - **Dry-run mode**: Preview what `sync` and `cleanup` will do before committing.
 - **Checksums**: Backups include SHA256 checksums to detect corruption.
@@ -302,7 +303,7 @@ backup → consolidate → sync → cleanup → backup → consolidate → ...
 
 1. `backup` scrapes live filters into `backup.json` and copies `archive.json` from the previous snapshot
 2. `consolidate` reads both files, generates Sieve, and auto-archives included backup filters
-3. `sync` uploads the Sieve script and disables UI filters
+3. `sync` uploads the Sieve script and disables the UI filters it replaces
 4. `cleanup` deletes disabled UI filters from ProtonMail, holding back any whose rules are not in the live ProtonFusion section or that lack a verified backup copy
 5. Next `backup` scrapes the now-reduced filter list; archived filters carry forward via `archive.json`
 6. Next `consolidate` still has all rules from the archive

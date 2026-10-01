@@ -24,6 +24,7 @@ from src.models.filter_models import ProtonMailFilter, FilterStatus
 from src.models.backup_models import Backup, ArchiveEntry
 from src.backup.backup_manager import BackupManager, unverified_for_deletion
 from src.backup.diff_engine import DiffEngine
+from src.backup.sync_plan import DisablePlan, carried_hashes, plan_disable
 from src.utils.private_files import write_private_file
 from src.parser.filter_parser import parse_scraped_filters
 from src.consolidator.consolidation_engine import ConsolidationEngine
@@ -936,6 +937,78 @@ def _rule_preservation_check(
     return False
 
 
+def _print_disable_plan(plan: DisablePlan, backup_id: str, preview: bool) -> None:
+    """Say which enabled UI filters sync disables, which it leaves on, and why.
+
+    `preview` words it as what a sync would do (--dry-run, --show-diff-only).
+    """
+    verb = "Would disable" if preview else "Disabling"
+    console.print(f"\n[bold]{verb} {len(plan.to_disable)} UI filters whose rules are in this script:")
+    for f in plan.to_disable:
+        console.print(f"  - {escape(f.name)}")
+
+    leave = "would be left" if preview else "were left"
+    groups = [
+        (plan.after_backup, "yellow",
+         f"created or changed after backup '{backup_id}' {leave} enabled; their rules are not in "
+         "this script. Run 'backup' and 'consolidate' to fold them in."),
+        (plan.not_in_script, "cyan",
+         f"left out of this script (--exclude or deprecated) {leave} enabled."),
+        (plan.unreadable, "yellow",
+         f"could not be read in full, so they cannot be matched to the backup; they {leave} enabled."),
+        (plan.sieve, "cyan", f"Sieve filters {leave} enabled (sync never disables these)."),
+    ]
+    for filters, color, text in groups:
+        if not filters:
+            continue
+        console.print(f"[{color}]{len(filters)} {text}")
+        for f in filters:
+            console.print(f"  [{color}]- {escape(f.name)}")
+
+
+async def _reenable_after_failed_upload(sync_client, disabled: List[ProtonMailFilter], backup_id: str) -> None:
+    """Turn back on every filter this sync disabled, after its upload failed.
+
+    Otherwise a failed upload leaves neither the old UI filters nor the new
+    script handling mail. Anything that cannot be re-enabled is listed with
+    the `restore` command that brings it back.
+    """
+    if not disabled:
+        console.print("[yellow]No filters had been disabled, so nothing else changed.")
+        return
+    try:
+        # The failed upload may have left the Sieve editor open over the list
+        await sync_client.navigate_to_filters()
+    except Exception as e:
+        logger.warning("Could not reload the filters page before re-enabling: %s", e)
+
+    failed = []
+    for f in disabled:
+        try:
+            enabled = await sync_client.set_row_enabled(f.priority, f.name, True)
+        except Exception as e:
+            logger.warning("Re-enabling '%s' failed: %s", f.name, e)
+            enabled = False
+        if not enabled:
+            failed.append(f)
+
+    console.print(f"[green]Re-enabled {len(disabled) - len(failed)} of the {len(disabled)} filters this sync disabled.")
+    if failed:
+        console.print(f"[bold red]Could not re-enable {len(failed)} filter(s); they are still disabled:")
+        for f in failed:
+            console.print(f"  [red]- {escape(f.name)}")
+        console.print(f"[yellow]To re-enable them, run: restore --backup {backup_id}")
+
+
+def _print_carried_source(from_manifest: bool, backup_id: str) -> None:
+    """Note when the filters to disable are inferred from the backup, not the manifest."""
+    if not from_manifest:
+        console.print(
+            f"[yellow]No consolidate manifest describes this script, so every wizard filter in "
+            f"backup '{backup_id}' is taken to be in it."
+        )
+
+
 @app.command()
 def sync(
     sieve_file: str = typer.Option("", "--sieve", help="Path to Sieve script to upload (default: from snapshot)"),
@@ -953,16 +1026,25 @@ def sync(
         False, "--allow-incomplete",
         help="Upload even if the script was built from filters with no raw evidence (pre-1.1 backups)",
     ),
+    workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
 ):
-    """Upload Sieve script and disable old UI filters (reversible).
+    """Upload Sieve script and disable the UI filters it replaces (reversible).
+
+    Only wizard filters whose rules are in the script (same content as a
+    filter 'consolidate' put into it) are disabled. Sieve filters, filters
+    created or changed after the backup, and filters that cannot be read in
+    full stay enabled. If the upload fails, every filter this run disabled
+    is enabled again.
 
     Refuses (exit 1, nothing changed) if the new ProtonFusion section would drop
     any rule present in the live section, unless --allow-rule-removal is given.
     Also refuses if 'consolidate' built the script from filters with no raw
     evidence (backups made before format 1.1), unless --allow-incomplete is given.
     """
+    from src.scraper.protonmail_scraper import ProtonMailScraper
     from src.scraper.protonmail_sync import ProtonMailSync
 
+    _workers = max(1, min(workers, 10))
     manager = BackupManager()
     snapshot_dir = manager.snapshot_dir_for(backup_id)
 
@@ -1004,10 +1086,21 @@ def sync(
             )
             raise typer.Exit(1)
 
+    # Which UI filters the script replaces, by content. `reference` adds the
+    # archive so a filter the script leaves out on purpose (deprecated) is
+    # reported as such rather than as new since the backup.
+    carried, from_manifest = carried_hashes(manifest, sieve_path, bkup.filters)
+    reference = list(bkup.filters) + [e.filter for e in manager.load_archive(snapshot_dir)]
+
     if dry_run:
         console.print(Panel("[bold yellow]DRY RUN - No changes will be made"))
         console.print(f"\nWould upload Sieve script ({len(sieve_script)} chars)")
-        console.print(f"Would disable {bkup.metadata.enabled_count} UI filters")
+        _print_carried_source(from_manifest, backup_id)
+        _print_disable_plan(plan_disable(bkup.filters, carried, reference, SIEVE_FILTER_NAME), backup_id, preview=True)
+        console.print(
+            "[cyan]This list comes from the backup. Filters created since then are not in it and "
+            "would be left enabled; --show-diff-only lists them from the live account.[/]"
+        )
 
         _print_carry_forward_note(snapshot_dir)
         console.print(
@@ -1034,134 +1127,161 @@ def sync(
             raise typer.Exit(1)
         return
 
+    async def _read_live():
+        """Scrape the live filters and read the live script in one read-only session.
+
+        Same order as `backup`: the wizard scrape, then the Sieve read. The
+        scrape is what lets sync match rows to backed-up filters by content.
+        """
+        scraper = ProtonMailScraper(headless=headless, credentials=creds, storage_state_path=state or None)
+        try:
+            await scraper.initialize()
+            await scraper.login()
+            await scraper.navigate_to_filters()
+            with console.status("[bold green]Reading filters to match against the backup..."):
+                live_filters = parse_scraped_filters(await scraper.scrape_all_filters(workers=_workers))
+            with console.status("[bold green]Reading existing Sieve script..."):
+                existing_script = await scraper.read_sieve_script(filter_name=SIEVE_FILTER_NAME)
+            return live_filters, existing_script or ""
+        finally:
+            await scraper.close()
+
     if show_diff_only:
         async def _show_diff():
-            sync_client = ProtonMailSync(headless=headless, credentials=creds, storage_state_path=state or None)
-            try:
-                await sync_client.initialize()
-                await sync_client.login()
-                await sync_client.navigate_to_filters()
+            live_filters, existing_script = await _read_live()
 
-                with console.status("[bold green]Reading existing Sieve script..."):
-                    existing_script = await sync_client.read_sieve_script(
-                        filter_name=SIEVE_FILTER_NAME,
-                    )
-
-                if not existing_script:
-                    existing_script = ""
-
-                _print_carry_forward_note(snapshot_dir)
-                safe = _rule_preservation_check(
-                    existing_script, sieve_script, allow_rule_removal,
-                    backup_script=bkup.sieve_script,
+            _print_carry_forward_note(snapshot_dir)
+            safe = _rule_preservation_check(
+                existing_script, sieve_script, allow_rule_removal,
+                backup_script=bkup.sieve_script,
+            )
+            if not safe:
+                console.print("[bold red]A real sync would REFUSE and change nothing.")
+            else:
+                _print_carried_source(from_manifest, backup_id)
+                _print_disable_plan(
+                    plan_disable(live_filters, carried, reference, SIEVE_FILTER_NAME), backup_id, preview=True,
                 )
-                if not safe:
-                    console.print("[bold red]A real sync would REFUSE and change nothing.")
 
-                merged_script = SieveGenerator.merge_with_existing(sieve_script, existing_script)
+            merged_script = SieveGenerator.merge_with_existing(sieve_script, existing_script)
 
-                if existing_script == merged_script:
-                    console.print(Panel("[bold green]No changes — live script already matches."))
-                    return safe
-
-                diff_lines = list(difflib.unified_diff(
-                    existing_script.splitlines(keepends=True),
-                    merged_script.splitlines(keepends=True),
-                    fromfile="live (ProtonMail)",
-                    tofile="merged (would upload)",
-                ))
-
-                if not diff_lines:
-                    console.print(Panel("[bold green]No changes — live script already matches."))
-                    return safe
-
-                colored = []
-                for line in diff_lines:
-                    text = line.rstrip("\n")
-                    if line.startswith("+++") or line.startswith("---"):
-                        colored.append(f"[bold]{text}[/bold]")
-                    elif line.startswith("@@"):
-                        colored.append(f"[cyan]{text}[/cyan]")
-                    elif line.startswith("+"):
-                        colored.append(f"[green]{text}[/green]")
-                    elif line.startswith("-"):
-                        colored.append(f"[red]{text}[/red]")
-                    else:
-                        colored.append(text)
-
-                console.print(Panel(
-                    "\n".join(colored),
-                    title="Sieve Diff (live vs would-upload)",
-                    border_style="cyan",
-                ))
+            if existing_script == merged_script:
+                console.print(Panel("[bold green]No changes: the live script already matches."))
                 return safe
-            finally:
-                await sync_client.close()
+
+            diff_lines = list(difflib.unified_diff(
+                existing_script.splitlines(keepends=True),
+                merged_script.splitlines(keepends=True),
+                fromfile="live (ProtonMail)",
+                tofile="merged (would upload)",
+            ))
+
+            if not diff_lines:
+                console.print(Panel("[bold green]No changes: the live script already matches."))
+                return safe
+
+            colored = []
+            for line in diff_lines:
+                text = line.rstrip("\n")
+                if line.startswith("+++") or line.startswith("---"):
+                    colored.append(f"[bold]{text}[/bold]")
+                elif line.startswith("@@"):
+                    colored.append(f"[cyan]{text}[/cyan]")
+                elif line.startswith("+"):
+                    colored.append(f"[green]{text}[/green]")
+                elif line.startswith("-"):
+                    colored.append(f"[red]{text}[/red]")
+                else:
+                    colored.append(text)
+
+            console.print(Panel(
+                "\n".join(colored),
+                title="Sieve Diff (live vs would-upload)",
+                border_style="cyan",
+            ))
+            return safe
 
         if not _run_browser_command(_show_diff()):
             raise typer.Exit(1)
         return
 
     async def _run():
+        live_filters, existing_script = await _read_live()
+        if existing_script:
+            console.print(f"[cyan]Found existing Sieve script ({len(existing_script)} chars)")
+
+        # Must run before anything is disabled or uploaded: a refusal
+        # leaves the account exactly as it was.
+        if not _rule_preservation_check(
+            existing_script, sieve_script, allow_rule_removal,
+            backup_script=bkup.sieve_script,
+        ):
+            console.print("[bold red]Sync refused. No filters were disabled and nothing was uploaded.")
+            return False
+
+        merged_script = SieveGenerator.merge_with_existing(sieve_script, existing_script)
+        if existing_script and SECTION_BEGIN not in existing_script:
+            console.print("[yellow]User rules detected; preserving them outside ProtonFusion section")
+
+        _print_carried_source(from_manifest, backup_id)
+        plan = plan_disable(live_filters, carried, reference, SIEVE_FILTER_NAME)
+        _print_disable_plan(plan, backup_id, preview=False)
+
         sync_client = ProtonMailSync(headless=headless, credentials=creds, storage_state_path=state or None)
         try:
             await sync_client.initialize()
             await sync_client.login()
             await sync_client.navigate_to_filters()
 
-            # Read existing script and merge
-            with console.status("[bold green]Reading existing Sieve script..."):
-                existing_script = await sync_client.read_sieve_script(
-                    filter_name=SIEVE_FILTER_NAME,
+            # Disable the replaced filters first: ProtonMail limits active
+            # filters per plan, so a new Sieve filter can fail to save while
+            # they are on. Rows are found by scraped position and name.
+            disabled: List[ProtonMailFilter] = []
+            not_disabled: List[ProtonMailFilter] = []
+            for f in plan.to_disable:
+                if await sync_client.set_row_enabled(f.priority, f.name, False):
+                    disabled.append(f)
+                else:
+                    not_disabled.append(f)
+            console.print(f"[green]Disabled {len(disabled)} filters")
+            if not_disabled:
+                console.print(
+                    f"[yellow]Could not find {len(not_disabled)} filter(s) to disable; "
+                    "they stay enabled alongside the Sieve script:"
                 )
-
-            if existing_script:
-                console.print(f"[cyan]Found existing Sieve script ({len(existing_script)} chars)")
-
-            # Must run before anything is disabled or uploaded: a refusal
-            # leaves the account exactly as it was.
-            if not _rule_preservation_check(
-                existing_script or "", sieve_script, allow_rule_removal,
-                backup_script=bkup.sieve_script,
-            ):
-                console.print("[bold red]Sync refused. No filters were disabled and nothing was uploaded.")
-                return False
-
-            if existing_script:
-                merged_script = SieveGenerator.merge_with_existing(sieve_script, existing_script)
-                if SECTION_BEGIN not in existing_script:
-                    console.print("[yellow]User rules detected — preserving outside ProtonFusion section")
-            else:
-                merged_script = SieveGenerator.merge_with_existing(sieve_script, "")
-
-            # Disable UI filters first to free up filter slots (ProtonMail
-            # enforces a per-plan limit on active filters, so uploading a new
-            # Sieve filter will fail if we're already at the limit).
-            console.print("[bold green]Disabling old UI filters...")
-            disabled = await sync_client.disable_all_ui_filters()
-            console.print(f"[green]Disabled {disabled} filters")
+                for f in not_disabled:
+                    console.print(f"  [yellow]- {escape(f.name)}")
 
             console.print("[bold green]Uploading merged Sieve script...")
-            success = await sync_client.upload_sieve(
-                merged_script, filter_name=SIEVE_FILTER_NAME,
-            )
-            if success:
-                console.print("[green]Sieve script uploaded successfully!")
-            else:
-                console.print(
-                    "[red]Failed to upload Sieve script. "
-                    f"{disabled} UI filters were disabled.\n"
-                    f"[yellow]To re-enable them, run: restore --backup {backup_id}"
-                )
+            upload_error = None
+            try:
+                success = await sync_client.upload_sieve(merged_script, filter_name=SIEVE_FILTER_NAME)
+            except Exception as e:
+                success = False
+                upload_error = e
+
+            if not success:
+                reason = f" ({escape(str(upload_error))})" if upload_error else ""
+                console.print(f"[bold red]Failed to upload Sieve script{reason}.")
+                if sync_client.upload_hit_filter_limit:
+                    console.print(
+                        "[yellow]The 'Add sieve filter' button was missing, which is how ProtonMail "
+                        "shows an account at its active-filter limit. The filters left enabled above "
+                        "count toward it. Disable or delete enough of them by hand (or fold them in "
+                        "with 'backup' and 'consolidate'), then re-run sync."
+                    )
+                await _reenable_after_failed_upload(sync_client, disabled, backup_id)
                 return False
 
+            console.print("[green]Sieve script uploaded successfully!")
             if manager.promote_manifest(snapshot_dir):
                 console.print("[cyan]Sync manifest updated")
 
             console.print(Panel(
                 f"[bold green]Sync complete![/]\n\n"
                 f"Sieve uploaded: Yes\n"
-                f"Filters disabled: {disabled}\n\n"
+                f"Filters disabled: {len(disabled)}\n"
+                f"Filters left enabled: {len(plan.left_enabled) + len(not_disabled)}\n\n"
                 f"[yellow]To rollback, run: restore --backup {backup_id}",
                 title="Sync Complete",
             ))

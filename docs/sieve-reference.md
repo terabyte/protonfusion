@@ -198,5 +198,5 @@ Within the same action type, rules that consolidate more original filters are pl
 
 - ProtonMail treats labels as folders internally; both use `fileinto`.
 - The `\\Seen` and `\\Flagged` IMAP flags require the `imap4flags` extension.
-- ProtonMail's free tier limits you to 1 custom filter. ProtonFusion's sync workflow disables existing UI filters before uploading the Sieve filter, freeing the slot.
+- ProtonMail's free tier limits you to 1 custom filter. ProtonFusion's sync workflow disables the UI filters the script replaces before uploading the Sieve filter, freeing the slot.
 - ProtonMail's Sieve editor uses CodeMirror 5. The upload process uses the JavaScript API (`setValue()`) to properly trigger change detection.
