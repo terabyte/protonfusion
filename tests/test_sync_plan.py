@@ -5,9 +5,10 @@ from pathlib import Path
 import pytest
 
 from src.backup.sync_plan import (
-    carried_hashes, check_disable_candidates, manifest_describes, plan_disable, rules_in_script,
+    carried_hashes, check_disable_candidates, incomplete_in_script, incompleteness_reasons,
+    manifest_describes, plan_disable, rules_in_script,
 )
-from src.consolidator.carry_forward import filter_facts
+from src.consolidator.carry_forward import CARRIED_PREFIX, filter_facts
 from src.models.filter_models import (
     ActionType, ConditionType, FilterAction, FilterCondition, LogicType, Operator,
     ProtonMailFilter, ScrapeEvidence,
@@ -123,3 +124,25 @@ def test_manifest_describes_relative_and_absolute_spellings(tmp_path, monkeypatc
     assert not manifest_describes({"sieve_file": "other.sieve"}, script)
     assert not manifest_describes({}, script)
     assert not manifest_describes(None, script)
+
+
+def test_incompleteness_reasons():
+    assert incompleteness_reasons(_wizard("a@x.com")) == []
+    issue = _wizard("a@x.com").model_copy(update={"scrape_issues": ["condition 0: no value found"]})
+    assert incompleteness_reasons(issue) == ["condition 0: no value found"]
+    legacy = _wizard("a@x.com").model_copy(update={"raw": None})
+    assert incompleteness_reasons(legacy) == ["no raw evidence (backed up before format 1.1)"]
+    carried = legacy.model_copy(update={"name": f"{CARRIED_PREFIX}a"})
+    assert incompleteness_reasons(carried) == []
+
+
+def test_incomplete_in_script_by_facts_or_manifest_hash_listed_once():
+    in_script = _wizard("a@x.com").model_copy(update={"scrape_issues": ["x"]})
+    by_hash = _wizard("b@x.com").model_copy(update={"raw": None})
+    elsewhere = _wizard("c@x.com").model_copy(update={"scrape_issues": ["x"]})
+    complete = _wizard("d@x.com")
+    facts = filter_facts(in_script) | filter_facts(complete)
+    found = incomplete_in_script(
+        [in_script, in_script, by_hash, elsewhere, complete], facts, {by_hash.content_hash},
+    )
+    assert found == [in_script, by_hash]

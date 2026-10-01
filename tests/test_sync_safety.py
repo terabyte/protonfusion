@@ -535,6 +535,77 @@ class TestFiltersWithoutEvidence:
         assert result.exit_code == 0, result.output
 
 
+class TestSyncRefusesIncompleteSources:
+    """sync refuses a script holding a rule from any filter not read in full (P2, sync half).
+
+    Checked from the backup and archive against the script itself, so it
+    holds for --sieve scripts and does not depend on the manifest. Scripts
+    are generated from the complete twin of each filter, so the tests do not
+    depend on what consolidate does with incomplete filters.
+    """
+
+    ISSUE = "condition 1: unknown condition type 'The size'"
+
+    @pytest.fixture
+    def script_with_incomplete(self, cli_snapshots_dir, fake_sync, tmp_path):
+        """A backup with one incomplete filter, and a --sieve script holding its rule."""
+        good, partial = _filter("good@x.com"), _filter("partial@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([
+            good, partial.model_copy(update={"scrape_issues": [self.ISSUE]}),
+        ])
+        FakeScraper.filters = [good, partial]
+        path = tmp_path / "s.sieve"
+        path.write_text(_section_for([good, partial]))
+        return str(path)
+
+    def test_sync_refuses(self, script_with_incomplete, fake_sync):
+        result = runner.invoke(app, ["sync", "--sieve", script_with_incomplete])
+        assert result.exit_code == 1, result.output
+        assert "- Filter partial@x.com" in result.output
+        assert self.ISSUE in result.output
+        assert "- Filter good@x.com" not in result.output
+        assert "Sync refused" in result.output
+        assert fake_sync.calls == []
+
+    def test_dry_run_refuses(self, script_with_incomplete, fake_sync):
+        result = runner.invoke(app, ["sync", "--dry-run", "--sieve", script_with_incomplete])
+        assert result.exit_code == 1, result.output
+        assert "Sync refused" in result.output
+
+    def test_allow_incomplete_proceeds(self, script_with_incomplete, fake_sync):
+        result = runner.invoke(app, ["sync", "--allow-incomplete", "--sieve", script_with_incomplete])
+        assert result.exit_code == 0, result.output
+        assert any(c[0] == "upload" for c in fake_sync.calls)
+
+    def test_incomplete_filter_not_in_script_is_fine(self, cli_snapshots_dir, fake_sync, tmp_path):
+        good, partial = _filter("good@x.com"), _filter("partial@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([
+            good, partial.model_copy(update={"scrape_issues": [self.ISSUE]}),
+        ])
+        FakeScraper.filters = [good]
+        path = tmp_path / "s.sieve"
+        path.write_text(_section_for([good]))
+        result = runner.invoke(app, ["sync", "--sieve", str(path)])
+        assert result.exit_code == 0, result.output
+
+    def test_incomplete_archived_filter_in_script_refuses(self, cli_snapshots_dir, fake_sync, tmp_path):
+        from src.models.backup_models import ArchiveEntry
+        good, partial = _filter("good@x.com"), _filter("partial@x.com")
+        manager = BackupManager(cli_snapshots_dir)
+        manager.create_backup([good])
+        snapshot_dir = manager.snapshot_dir_for("latest")
+        manager.write_archive(snapshot_dir, [ArchiveEntry(
+            filter=partial.model_copy(update={"scrape_issues": [self.ISSUE], "enabled": False}),
+            archived_at="2026-01-01T00:00:00+00:00", source_snapshot=snapshot_dir.name,
+        )])
+        FakeScraper.filters = [good]
+        path = tmp_path / "s.sieve"
+        path.write_text(_section_for([good, partial]))
+        result = runner.invoke(app, ["sync", "--sieve", str(path)])
+        assert result.exit_code == 1, result.output
+        assert "- Filter partial@x.com" in result.output
+
+
 class TestCleanupExitCode:
     """cleanup exits 1 whenever it kept back anything it would otherwise delete."""
 

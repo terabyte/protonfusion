@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AbstractSet, Iterable, List, Optional, Set
 
-from src.consolidator.carry_forward import filter_facts
+from src.consolidator.carry_forward import filter_facts, is_carried
 from src.generator.sieve_rules import Fact
 from src.models.filter_models import ProtonMailFilter
 
@@ -116,6 +116,45 @@ def rules_in_script(f: ProtonMailFilter, script_fact_set: AbstractSet[Fact]) -> 
         logger.warning("Could not generate the rules of filter '%s' to check them: %s", f.name, e)
         return False
     return bool(facts) and facts <= script_fact_set
+
+
+def incompleteness_reasons(f: ProtonMailFilter) -> List[str]:
+    """Why a backed-up filter cannot be trusted as a full record of its rule ([] if it can).
+
+    A scrape issue means part of the filter could not be read. No raw
+    evidence means it came from a backup made before format 1.1, by the
+    scraper that silently dropped labels. Carried-forward filters were
+    rebuilt from the live Sieve section, never scraped, so they are exempt.
+    """
+    if f.is_sieve:
+        return []
+    reasons = list(f.scrape_issues)
+    if f.raw is None and not is_carried(f):
+        reasons.append("no raw evidence (backed up before format 1.1)")
+    return reasons
+
+
+def incomplete_in_script(
+    source_filters: Iterable[ProtonMailFilter],
+    script_fact_set: AbstractSet[Fact],
+    manifest_hashes: AbstractSet[str] = frozenset(),
+) -> List[ProtonMailFilter]:
+    """The incomplete filters (backup or archive) whose rule is in the script being uploaded.
+
+    A filter's rule counts as in the script when its generated facts are,
+    or when a manifest that describes this script lists its content_hash
+    (which catches a rule the current generator would no longer produce).
+    Each filter is listed once, however many times it appears.
+    """
+    found: List[ProtonMailFilter] = []
+    seen: Set[str] = set()
+    for f in source_filters:
+        if f.content_hash in seen or not incompleteness_reasons(f):
+            continue
+        if f.content_hash in manifest_hashes or rules_in_script(f, script_fact_set):
+            seen.add(f.content_hash)
+            found.append(f)
+    return found
 
 
 def plan_disable(

@@ -25,7 +25,8 @@ from src.models.backup_models import Backup, ArchiveEntry
 from src.backup.backup_manager import BackupManager, unverified_for_deletion
 from src.backup.diff_engine import DiffEngine
 from src.backup.sync_plan import (
-    DisablePlan, carried_hashes, check_disable_candidates, manifest_describes, plan_disable,
+    DisablePlan, carried_hashes, check_disable_candidates, incomplete_in_script,
+    incompleteness_reasons, plan_disable,
 )
 from src.utils.private_files import write_private_file
 from src.parser.filter_parser import parse_scraped_filters
@@ -1039,6 +1040,32 @@ def _uploaded_facts(merged_script: str) -> set:
         return set()
 
 
+def _refuse_incomplete_sources(incomplete: List[ProtonMailFilter], allow_incomplete: bool) -> None:
+    """Refuse the sync (exit 1) when the script holds rules from incomplete filters.
+
+    Lists each filter with why it is incomplete. --allow-incomplete turns
+    the refusal into a warning.
+    """
+    if not incomplete:
+        return
+    console.print(
+        f"[bold red]This script holds rules from {len(incomplete)} filter(s) that were not read in "
+        "full; their rules may be wider or narrower than the real filters, or missing labels:"
+    )
+    for f in incomplete:
+        console.print(f"  [red]- {escape(f.name)}")
+        for reason in incompleteness_reasons(f):
+            console.print(f"      {escape(reason)}")
+    if allow_incomplete:
+        console.print("[yellow]--allow-incomplete given: proceeding anyway.")
+        return
+    console.print(
+        "[bold red]Sync refused. No filters were disabled and nothing was uploaded.[/]\n"
+        "[yellow]Run 'backup' and 'consolidate' again, or pass --allow-incomplete."
+    )
+    raise typer.Exit(1)
+
+
 def _print_carried_source(from_manifest: bool, backup_id: str) -> None:
     """Note when the filters to disable are inferred from the backup, not the manifest."""
     if not from_manifest:
@@ -1063,7 +1090,8 @@ def sync(
     ),
     allow_incomplete: bool = typer.Option(
         False, "--allow-incomplete",
-        help="Upload even if the script was built from filters with no raw evidence (pre-1.1 backups)",
+        help="Upload even if the script holds rules from filters that were not read in full "
+             "(scrape issues, or no raw evidence from a pre-1.1 backup)",
     ),
     workers: int = typer.Option(5, "--workers", "-w", help="Parallel browser tabs for scraping (1=sequential, max 10)"),
 ):
@@ -1077,8 +1105,10 @@ def sync(
 
     Refuses (exit 1, nothing changed) if the new ProtonFusion section would drop
     any rule present in the live section, unless --allow-rule-removal is given.
-    Also refuses if 'consolidate' built the script from filters with no raw
-    evidence (backups made before format 1.1), unless --allow-incomplete is given.
+    Also refuses if the script holds rules from filters in the backup or
+    archive that were not read in full (scrape issues, or no raw evidence
+    because they were backed up before format 1.1), unless --allow-incomplete
+    is given.
     """
     from src.scraper.protonmail_scraper import ProtonMailScraper
     from src.scraper.protonmail_sync import ProtonMailSync
@@ -1103,32 +1133,24 @@ def sync(
     creds = _get_credentials(credentials_file, False)
     bkup = manager.load_backup(backup_id)
 
-    # A script built from pre-1.1 filters may be missing their labels. The
-    # manifest only describes the snapshot's own script, so it is checked
-    # only when that is the script being uploaded.
     manifest = manager.load_manifest(snapshot_dir) or {}
-    without_evidence = manifest.get("without_evidence", [])
-    if without_evidence and manifest_describes(manifest, sieve_path):
-        console.print(
-            f"[bold red]This script was built from {len(without_evidence)} filter(s) with no raw "
-            "evidence (backed up before format 1.1); labels or other actions may be missing:"
-        )
-        for name in without_evidence:
-            console.print(f"  [red]- {escape(name)}")
-        if allow_incomplete:
-            console.print("[yellow]--allow-incomplete given: proceeding anyway.")
-        else:
-            console.print(
-                "[bold red]Sync refused. No filters were disabled and nothing was uploaded.[/]\n"
-                "[yellow]Run 'backup' and 'consolidate' again, or pass --allow-incomplete."
-            )
-            raise typer.Exit(1)
-
     # Which UI filters the script replaces, by content. `reference` adds the
     # archive so a filter the script leaves out on purpose (deprecated) is
     # reported as such rather than as new since the backup.
     carried, from_manifest = carried_hashes(manifest, sieve_path, bkup.filters)
     reference = list(bkup.filters) + [e.filter for e in manager.load_archive(snapshot_dir)]
+
+    # A rule taken from a filter the scraper could not fully read (or one
+    # backed up before format 1.1, which may be missing its labels) may be
+    # wider or narrower than the real filter. Checked against the script
+    # itself, from the backup and archive, so it holds for any script.
+    _refuse_incomplete_sources(
+        incomplete_in_script(
+            reference, _uploaded_facts(sieve_script),
+            set(manifest.get("filter_hashes", [])) if from_manifest else set(),
+        ),
+        allow_incomplete,
+    )
 
     if dry_run:
         console.print(Panel("[bold yellow]DRY RUN - No changes will be made"))
