@@ -1220,8 +1220,13 @@ def cleanup(
     whose name another filter shares, since deletion works by name. Auto-archives
     disabled filters before deletion to preserve them for future consolidation,
     except those it refuses, so a refusal holds on the next run too.
-    Also refuses (exit 1) to delete any filter without a complete backup copy in the
+    Also refuses to delete any filter without a complete backup copy in the
     latest snapshot, unless --allow-incomplete is given.
+
+    Exits 1 whenever it kept back a filter it would otherwise have deleted
+    (uncovered, unverified, or sharing a name) or a deletion failed, so a
+    script can tell a partial cleanup from a complete one. Sieve filters are
+    never candidates, so leaving them alone does not count.
     """
     from src.scraper.protonmail_scraper import ProtonMailScraper
     from src.scraper.protonmail_sync import ProtonMailSync
@@ -1256,6 +1261,9 @@ def cleanup(
             console.print("[green]No disabled filters to clean up.")
             return
 
+        # Every filter kept back for safety; any at all makes the exit code 1
+        held_back: List[ProtonMailFilter] = []
+
         # Only filters whose rules are all in the live section are safe to delete.
         live_facts = set()
         live_section = extract_section(live_script or "")
@@ -1281,10 +1289,11 @@ def cleanup(
                     "[yellow]Keeping them: deleting would lose their rules. Run 'sync' first, "
                     "or pass --include-uncovered to delete them anyway."
                 )
+                held_back += uncovered
                 disabled = [f for f in disabled if f not in uncovered]
                 if not disabled:
-                    console.print("[green]Nothing safe to delete.")
-                    return
+                    console.print("[yellow]Nothing safe to delete.")
+                    raise typer.Exit(1)
         # Deletion is the one irreversible step, so each filter needs a
         # backup copy known to be whole. Checked against the snapshot as it
         # was before the auto-archive below adds the live scrape to it.
@@ -1346,6 +1355,7 @@ def cleanup(
                 console.print(f"  [red]- {escape(f.name)}[/]: {escape(reason)}")
             if refused:
                 console.print("[yellow]Re-run 'backup', or pass --allow-incomplete to delete them anyway.")
+                held_back += [f for f, _ in refused]
 
         to_delete = [f for f in disabled if not (refused and id(f) in unverified_ids)]
 
@@ -1362,21 +1372,23 @@ def cleanup(
             for f in same_name:
                 console.print(f"  [red]- {escape(f.name)}")
             console.print("[yellow]Rename them in ProtonMail so each name is unique, then re-run.")
+            held_back += same_name
             to_delete = [f for f in to_delete if name_counts[f.name] == 1]
 
         if dry_run:
             console.print(f"\n[bold yellow]DRY RUN - No filters will be deleted ({len(to_delete)} would be).")
-            if refused:
+            if held_back:
                 raise typer.Exit(1)
             return
 
         if not to_delete:
+            console.print("[yellow]Nothing safe to delete.")
             raise typer.Exit(1)
 
         confirm = typer.confirm(f"\nDelete {len(to_delete)} disabled filters? This cannot be undone!")
         if not confirm:
             console.print("[yellow]Cleanup cancelled.")
-            if refused:
+            if held_back:
                 raise typer.Exit(1)
             return
 
@@ -1396,8 +1408,9 @@ def cleanup(
         finally:
             await sync_client.close()
 
-        if refused:
-            console.print(f"[bold red]{len(refused)} filter(s) were not deleted (see above).")
+        not_deleted = len(held_back) + len(to_delete) - deleted_count
+        if not_deleted:
+            console.print(f"[bold red]{not_deleted} filter(s) were not deleted (see above).")
             raise typer.Exit(1)
 
     _run_browser_command(_run())

@@ -229,7 +229,8 @@ class TestCleanupOnlyDeletesCoveredFilters:
         BackupManager(cli_snapshots_dir).create_backup([covered, orphan])
 
         result = runner.invoke(app, ["cleanup"], input="y\n")
-        assert result.exit_code == 0, result.output
+        # Exit 1: something was held back, though the covered one went
+        assert result.exit_code == 1, result.output
         assert ("delete", covered.name) in fake_sync.calls
         assert ("delete", orphan.name) not in fake_sync.calls
         assert "NOT in the live" in result.output
@@ -240,7 +241,7 @@ class TestCleanupOnlyDeletesCoveredFilters:
         BackupManager(cli_snapshots_dir).create_backup(fake_scraper.filters)
 
         result = runner.invoke(app, ["cleanup"], input="y\n")
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 1, result.output
         assert fake_sync.calls == []
         assert "Nothing safe to delete" in result.output
 
@@ -260,7 +261,7 @@ class TestCleanupOnlyDeletesCoveredFilters:
         new_filter = _filter("brand-new@x.com", enabled=False)
         fake_scraper.filters = [new_filter]
         result = runner.invoke(app, ["cleanup"], input="y\n")
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         assert fake_sync.calls == []
 
 
@@ -340,6 +341,7 @@ class TestCleanupHoldsBackSharedNames:
         BackupManager(cli_snapshots_dir).create_backup([covered, uncovered, other])
 
         result = runner.invoke(app, ["cleanup"], input="y\n")
+        assert result.exit_code == 1, result.output
         assert ("delete", "News") not in fake_sync.calls
         assert ("delete", other.name) in fake_sync.calls
         assert "name is shared" in result.output
@@ -352,6 +354,7 @@ class TestCleanupHoldsBackSharedNames:
         BackupManager(cli_snapshots_dir).create_backup([disabled, enabled])
 
         result = runner.invoke(app, ["cleanup"], input="y\n")
+        assert result.exit_code == 1, result.output
         assert fake_sync.calls == []
         assert "name is shared" in result.output
 
@@ -361,7 +364,8 @@ class TestCleanupHoldsBackSharedNames:
         fake_scraper.filters = [a, b]
         BackupManager(cli_snapshots_dir).create_backup([a, b])
 
-        runner.invoke(app, ["cleanup", "--include-uncovered", "--allow-incomplete"], input="y\n")
+        result = runner.invoke(app, ["cleanup", "--include-uncovered", "--allow-incomplete"], input="y\n")
+        assert result.exit_code == 1, result.output
         assert fake_sync.calls == []
 
 
@@ -405,3 +409,38 @@ class TestFiltersWithoutEvidence:
         other.write_text(_section_for([_filter("new@x.com")]))
         result = runner.invoke(app, ["sync", "--sieve", str(other)])
         assert result.exit_code == 0, result.output
+
+
+class TestCleanupExitCode:
+    """cleanup exits 1 whenever it kept back anything it would otherwise delete."""
+
+    def test_everything_deleted_exits_0(self, cli_snapshots_dir, fake_sync, fake_scraper):
+        covered = _filter("in-sieve@x.com", enabled=False)
+        fake_scraper.filters = [covered]
+        fake_sync.live_script = _section_for([covered])
+        BackupManager(cli_snapshots_dir).create_backup([covered])
+        result = runner.invoke(app, ["cleanup"], input="y\n")
+        assert result.exit_code == 0, result.output
+
+    def test_dry_run_with_uncovered_exits_1(self, cli_snapshots_dir, fake_sync, fake_scraper):
+        covered = _filter("in-sieve@x.com", enabled=False)
+        orphan = _filter("nowhere@x.com", enabled=False)
+        fake_scraper.filters = [covered, orphan]
+        fake_sync.live_script = _section_for([covered])
+        BackupManager(cli_snapshots_dir).create_backup([covered, orphan])
+        result = runner.invoke(app, ["cleanup", "--dry-run"])
+        assert result.exit_code == 1, result.output
+        assert fake_sync.calls == []
+
+    def test_failed_delete_exits_1(self, cli_snapshots_dir, fake_sync, fake_scraper, monkeypatch):
+        covered = _filter("in-sieve@x.com", enabled=False)
+        fake_scraper.filters = [covered]
+        fake_sync.live_script = _section_for([covered])
+        BackupManager(cli_snapshots_dir).create_backup([covered])
+
+        async def refuse(self, name):
+            return False
+        monkeypatch.setattr(FakeSync, "delete_filter", refuse)
+        result = runner.invoke(app, ["cleanup"], input="y\n")
+        assert result.exit_code == 1, result.output
+        assert "1 filter(s) were not deleted" in result.output
