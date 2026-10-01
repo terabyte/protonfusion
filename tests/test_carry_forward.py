@@ -389,3 +389,21 @@ def test_escaped_slash_in_folder_round_trips():
     assert unconvertible == []
     assert carried.actions[0].parameters == {"folder": "Work/Misc\\/Others"}
     assert _generated_facts([carried]) == facts
+
+
+def test_candidate_with_extra_facts_is_unconvertible(monkeypatch):
+    """A candidate whose regeneration yields MORE than its facts is refused.
+
+    Verification must be equality: a candidate that also produces some
+    other fact would add a rule nobody had, so a superset is not a match.
+    """
+    import src.consolidator.carry_forward as carry_forward
+
+    facts = script_facts('if address :is "From" "a" { fileinto "trash"; }')
+    extra = next(iter(script_facts('if address :is "From" "zzz" { fileinto "trash"; }')))
+    real_filter_facts = carry_forward.filter_facts
+    monkeypatch.setattr(carry_forward, "filter_facts", lambda f: real_filter_facts(f) | {extra})
+
+    filters, unconvertible = facts_to_filters(facts)
+    assert filters == []
+    assert set(unconvertible) == facts

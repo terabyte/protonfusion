@@ -402,3 +402,18 @@ class TestValidateScript:
         from src.generator.sieve_rules import _tokenize
         (tok,) = [t for t in _tokenize('text:\nline one\n..two\n.\n') if t.kind == "string"]
         assert tok.value == "line one\n.two\n"
+
+
+def test_wildcard_fix_ignores_atoms_with_wildcards():
+    """Only a wildcard-less :matches can be the old begins/ends-with form.
+
+    The live "a*" already has a live wildcard. Escaping it and adding one
+    gives "a\\**" (begins with the literal "a*"), a different and narrower
+    rule, so the pair is a real drop, not a correction.
+    """
+    live = _wrap('if address :matches "From" "a*" { fileinto "Junk"; }')
+    new = 'if address :matches "From" "a\\\\**" { fileinto "Junk"; }\n'
+    result = compare_sections(live, new)
+    assert result.wildcard_fixes == []
+    assert [d.describe() for d in result.dropped] == ['address from :matches "a*"  ->  fileinto "Junk";']
+    assert not result.is_safe
