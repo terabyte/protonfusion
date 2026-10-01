@@ -383,3 +383,114 @@ class TestOldSnapshot:
         assert predates_strict_parser(Backup(version="1.0"))
         assert predates_strict_parser(Backup(version="garbage"))
         assert not predates_strict_parser(Backup(version=BACKUP_FORMAT_VERSION))
+
+
+class TestKeepLiveRulesDoesNotLaunder:
+    """W3: a misread old archive entry stays unverified through --keep-live-rules.
+
+    The old sync generated the live section from the misread filter and
+    disabled the real one, which a fresh strict backup now reads correctly
+    (and differently). Carrying the live rule forward copies the misread
+    rule, so the copy must not be trusted either.
+    """
+
+    ACT = [{"type": "move_to", "parameters": {"folder": "News"}}]
+    MISREAD = _filter("News", [{"type": "sender", "operator": "contains", "value": "news"}], ACT)
+    CORRECT = _filter(
+        "News", [{"type": "sender", "operator": "starts_with", "value": "news"}], ACT, enabled=False,
+    )
+    MISREAD_LIVE = ':contains "From" "news"'
+
+    @pytest.fixture
+    def account(self, snapshots_dir):
+        """Strict backup holding the correct (disabled) filter, a live section holding
+        the misread rule, and an unstamped archive entry for the misread filter."""
+        from src.generator.sieve_generator import SieveGenerator
+        consolidated, _ = ConsolidationEngine().consolidate([self.MISREAD])
+        live = SieveGenerator.merge_with_existing(SieveGenerator().generate(consolidated), "")
+        BackupManager(snapshots_dir).create_backup([self.CORRECT], sieve_script=live)
+        TestOldSnapshot._write_legacy_archive(snapshots_dir, [self.MISREAD])
+        return snapshots_dir
+
+    def test_warning_names_probable_correct_version(self, account):
+        result = runner.invoke(app, ["consolidate"])
+        flat = " ".join(result.output.split())
+        assert "comes back from a fresh 'backup'" not in flat
+        assert "reads a filter of this name differently (switched off)" in flat
+        assert 'sender starts_with "news" -> move_to(News)' in flat
+        assert "probably the correct version" in flat
+        assert "snapshot set-status \"<name>\" deprecated" in flat
+
+    def test_keep_live_rules_does_not_launder(self, account):
+        from src.backup.backup_manager import unverified_old_entries
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        result = runner.invoke(app, ["consolidate", "--keep-live-rules"])
+        assert result.exit_code == 0, result.output
+        assert self.MISREAD_LIVE not in _script(account)
+        assert "stay out of the script" in result.output
+        m = BackupManager(account)
+        entries = m.load_archive(account / "latest")
+        copies = [e for e in entries if e.filter.name.startswith("Carried")]
+        assert len(copies) == 1 and copies[0].matches_unverified == [self.MISREAD.content_hash]
+        assert copies[0] in unverified_old_entries(entries, m.load_backup("latest"))
+        # A second run neither trusts nor duplicates it
+        assert runner.invoke(app, ["consolidate", "--keep-live-rules"]).exit_code == 0
+        assert self.MISREAD_LIVE not in _script(account)
+
+    @pytest.mark.parametrize("args", [[], ["--keep-live-rules"]])
+    def test_copy_stays_unverified_after_old_entry_removed(self, account, args):
+        """Removing the old entry does not make its copy, or a fresh copy of the
+        copy (carried again from a later snapshot), trusted."""
+        assert runner.invoke(app, ["consolidate", "--keep-live-rules"]).exit_code == 0
+        assert runner.invoke(app, ["snapshot", "remove", "News"]).exit_code == 0
+        m = BackupManager(account)
+        m.create_backup([self.CORRECT], sieve_script=m.load_backup("latest").sieve_script)
+        result = runner.invoke(app, ["consolidate", *args])
+        assert "Carried forward from the live ProtonFusion section" in " ".join(result.output.split())
+        assert self.MISREAD_LIVE not in _script(account)
+
+    def test_copy_stamped_by_earlier_build_is_not_trusted(self, account):
+        """An earlier build stamped the copy current with no record of the match."""
+        from src.consolidator.carry_forward import facts_to_filters
+        from src.generator.sieve_rules import script_facts
+        from src.models.backup_models import ArchiveEntry, BACKUP_FORMAT_VERSION
+        m = BackupManager(account)
+        carried, _ = facts_to_filters(script_facts(m.load_backup("latest").sieve_script), label="prev")
+        entries = m.load_archive(account / "latest") + [
+            ArchiveEntry(filter=f, source_snapshot="prev", source_format=BACKUP_FORMAT_VERSION) for f in carried
+        ]
+        m.write_archive(account / "latest", entries)
+        result = runner.invoke(app, ["consolidate"])
+        assert carried[0].name in result.output
+        assert self.MISREAD_LIVE not in _script(account)
+        # The match is recorded, so removing the old entry does not clear it
+        assert runner.invoke(app, ["snapshot", "remove", "News"]).exit_code == 0
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        assert self.MISREAD_LIVE not in _script(account)
+
+    def test_copy_trusted_once_old_entry_confirmed(self, account):
+        """A strict backup reading the old entry's exact content confirms it, and
+        with it the copy of its rule."""
+        assert runner.invoke(app, ["consolidate", "--keep-live-rules"]).exit_code == 0
+        m = BackupManager(account)
+        m.create_backup(
+            [self.MISREAD.model_copy(update={"enabled": False})], sieve_script=m.load_backup("latest").sieve_script,
+        )
+        result = runner.invoke(app, ["consolidate"])
+        assert "Old Archive Entries" not in result.output
+        assert self.MISREAD_LIVE in _script(account)
+
+    def test_advised_remedy_uses_the_strict_read(self, account):
+        """Switch the strict read on, back up again, deprecate the old entry: the
+        script holds the correct rule and --keep-live-rules no longer copies the
+        misread one."""
+        m = BackupManager(account)
+        live = m.load_backup("latest").sieve_script
+        switched_on = self.CORRECT.model_copy(update={"enabled": True, "status": FilterStatus.ENABLED})
+        m.create_backup([switched_on], sieve_script=live)
+        assert runner.invoke(app, ["snapshot", "set-status", "News", "deprecated"]).exit_code == 0
+        result = runner.invoke(app, ["consolidate", "--keep-live-rules"])
+        assert result.exit_code == 0, result.output
+        script = _script(account)
+        assert '"news*"' in script and self.MISREAD_LIVE not in script
+        assert not [e for e in m.load_archive(account / "latest") if e.filter.name.startswith("Carried")]

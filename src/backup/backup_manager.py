@@ -6,12 +6,13 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from src.models.backup_models import (
     Backup, BackupMetadata, Archive, ArchiveEntry, BACKUP_FORMAT_VERSION,
     STRICT_PARSER_FORMAT_VERSION,
 )
+from src.consolidator.carry_forward import filter_facts, is_carried
 from src.models.filter_models import ProtonMailFilter
 from src.utils.config import SNAPSHOTS_DIR, TOOL_VERSION
 from src.utils.private_files import write_private_file
@@ -58,26 +59,106 @@ def predates_strict_parser(backup: Backup) -> bool:
     return format_predates_strict_parser(backup.version)
 
 
+# Why an archive entry is unverified (classify_old_entries)
+OLD_BACKUP_ENTRY = "old backup"
+CARRIED_COPY_ENTRY = "carried copy"
+
+
+def strict_confirmations(backup: Backup) -> Set[str]:
+    """Content hashes a fresh, strict read in `backup` confirms.
+
+    Empty for a backup older than the strict parser. Only fully read
+    filters with raw evidence count: an incomplete filter's hash covers
+    only what was read, so it can equal a misread entry's while the real
+    filter differs.
+    """
+    if predates_strict_parser(backup):
+        return set()
+    return {f.content_hash for f in backup.filters if f.is_complete and f.raw is not None}
+
+
+def classify_old_entries(
+    entries: List[ArchiveEntry], backup: Backup,
+) -> List[Tuple[ArchiveEntry, str]]:
+    """The archive entries that may hold a misread rule, each with why, in archive order.
+
+    OLD_BACKUP_ENTRY: archived from a backup older than the strict parser
+    (source_format older than 1.3, or unrecorded) and not confirmed. It is
+    confirmed when `backup` holds a fully read filter with the same
+    content_hash (strict_confirmations): the fresh, strict scrape read
+    exactly the same rule, so it was not misread. archive.json is carried
+    from snapshot to snapshot, so without this check a misread filter
+    archived from an old backup would outlive the re-backup that the
+    old-snapshot warning asks for.
+
+    CARRIED_COPY_ENTRY: a carried-forward filter (rebuilt from the live
+    ProtonFusion section) that copies the rule of an unconfirmed old
+    entry. The live section was generated from that entry's filter by
+    the old version, so it holds the same possibly misread rule, and
+    copying it from there confirms nothing. Such a copy stays unverified
+    while it shares a rule with an unconfirmed old entry, or while any
+    entry recorded in its matches_unverified (the old entries it matched
+    when carried, see ArchiveEntry) is unconfirmed: removing the old
+    entry does not make the copy any less suspect.
+    """
+    confirmed = strict_confirmations(backup)
+    classified: Dict[int, str] = {}
+    suspect_facts: Set = set()
+    for e in entries:
+        if is_carried(e.filter) or not format_predates_strict_parser(e.source_format):
+            continue
+        if e.filter.content_hash in confirmed:
+            continue
+        classified[id(e)] = OLD_BACKUP_ENTRY
+        suspect_facts |= filter_facts(e.filter)
+    # A hash recorded by a carried copy is cleared once an entry with that
+    # hash is confirmed: by the current backup, or stamped by a strict read.
+    cleared = confirmed | {
+        e.filter.content_hash for e in entries
+        if not is_carried(e.filter) and not format_predates_strict_parser(e.source_format)
+    }
+    for e in entries:
+        if not is_carried(e.filter):
+            continue
+        if any(h not in cleared for h in e.matches_unverified) or filter_facts(e.filter) & suspect_facts:
+            classified[id(e)] = CARRIED_COPY_ENTRY
+        elif format_predates_strict_parser(e.source_format):
+            # An unstamped carried entry from an earlier build
+            classified[id(e)] = OLD_BACKUP_ENTRY
+    return [(e, classified[id(e)]) for e in entries if id(e) in classified]
+
+
 def unverified_old_entries(entries: List[ArchiveEntry], backup: Backup) -> List[ArchiveEntry]:
     """The archive entries that may hold a misread rule, so must not feed a script.
 
-    An entry predates the strict parser when its source_format does (or is
-    unrecorded). It is still trusted when `backup` is itself strict and
-    holds a fully read filter with the same content_hash: the fresh, strict
-    scrape read exactly the same rule, so it was not misread. archive.json
-    is carried from snapshot to snapshot, so without this check a misread
-    filter archived from an old backup would outlive the re-backup that
-    the old-snapshot warning asks for. A filter the scrape could not fully
-    read confirms nothing: its hash covers only what was read, so it can
-    equal a misread entry's while the real filter differs.
+    See classify_old_entries for which entries these are and why.
     """
-    strict_hashes = set()
-    if not predates_strict_parser(backup):
-        strict_hashes = {f.content_hash for f in backup.filters if f.is_complete and f.raw is not None}
-    return [
-        e for e in entries
-        if format_predates_strict_parser(e.source_format) and e.filter.content_hash not in strict_hashes
-    ]
+    return [e for e, _ in classify_old_entries(entries, backup)]
+
+
+def suspect_matches(f: ProtonMailFilter, classified: List[Tuple[ArchiveEntry, str]]) -> List[str]:
+    """Content hashes of the unconfirmed old entries whose rule `f` may copy.
+
+    `classified` is classify_old_entries' result for the archive. Those
+    are the unconfirmed old entries sharing a rule with `f`, plus what any
+    unverified carried copy sharing a rule with `f` recorded (so a copy of
+    a copy inherits its suspicion, even after the old entry it matched was
+    removed). For a filter carry-forward is about to rebuild from the live
+    section, a non-empty result means the live rule it copies may be a
+    misread rule, so the copy must not be trusted (recorded in
+    ArchiveEntry.matches_unverified). Also used to record the matches of a
+    copy found by its rule alone, so its suspicion outlives the old entry.
+    """
+    facts = filter_facts(f)
+    hashes: Set[str] = set()
+    for e, kind in classified:
+        if e.filter is f or not filter_facts(e.filter) & facts:
+            continue
+        if kind == OLD_BACKUP_ENTRY and not is_carried(e.filter):
+            hashes.add(e.filter.content_hash)
+        elif kind == CARRIED_COPY_ENTRY:
+            hashes |= set(e.matches_unverified)
+    return sorted(hashes)
 
 
 def _checksum_of(filter_data: list, sieve_script: str) -> str:
