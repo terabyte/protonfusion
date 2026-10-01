@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
 from src.models.backup_models import Backup
-from src.models.filter_models import ProtonMailFilter, FilterStatus
+from src.models.filter_models import ProtonMailFilter, FilterStatus, legacy_identity
 from src.scraper.protonmail_sync import ProtonMailSync
 
 logger = logging.getLogger(__name__)
@@ -33,7 +33,9 @@ def _identity(f: ProtonMailFilter) -> Tuple[str, str]:
     """
     if f.is_sieve:
         return ("sieve", f.name)
-    return ("content", f.content_hash)
+    # legacy_identity, not content_hash: a backup from before a format fix
+    # (", "-joined chips, unescaped "/") must still match its live filter.
+    return ("content", legacy_identity(f))
 
 
 def _by_identity(filters: List[ProtonMailFilter]) -> Dict[Tuple[str, str], List[ProtonMailFilter]]:

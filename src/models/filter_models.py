@@ -417,6 +417,53 @@ class ProtonMailFilter(BaseModel):
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
+# The separator older scrapers joined a condition's value chips with.
+LEGACY_CHIP_SEPARATOR = ", "
+
+# Action parameters holding a folder or label path, whose "/" inside a
+# name older scrapers did not escape.
+FOLDER_PATH_PARAMETERS = ("folder", "label")
+
+
+def legacy_identity(f: ProtonMailFilter) -> str:
+    """A content identity that reads older backups' encodings as the scraper writes them now.
+
+    content_hash changes when the stored form of the same filter changes,
+    so a backup written before a format fix no longer matches the live
+    scrape of the unchanged filter. This normalises both sides the same
+    way before hashing:
+
+    - a single value is split on ", " (older scrapers joined the wizard's
+      value chips that way; now each chip is an entry of `values`);
+    - a backslash-escaped "/" in a folder or label path is read as "/" (older scrapers did
+      not escape a "/" inside a name, see escape_folder_segment);
+    - action types and system-folder targets older versions wrote are
+      mapped to their current form (migrate_legacy_action).
+
+    Only for matching a backed-up filter to its live row (restore). It is
+    coarser than content_hash: a literal containing ", " and the same
+    words as separate chips share an identity, so a caller pairing
+    several filters with one identity must treat that as ambiguous.
+    """
+    parts = [f"name={f.name}", f"logic={f.logic.value}"]
+    for c in f.conditions:
+        if c.values:
+            keys = list(c.values)
+        else:
+            keys = c.value.split(LEGACY_CHIP_SEPARATOR)
+        parts.append(f"cond:{c.type.value}|{c.operator.value}|{json.dumps(keys)}")
+    for a in f.actions:
+        action = migrate_legacy_action(a.model_dump(mode="json"))
+        params = dict(action.get("parameters") or {})
+        for key in FOLDER_PATH_PARAMETERS:
+            if isinstance(params.get(key), str):
+                params[key] = params[key].replace("\\/", "/")
+        parts.append(f"act:{action['type']}|{json.dumps(params, sort_keys=True, default=str)}")
+    if f.is_sieve:
+        parts.append(f"sieve={f.raw.sieve_text if f.raw else ''}")
+    return "legacy:" + hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
+
+
 class ConditionGroup(BaseModel):
     """A group of conditions from a single original filter, preserving its logic.
 
