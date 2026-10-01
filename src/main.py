@@ -1189,9 +1189,23 @@ def _merged_script_problem(script: str) -> Optional[str]:
     return None
 
 
-def _report_merged_script_problem(script: str) -> bool:
-    """Print why the merged script cannot be uploaded; True if it can."""
-    problem = _merged_script_problem(script)
+def _merge_for_upload(new_script: str, existing_script: str) -> tuple[Optional[str], Optional[str]]:
+    """Merge the new script into the existing one: (merged, None), or (None, why not).
+
+    merge_with_existing raises SieveParseError when either script does not
+    parse (usually the user's rules outside the ProtonFusion section), and
+    a merge that succeeds is still validated, so every caller gets one
+    answer to "can this be uploaded?" and refuses the same way.
+    """
+    try:
+        merged = SieveGenerator.merge_with_existing(new_script, existing_script)
+    except SieveParseError as e:
+        return None, f"{e} (in the existing script or the new one, so they could not be merged)"
+    return merged, _merged_script_problem(merged)
+
+
+def _report_merged_script_problem(problem: Optional[str]) -> bool:
+    """Print why the merged script cannot be uploaded; True if there is no problem."""
     if problem is None:
         return True
     console.print(Panel(
@@ -1335,9 +1349,11 @@ def sync(
         console.print(Panel("[bold yellow]DRY RUN - No changes will be made"))
         console.print(f"\nWould upload Sieve script ({len(sieve_script)} chars)")
         _print_carried_source(from_manifest, backup_id)
-        backed_up_merge = SieveGenerator.merge_with_existing(sieve_script, bkup.sieve_script or "")
+        backed_up_merge, merge_problem = _merge_for_upload(sieve_script, bkup.sieve_script or "")
         _print_disable_plan(
-            plan_disable(bkup.filters, carried, reference, SIEVE_FILTER_NAME, _uploaded_facts(backed_up_merge)),
+            plan_disable(
+                bkup.filters, carried, reference, SIEVE_FILTER_NAME, _uploaded_facts(backed_up_merge or ""),
+            ),
             backup_id, preview=True,
         )
         console.print(
@@ -1355,8 +1371,8 @@ def sync(
         )
 
         # Show merge preview if backup has an existing sieve script
-        if bkup.sieve_script:
-            merged = SieveGenerator.merge_with_existing(sieve_script, bkup.sieve_script)
+        if bkup.sieve_script and backed_up_merge is not None:
+            merged = backed_up_merge
             console.print(f"\n[cyan]Existing Sieve script in backup: {len(bkup.sieve_script)} chars")
             if SECTION_BEGIN not in bkup.sieve_script:
                 console.print("[yellow]User rules detected — will be preserved outside ProtonFusion section")
@@ -1365,7 +1381,7 @@ def sync(
             else:
                 preview = "\n".join(merged.split("\n")[:40])
                 console.print(Panel(preview + "\n...", title="Merged Script Preview (first 40 lines)", border_style="cyan"))
-        if not _report_merged_script_problem(backed_up_merge):
+        if not _report_merged_script_problem(merge_problem):
             safe = False
         if not safe:
             console.print("[bold red]A real sync would REFUSE and change nothing.")
@@ -1400,9 +1416,13 @@ def sync(
                 existing_script, sieve_script, allow_rule_removal,
                 backup_script=bkup.sieve_script,
             )
-            merged_script = SieveGenerator.merge_with_existing(sieve_script, existing_script)
-            if safe and not _report_merged_script_problem(merged_script):
+            merged_script, merge_problem = _merge_for_upload(sieve_script, existing_script)
+            if not _report_merged_script_problem(merge_problem):
                 safe = False
+            if merged_script is None:
+                # Nothing to diff against: the scripts could not be merged.
+                console.print("[bold red]A real sync would REFUSE and change nothing.")
+                return False
             if not safe:
                 console.print("[bold red]A real sync would REFUSE and change nothing.")
             else:
@@ -1468,8 +1488,8 @@ def sync(
             console.print("[bold red]Sync refused. No filters were disabled and nothing was uploaded.")
             return False
 
-        merged_script = SieveGenerator.merge_with_existing(sieve_script, existing_script)
-        if not _report_merged_script_problem(merged_script):
+        merged_script, merge_problem = _merge_for_upload(sieve_script, existing_script)
+        if not _report_merged_script_problem(merge_problem):
             console.print("[bold red]Sync refused. No filters were disabled and nothing was uploaded.")
             return False
         if existing_script and SECTION_BEGIN not in existing_script:
