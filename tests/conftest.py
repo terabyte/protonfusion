@@ -14,6 +14,14 @@ def pytest_addoption(parser):
         help="Path to ProtonMail credentials file for e2e tests",
     )
 
+
+from src.models.filter_models import (
+    ProtonMailFilter, FilterCondition, FilterAction, ConsolidatedFilter,
+    ConditionGroup, ConditionType, Operator, ActionType, LogicType, FilterStatus,
+)
+from src.models.backup_models import Backup, BackupMetadata, ArchiveEntry, Archive
+
+
 @pytest.fixture(autouse=True)
 def _isolate_saved_session(request, tmp_path, monkeypatch):
     """Keep tests away from a real saved session in ~/.config/protonfusion.
@@ -25,11 +33,33 @@ def _isolate_saved_session(request, tmp_path, monkeypatch):
     monkeypatch.setenv("PROTONFUSION_STORAGE_STATE", str(tmp_path / "no-saved-session.json"))
 
 
-from src.models.filter_models import (
-    ProtonMailFilter, FilterCondition, FilterAction, ConsolidatedFilter,
-    ConditionGroup, ConditionType, Operator, ActionType, LogicType, FilterStatus,
-)
-from src.models.backup_models import Backup, BackupMetadata, ArchiveEntry, Archive
+# The scraper sleeps a fixed time after each click so the real Proton UI can
+# finish its modal and dropdown animations. The mock HTML pages render
+# synchronously, so integration tests paid ~1.5s per wizard step for
+# nothing: about 55s per mock scrape. Shortening the sleeps here changes
+# only the tests; production keeps its real-site timings.
+MOCK_PAGE_SETTLE_MS = 50
+_SCRAPER_SLEEP_CONSTANTS = ("MODAL_TRANSITION_MS", "DROPDOWN_MS", "FILTERS_PAGE_LOAD_MS")
+# The constants are imported by value, so each consuming module needs its
+# own copy patched.
+_SCRAPER_MODULES = ("src.scraper.browser", "src.scraper.protonmail_scraper")
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _fast_mock_page_sleeps(request):
+    """Shrink the scraper's fixed UI-settle sleeps for mock-page integration tests.
+
+    Module-scoped so module-scoped scrape fixtures (test_scrape_completeness)
+    see the patched values too; it keys off the module's pytestmark.
+    """
+    if not request.node.get_closest_marker("integration"):
+        yield
+        return
+    with pytest.MonkeyPatch.context() as patcher:
+        for module in _SCRAPER_MODULES:
+            for name in _SCRAPER_SLEEP_CONSTANTS:
+                patcher.setattr(f"{module}.{name}", MOCK_PAGE_SETTLE_MS)
+        yield
 
 
 @pytest.fixture

@@ -192,15 +192,15 @@ class TestCompareSections:
         assert len(result.dropped) == 1
         assert len(result.added) == 1
 
-    def test_scenario_176_live_rules_vs_9_ui_filters(self):
-        """The real-world failure: section rebuilt from the few surviving UI filters."""
+    def test_section_rebuilt_from_few_ui_filters_is_unsafe(self):
+        """A large live section regenerated from only a handful of UI filters is refused."""
         gen = SieveGenerator()
-        live_rules = [_sender_rule([f"s{i}@x.com"], folder=f"F{i % 7}") for i in range(176)]
+        live_rules = [_sender_rule([f"s{i}@x.com"], folder=f"F{i % 7}") for i in range(200)]
         live = SieveGenerator.merge_with_existing(gen.generate(live_rules), "")
-        new = gen.generate(live_rules[:9])
+        new = gen.generate(live_rules[:10])
         result = compare_sections(live, new)
         assert not result.is_safe
-        assert len(result.dropped) == 167
+        assert len(result.dropped) == 190
 
     def test_user_rules_outside_markers_not_compared(self):
         new = SieveGenerator().generate([_sender_rule(["a"])])
