@@ -71,6 +71,24 @@ So `sync` treats the live section as data, not as output to overwrite. It parses
 
 `--allow-rule-removal` overrides the refusal. Removing a rule therefore takes an explicit act: deprecate it (`snapshot set-status ... deprecated`) or exclude it, then sync with the override.
 
+### Carrying Forward Live Rules (`consolidate --keep-live-rules`)
+
+Refusing is only half the fix; there must also be a supported way to keep the rules. The options considered:
+
+1. **Splice the live rules into the new section as text.** Simple, but the spliced rules would never re-enter the model: they would not be consolidated with new filters, not be visible in `snapshot view`, not be deprecatable, and would have to be re-spliced from the live script on every run forever.
+2. **Have `sync` merge (union) the live and new sections at upload time.** This hides the problem at the last step, makes the uploaded script differ from the reviewed `consolidated.sieve`, and makes it impossible to ever remove a rule.
+3. **Rebuild the missing rules as filters and store them in the archive.** Chosen.
+
+With `--keep-live-rules`, `consolidate` compares the new section with the live section captured in the backup, converts each dropped condition/action pair back into a `ProtonMailFilter` (the inverse of the generator), and adds them to `archive.json` with status `archived` and a name starting `Carried forward (<snapshot>):`. Consolidation then runs again with them included. The result is a union of the scraped filters and the live section, but the union lives in the model, so:
+
+- the carried rules consolidate with everything else and show up in `snapshot view`;
+- every later backup inherits them through the normal archive carry-forward, so the flag is needed once to repair an account, not on every run;
+- they can be removed the normal way (`snapshot set-status <name> deprecated`, or `snapshot remove`).
+
+Rules the user removed on purpose are not resurrected: pairs belonging to deprecated filters or to filters named by `--exclude` are skipped. Conversion is verified, not trusted: each rebuilt filter is regenerated and must yield exactly the pairs it was built from. Anything that cannot round-trip (`stop`, `redirect`, unmodelled tests, values containing `|` or `, `) is listed as unconvertible and left out, so `sync` still refuses until the user moves those rules outside the markers by hand.
+
+It is opt-in rather than the default because it changes `archive.json`, and because the refusal already makes the default path loud: `consolidate` warns and `sync` refuses, both naming the flag. Test values come back lowercased, which matches Sieve's default case-insensitive comparison.
+
 ### Backward Compatibility
 
 The `enabled: bool` field is preserved on `ProtonMailFilter` for backward compatibility with existing serialized data. A `@model_validator(mode='before')` derives `status` from `enabled` when loading old data that lacks a `status` field, and keeps `enabled` in sync when `status` is set explicitly. The `content_hash` excludes both `enabled` and `status` so manifest tracking is unaffected by status transitions.

@@ -26,7 +26,8 @@ from src.backup.diff_engine import DiffEngine
 from src.parser.filter_parser import parse_scraped_filters
 from src.consolidator.consolidation_engine import ConsolidationEngine
 from src.generator.sieve_generator import SieveGenerator, SECTION_BEGIN
-from src.generator.sieve_rules import SieveParseError, compare_sections
+from src.generator.sieve_rules import SieveParseError, compare_sections, extract_section
+from src.consolidator.carry_forward import facts_to_filters, filter_facts
 
 SIEVE_FILTER_NAME = "ProtonFusion Consolidated"
 
@@ -357,8 +358,19 @@ def consolidate(
     include_disabled: bool = typer.Option(False, "--include-disabled", help="Include disabled filters in consolidation"),
     exclude: Optional[List[str]] = typer.Option(None, "--exclude", help="Exclude filter by name (repeatable)"),
     include_args_from: str = typer.Option("", "--include-args-from", help="Load previous consolidation_args.json from snapshot"),
+    keep_live_rules: bool = typer.Option(
+        False, "--keep-live-rules",
+        help="Carry forward rules from the live ProtonFusion Sieve section (as captured in the backup) "
+             "that this consolidation would otherwise drop, saving them to archive.json",
+    ),
 ):
-    """Generate optimized Sieve script from backup (local only, no ProtonMail changes)."""
+    """Generate optimized Sieve script from backup (local only, no ProtonMail changes).
+
+    After 'cleanup', the live ProtonFusion section may be the only copy of some
+    rules. Without --keep-live-rules, consolidation warns when it would drop any
+    of them (and 'sync' refuses). With it, those rules are rebuilt as archived
+    filters so they stay in the section from now on.
+    """
     manager = BackupManager()
     bkup = manager.load_backup(backup_id)
     snapshot_dir = manager.snapshot_dir_for(backup_id)
@@ -409,16 +421,87 @@ def consolidate(
             console.print(f"[cyan]Including previously synced filters from manifest ({len(synced_filter_hashes)} hashes)")
 
     engine = ConsolidationEngine()
-    consolidated, report = engine.consolidate(
-        backup_filters,
-        include_disabled=include_disabled,
-        synced_filter_hashes=synced_filter_hashes,
-        archived_filters=archived_filters,
-        exclude_names=exclude_names,
-    )
-
     generator = SieveGenerator()
-    sieve_script = generator.generate(consolidated)
+
+    def _consolidate():
+        consolidated, report = engine.consolidate(
+            backup_filters,
+            include_disabled=include_disabled,
+            synced_filter_hashes=synced_filter_hashes,
+            archived_filters=archived_filters,
+            exclude_names=exclude_names,
+        )
+        return consolidated, report, generator.generate(consolidated)
+
+    consolidated, report, sieve_script = _consolidate()
+
+    # Compare against the live ProtonFusion section captured at backup time.
+    # After `cleanup` it may be the only copy of some rules.
+    carried_count = 0
+    live_script = bkup.sieve_script or ""
+    if extract_section(live_script) is not None:
+        try:
+            comparison = compare_sections(live_script, sieve_script)
+        except SieveParseError as e:
+            comparison = None
+            console.print(f"[red]Could not parse the ProtonFusion section in the backup: {escape(str(e))}")
+            console.print("[yellow]'sync' will refuse until this is resolved.")
+
+        if comparison is not None and not comparison.is_safe and keep_live_rules:
+            # Rules the user removed on purpose (deprecated, or --exclude'd)
+            # must not be resurrected from the live section.
+            intentionally_removed = [
+                e.filter for e in archive_entries if e.filter.status == FilterStatus.DEPRECATED
+            ] + [
+                f for f in list(bkup.filters) + archived_filters if f.name in exclude_names
+            ]
+            suppressed = set()
+            for f in intentionally_removed:
+                suppressed |= filter_facts(f)
+            to_carry = [fact for fact in comparison.dropped if fact not in suppressed]
+
+            carried, unconvertible = facts_to_filters(to_carry, label=snapshot_dir.name)
+            known_hashes = {e.filter.content_hash for e in archive_entries}
+            now_ts = datetime.now(timezone.utc).isoformat()
+            for f in carried:
+                if f.content_hash in known_hashes:
+                    continue
+                archive_entries.append(ArchiveEntry(
+                    filter=f, archived_at=now_ts, source_snapshot=snapshot_dir.name,
+                ))
+                archived_filters.append(f)
+                carried_count += 1
+
+            if carried_count:
+                consolidated, report, sieve_script = _consolidate()
+            console.print(
+                f"[cyan]Carried forward {len(to_carry) - len(unconvertible)} condition/action pairs "
+                f"from the live Sieve section as {carried_count} archived filters"
+            )
+            if len(to_carry) != len(comparison.dropped):
+                console.print(
+                    f"[cyan]Not carried forward (deprecated or --exclude'd on purpose): "
+                    f"{len(comparison.dropped) - len(to_carry)} pairs"
+                )
+            if unconvertible:
+                console.print(
+                    f"[red]{len(unconvertible)} live condition/action pairs could not be converted back into filters "
+                    "and are NOT in the new section ('sync' will refuse):"
+                )
+                for fact in unconvertible:
+                    console.print(f"  [red]- {escape(fact.describe())}")
+                console.print(
+                    "[yellow]Move them outside the ProtonFusion markers by hand to keep them."
+                )
+        elif comparison is not None and not comparison.is_safe:
+            console.print(Panel(
+                f"[bold red]This consolidation drops {len(comparison.dropped)} condition/action pairs "
+                "that are in the live ProtonFusion section captured in the backup.[/]\n"
+                "If their UI filters were deleted by 'cleanup', the live section is their only copy.\n\n"
+                "'sync' will refuse to upload this. To keep them, re-run with --keep-live-rules.\n"
+                "Run 'sync --dry-run' for the full list.",
+                title="Live Rules Would Be Dropped", border_style="red",
+            ))
 
     if output_file:
         out_path = Path(output_file)
@@ -455,6 +538,8 @@ def consolidate(
     args_data = {
         "exclude": sorted(exclude_names) if exclude_names else [],
         "include_disabled": include_disabled,
+        "keep_live_rules": keep_live_rules,
+        "carried_forward": carried_count,
         "created_at": now_ts,
     }
     (snapshot_dir / "consolidation_args.json").write_text(json.dumps(args_data, indent=2))
@@ -472,6 +557,8 @@ def consolidate(
         report_lines.append(f"Archived (included): {report.archived_count}")
     if report.excluded_count > 0:
         report_lines.append(f"Excluded by name: {report.excluded_count}")
+    if carried_count > 0:
+        report_lines.append(f"Carried forward from live Sieve (new archived filters): {carried_count}")
     report_lines.append(f"Consolidated rules: {report.consolidated_count}")
     report_lines.append(f"[bold green]Reduction: {report.reduction_percent:.1f}%[/]")
 
@@ -573,6 +660,19 @@ def _display_diff(diff_result, diff_engine: DiffEngine, title: str):
             console.print(f"  [blue]  {old.name} -> {state}")
 
 
+def _print_carry_forward_note(snapshot_dir: Path) -> None:
+    """Tell the user how many filters the last consolidate carried forward from live Sieve."""
+    args_path = snapshot_dir / "consolidation_args.json"
+    if not args_path.exists():
+        return
+    args = json.loads(args_path.read_text())
+    if args.get("keep_live_rules"):
+        console.print(
+            f"[cyan]consolidate --keep-live-rules was used: {args.get('carried_forward', 0)} "
+            "archived filters were carried forward from the live Sieve section into this script."
+        )
+
+
 def _rule_preservation_check(
     live_script: str,
     new_script: str,
@@ -648,7 +748,9 @@ def _rule_preservation_check(
         console.print("[yellow]--allow-rule-removal given: these rules will be removed.")
         return True
     console.print(
-        "[yellow]If removing them is intended, re-run sync with --allow-rule-removal."
+        "[yellow]To keep them, re-run 'consolidate --keep-live-rules' to carry the live "
+        "rules forward.\n"
+        "If removing them is intended, re-run sync with --allow-rule-removal."
     )
     return False
 
@@ -697,6 +799,7 @@ def sync(
         console.print(f"\nWould upload Sieve script ({len(sieve_script)} chars)")
         console.print(f"Would disable {bkup.metadata.enabled_count} UI filters")
 
+        _print_carry_forward_note(snapshot_dir)
         console.print(
             f"\n[cyan]Comparing against the Sieve script captured in backup '{backup_id}'. "
             "Use --show-diff-only to compare against the live script.[/]"
@@ -737,6 +840,7 @@ def sync(
                 if not existing_script:
                     existing_script = ""
 
+                _print_carry_forward_note(snapshot_dir)
                 safe = _rule_preservation_check(
                     existing_script, sieve_script, allow_rule_removal,
                     backup_script=bkup.sieve_script,

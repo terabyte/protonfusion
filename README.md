@@ -146,6 +146,7 @@ A GitHub Actions workflow runs unit + integration tests on every push and pull r
 | `list-snapshots` | Show all available snapshots with statistics |
 | `analyze` | View filter statistics and consolidation opportunities |
 | `consolidate` | Generate optimized Sieve script from a backup |
+| `consolidate --keep-live-rules` | Also carry forward rules that exist only in the live Sieve section (saved to the archive) |
 | `diff` | Compare two backups or a backup vs current state |
 | `sync` | Upload Sieve script and disable old UI filters; refuses if the new script drops live rules (`--allow-rule-removal` to override) |
 | `sync --show-diff-only` | Preview Sieve changes against the live script (no upload) |
@@ -277,6 +278,8 @@ backup → consolidate → sync → cleanup → backup → consolidate → ...
 4. `cleanup` deletes disabled UI filters from ProtonMail
 5. Next `backup` scrapes the now-reduced filter list; archived filters carry forward via `archive.json`
 6. Next `consolidate` still has all rules from the archive
+
+If the live Sieve section holds rules the archive does not (for example rules consolidated before the archive existed), `consolidate` warns and `sync` refuses. Run `consolidate --keep-live-rules` once to rebuild them into the archive.
 
 Use `snapshot set-status <name> deprecated` to permanently exclude a rule, or `snapshot set-status <name> archived` to re-include it.
 

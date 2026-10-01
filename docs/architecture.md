@@ -36,6 +36,7 @@ src/
 │   └── restore_engine.py      # Re-enable/disable filters to match a backup state
 ├── consolidator/
 │   ├── consolidation_engine.py  # Main pipeline: strategy composition + reporting
+│   ├── carry_forward.py         # Rebuild live Sieve rules as archived filters
 │   └── strategies/
 │       ├── group_by_action.py     # Merge filters with identical actions
 │       ├── merge_conditions.py    # Combine compatible single-condition groups

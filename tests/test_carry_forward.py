@@ -1,0 +1,191 @@
+"""Tests for carrying live Sieve rules forward into archived filters."""
+
+import json
+
+import pytest
+from typer.testing import CliRunner
+
+from src.main import app
+from src.backup.backup_manager import BackupManager
+from src.consolidator.carry_forward import CARRIED_PREFIX, facts_to_filters
+from src.consolidator.consolidation_engine import ConsolidationEngine
+from src.generator.sieve_generator import SieveGenerator
+from src.generator.sieve_rules import compare_sections, script_facts
+from src.models.filter_models import (
+    ProtonMailFilter, FilterCondition, FilterAction, FilterStatus,
+    ConditionType, Operator, ActionType, LogicType,
+)
+from tests.test_sync_safety import (  # noqa: F401  (fixtures)
+    _filter, _section_for, _wide_console, cli_snapshots_dir, fake_sync, shrunk_account,
+)
+
+runner = CliRunner()
+
+
+def _generated_facts(filters):
+    consolidated, _ = ConsolidationEngine().consolidate(filters, include_disabled=True)
+    return script_facts(SieveGenerator().generate(consolidated))
+
+
+VARIED_FILTERS = [
+    _filter("a@x.com"),
+    _filter("b@x.com"),
+    ProtonMailFilter(
+        name="recipient",
+        conditions=[FilterCondition(type=ConditionType.RECIPIENT, operator=Operator.CONTAINS, value="me@")],
+        actions=[FilterAction(type=ActionType.MARK_READ), FilterAction(type=ActionType.STAR)],
+    ),
+    ProtonMailFilter(
+        name="and group",
+        logic=LogicType.AND,
+        conditions=[
+            FilterCondition(type=ConditionType.SENDER, operator=Operator.CONTAINS, value="news"),
+            FilterCondition(type=ConditionType.SUBJECT, operator=Operator.MATCHES, value="Weekly*"),
+        ],
+        actions=[FilterAction(type=ActionType.ARCHIVE)],
+    ),
+    ProtonMailFilter(
+        name="or group",
+        logic=LogicType.OR,
+        conditions=[
+            FilterCondition(type=ConditionType.SUBJECT, operator=Operator.CONTAINS, value="[SPAM]"),
+            FilterCondition(type=ConditionType.HEADER, operator=Operator.IS, value="yes"),
+        ],
+        actions=[FilterAction(type=ActionType.DELETE)],
+    ),
+    ProtonMailFilter(
+        name="attachments",
+        conditions=[FilterCondition(type=ConditionType.ATTACHMENTS, operator=Operator.HAS)],
+        actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "Parent/Child \"q\""})],
+    ),
+    ProtonMailFilter(
+        name="no actions",
+        conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="keepme")],
+    ),
+]
+
+
+class TestFactsToFilters:
+
+    def test_round_trip_reproduces_every_fact(self):
+        facts = _generated_facts(VARIED_FILTERS)
+        filters, unconvertible = facts_to_filters(facts)
+        assert unconvertible == []
+        assert _generated_facts(filters) == facts
+        assert all(f.status == FilterStatus.ARCHIVED and not f.enabled for f in filters)
+        assert all(f.name.startswith(CARRIED_PREFIX) for f in filters)
+
+    def test_senders_with_same_action_are_packed(self):
+        facts = _generated_facts([_filter(f"s{i}") for i in range(50)])
+        filters, _ = facts_to_filters(facts)
+        assert len(filters) == 1
+        assert filters[0].conditions[0].value.count("|") == 49
+
+    def test_label_makes_names_unique_per_run(self):
+        facts = _generated_facts([_filter("a")])
+        (f1,), _ = facts_to_filters(facts, label="2026-01-01")
+        (f2,), _ = facts_to_filters(facts, label="2026-02-01")
+        assert f1.name != f2.name
+
+    @pytest.mark.parametrize("sieve", [
+        'if address :is "From" "a" { fileinto "X"; stop; }',
+        'if not exists "X-Foo" { discard; }',
+        'if header :contains "X-Other" "v" { discard; }',
+        'if address :domain :is "From" "x.com" { discard; }',
+        'if address :is "From" "a" { redirect "b@x.com"; }',
+        'if true { keep; } else { discard; }',
+    ])
+    def test_unrepresentable_rules_are_reported_not_approximated(self, sieve):
+        filters, unconvertible = facts_to_filters(script_facts(sieve))
+        assert filters == []
+        assert unconvertible
+
+
+class TestConsolidateKeepLiveRules:
+
+    def test_without_flag_warns(self, shrunk_account):
+        result = runner.invoke(app, ["consolidate"])
+        assert result.exit_code == 0
+        assert "--keep-live-rules" in result.output
+
+    def test_flag_carries_rules_and_sync_proceeds(self, shrunk_account, fake_sync, cli_snapshots_dir):
+        result = runner.invoke(app, ["consolidate", "--keep-live-rules"])
+        assert result.exit_code == 0, result.output
+        assert "Carried forward 18" in result.output
+
+        manager = BackupManager(cli_snapshots_dir)
+        snapshot_dir = manager.snapshot_dir_for("latest")
+        sieve = (snapshot_dir / "consolidated.sieve").read_text()
+        assert compare_sections(shrunk_account, sieve).is_safe
+
+        archive = manager.load_archive(snapshot_dir)
+        assert any(e.filter.name.startswith(CARRIED_PREFIX) for e in archive)
+        args = json.loads((snapshot_dir / "consolidation_args.json").read_text())
+        assert args["keep_live_rules"] is True
+        assert args["carried_forward"] > 0
+
+        dry = runner.invoke(app, ["sync", "--dry-run"])
+        assert dry.exit_code == 0, dry.output
+        assert "carried forward" in dry.output
+
+        result = runner.invoke(app, ["sync"])
+        assert result.exit_code == 0, result.output
+        assert "disable_all" in fake_sync.calls
+
+    def test_rerun_is_idempotent(self, shrunk_account, cli_snapshots_dir):
+        runner.invoke(app, ["consolidate", "--keep-live-rules"])
+        manager = BackupManager(cli_snapshots_dir)
+        before = len(manager.load_archive(manager.snapshot_dir_for("latest")))
+        result = runner.invoke(app, ["consolidate", "--keep-live-rules"])
+        assert result.exit_code == 0
+        assert len(manager.load_archive(manager.snapshot_dir_for("latest"))) == before
+
+    def test_next_backup_cycle_needs_no_flag(self, shrunk_account, fake_sync, cli_snapshots_dir):
+        """Carried rules live in archive.json, which every later backup inherits."""
+        import time
+        runner.invoke(app, ["consolidate", "--keep-live-rules"])
+        manager = BackupManager(cli_snapshots_dir)
+        time.sleep(1)  # snapshot dirs are named by the second
+        manager.create_backup([_filter("s0@x.com"), _filter("s1@x.com", folder="F1")],
+                              sieve_script=shrunk_account)
+        result = runner.invoke(app, ["consolidate"])
+        assert result.exit_code == 0
+        assert "Live Rules Would Be Dropped" not in result.output
+        assert runner.invoke(app, ["sync"]).exit_code == 0
+
+    def test_deprecated_filter_is_not_resurrected(self, cli_snapshots_dir, fake_sync):
+        keep, drop = _filter("keep@x.com"), _filter("drop@x.com")
+        fake_sync.live_script = _section_for([keep, drop])
+        manager = BackupManager(cli_snapshots_dir)
+        manager.create_backup([keep, drop], sieve_script=fake_sync.live_script)
+        assert runner.invoke(app, ["snapshot", "set-status", drop.name, "deprecated"]).exit_code == 0
+
+        result = runner.invoke(app, ["consolidate", "--keep-live-rules"])
+        assert result.exit_code == 0, result.output
+        sieve = (manager.snapshot_dir_for("latest") / "consolidated.sieve").read_text()
+        assert "drop@x.com" not in sieve
+
+        # Removing it from the live section still needs the explicit override
+        assert runner.invoke(app, ["sync"]).exit_code == 1
+        assert runner.invoke(app, ["sync", "--allow-rule-removal"]).exit_code == 0
+
+    def test_excluded_filter_is_not_resurrected(self, cli_snapshots_dir, fake_sync):
+        keep, drop = _filter("keep@x.com"), _filter("drop@x.com")
+        fake_sync.live_script = _section_for([keep, drop])
+        manager = BackupManager(cli_snapshots_dir)
+        manager.create_backup([keep, drop], sieve_script=fake_sync.live_script)
+
+        result = runner.invoke(app, ["consolidate", "--keep-live-rules", "--exclude", drop.name])
+        assert result.exit_code == 0, result.output
+        sieve = (manager.snapshot_dir_for("latest") / "consolidated.sieve").read_text()
+        assert "drop@x.com" not in sieve
+
+    def test_unconvertible_rule_reported(self, cli_snapshots_dir, fake_sync):
+        from src.generator.sieve_generator import SECTION_BEGIN, SECTION_END
+        live = (f'{SECTION_BEGIN}\nif address :is "From" "a" {{ fileinto "X"; stop; }}\n'
+                f'{SECTION_END}\n')
+        manager = BackupManager(cli_snapshots_dir)
+        manager.create_backup([_filter("other@x.com")], sieve_script=live)
+        result = runner.invoke(app, ["consolidate", "--keep-live-rules"])
+        assert result.exit_code == 0
+        assert "could not be converted" in result.output
