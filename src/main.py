@@ -24,6 +24,7 @@ from src.models.filter_models import ProtonMailFilter, FilterStatus
 from src.models.backup_models import Backup, ArchiveEntry
 from src.backup.backup_manager import BackupManager, unverified_for_deletion
 from src.backup.diff_engine import DiffEngine
+from src.utils.private_files import write_private_file
 from src.parser.filter_parser import parse_scraped_filters
 from src.consolidator.consolidation_engine import ConsolidationEngine
 from src.generator.sieve_generator import SieveGenerator, SieveGenerationError, SECTION_BEGIN
@@ -657,7 +658,7 @@ def consolidate(
     else:
         out_path = snapshot_dir / "consolidated.sieve"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(sieve_script)
+    write_private_file(out_path, sieve_script)
     console.print(f"[green]Sieve script saved to: {out_path}")
 
     # Collect all processed filters and write manifest into snapshot dir
@@ -707,7 +708,7 @@ def consolidate(
         "carried_forward": carried_count,
         "created_at": now_ts,
     }
-    (snapshot_dir / "consolidation_args.json").write_text(json.dumps(args_data, indent=2))
+    write_private_file(snapshot_dir / "consolidation_args.json", json.dumps(args_data, indent=2))
 
     # Build report display
     report_lines = [
