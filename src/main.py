@@ -63,6 +63,17 @@ def _get_credentials(credentials_file: str, manual_login: bool):
 DEFAULT_LOGIN_TIMEOUT_S = 600
 
 
+def _run_browser_command(coro):
+    """asyncio.run a browser command, turning a dead/missing session into a clean exit."""
+    from src.scraper.browser import SessionExpiredError
+
+    try:
+        return asyncio.run(coro)
+    except SessionExpiredError as e:
+        console.print(f"[red]{e}")
+        raise typer.Exit(1)
+
+
 @app.command()
 def login(
     credentials_file: str = typer.Option("", "--credentials-file", help="Pre-fill the login form from this credentials file"),
@@ -175,7 +186,7 @@ def backup(
         finally:
             await scraper.close()
 
-    asyncio.run(_run())
+    _run_browser_command(_run())
 
 
 @app.command()
@@ -218,7 +229,7 @@ def show(
         finally:
             await scraper.close()
 
-    asyncio.run(_run())
+    _run_browser_command(_run())
 
 
 @app.command("show-backup")
@@ -572,7 +583,7 @@ def diff(
             finally:
                 await scraper.close()
 
-        asyncio.run(_run())
+        _run_browser_command(_run())
     else:
         console.print("[red]Provide --backup (compare vs current) or --backup1/--backup2 (compare two backups)")
         raise typer.Exit(1)
@@ -727,7 +738,7 @@ def sync(
             finally:
                 await sync_client.close()
 
-        asyncio.run(_show_diff())
+        _run_browser_command(_show_diff())
         return
 
     async def _run():
@@ -785,7 +796,7 @@ def sync(
         finally:
             await sync_client.close()
 
-    asyncio.run(_run())
+    _run_browser_command(_run())
 
 
 @app.command()
@@ -844,7 +855,7 @@ def restore(
         finally:
             await sync_client.close()
 
-    asyncio.run(_run())
+    _run_browser_command(_run())
 
 
 @app.command()
@@ -936,7 +947,7 @@ def cleanup(
         finally:
             await sync_client.close()
 
-    asyncio.run(_run())
+    _run_browser_command(_run())
 
 
 # --- Snapshot sub-commands ---

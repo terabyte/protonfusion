@@ -147,3 +147,28 @@ async def test_prefill_two_step_form_never_logs_password(caplog):
     }
     assert browser.page.clicks == [selectors.LOGIN_BUTTON, selectors.LOGIN_BUTTON]
     assert "hunter2-secret" not in caplog.text
+
+
+def test_expired_session_exits_cleanly(monkeypatch):
+    """A browser command with a dead session prints the fix, not a traceback."""
+    import src.scraper.protonmail_scraper as scraper_mod
+    from src.scraper.browser import SessionExpiredError
+
+    class ExpiredScraper:
+        def __init__(self, **kwargs):
+            pass
+
+        async def initialize(self):
+            pass
+
+        async def login(self):
+            raise SessionExpiredError("The saved session at /x has expired. Run 'python -m src.main login'.")
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(scraper_mod, "ProtonMailScraper", ExpiredScraper)
+    result = runner.invoke(app, ["show", "--headless"])
+    assert result.exit_code == 1
+    assert "has expired" in result.output
+    assert "Traceback" not in result.output

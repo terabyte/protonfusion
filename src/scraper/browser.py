@@ -1,5 +1,6 @@
 """Shared browser automation base class for ProtonMail."""
 
+import asyncio
 import json
 import logging
 import os
@@ -42,6 +43,11 @@ SESSION_CHECK_MS = 30000
 # Our own key inside the saved storage-state JSON (Playwright ignores the file's
 # other contents only if we strip this before handing the state over).
 STATE_META_KEY = "protonfusion"
+SESSION_POLL_S = 0.5
+
+
+class SessionExpiredError(RuntimeError):
+    """No usable saved session, and logging in here would need a human."""
 
 
 def write_private_file(path: Path, text: str):
@@ -176,6 +182,7 @@ class ProtonMailBrowser:
         """
         page = self.page
         if not await self._reuse_saved_session():
+            self._check_login_is_possible()
             await page.goto(
                 PROTONMAIL_LOGIN_URL,
                 wait_until="domcontentloaded",
@@ -189,6 +196,26 @@ class ProtonMailBrowser:
                 await self._manual_login()
         await self._after_login()
         return True
+
+    def _check_login_is_possible(self):
+        """Fail fast, with the fix, instead of stalling on a login nobody can finish.
+
+        Headless, an expired saved session or a missing one (with no credentials)
+        can only end in a timeout: Proton's CAPTCHA, or a manual login in a
+        window nobody can see. Headed, a human is present, so just warn.
+        """
+        rerun = "Run 'python -m src.main login' to sign in again and save a new session."
+        if self.session_loaded:
+            message = f"The saved session at {self.storage_state_path} has expired or is no longer valid. {rerun}"
+            if self.headless:
+                raise SessionExpiredError(message)
+            logger.warning(message)
+            print(f"\n>>> {message} Falling back to logging in here. <<<\n")
+        elif self.headless and not self.credentials:
+            raise SessionExpiredError(
+                f"No saved session at {self.storage_state_path} and no credentials to log in headless. "
+                "Run 'python -m src.main login' first (or pass --state)."
+            )
 
     async def interactive_login(self, timeout_ms: int):
         """Sign in with a human at the keyboard (the `login` command).
@@ -285,16 +312,32 @@ class ProtonMailBrowser:
             return False
         page = self.page
         await page.goto(self.mail_url(INBOX_PATH), wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
-        try:
-            await page.wait_for_selector(selectors.COMPOSE_BUTTON, timeout=SESSION_CHECK_MS)
-        except Exception:
-            logger.warning("Saved session did not reach the mail app (%s); logging in normally", page.url)
+        if not await self._wait_for_mail_app_or_login(SESSION_CHECK_MS):
+            logger.warning("Saved session did not reach the mail app (ended at %s)", page.url)
             return False
         logger.info("Reused saved session")
         # Proton may rotate tokens during the run; write them back on close so
         # the saved session stays usable.
         self._save_state_on_close = True
         return True
+
+    async def _wait_for_mail_app_or_login(self, timeout_ms: int) -> bool:
+        """True once the mail app loads; False on timeout or a redirect to the login page."""
+        page = self.page
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_ms / 1000
+        while True:
+            parsed = urlparse(page.url)
+            if parsed.hostname == ACCOUNT_HOST and parsed.path.startswith("/login"):
+                return False
+            try:
+                if await page.query_selector(selectors.COMPOSE_BUTTON):
+                    return True
+            except Exception:
+                pass  # mid-navigation; check again next tick
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(SESSION_POLL_S)
 
     async def _automated_login(self) -> bool:
         """Login automatically using stored credentials."""
@@ -320,7 +363,11 @@ class ProtonMailBrowser:
             return True
 
         except Exception as e:
-            raise RuntimeError(f"Automated login failed: {e}. Check credentials file.")
+            raise RuntimeError(
+                f"Automated login failed: {e}. Check the credentials file. If Proton is "
+                "showing Human Verification (CAPTCHA), run 'python -m src.main login' to "
+                "sign in by hand and save a session."
+            )
 
     async def _manual_login(self) -> bool:
         """Wait for user to manually login."""

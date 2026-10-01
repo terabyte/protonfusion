@@ -9,7 +9,7 @@ import json
 import pytest
 
 from src.scraper import selectors
-from src.scraper.browser import ProtonMailBrowser
+from src.scraper.browser import ProtonMailBrowser, SessionExpiredError
 
 
 class FakePage:
@@ -29,7 +29,7 @@ class FakePage:
             raise TimeoutError(f"{selector} not found")
 
     async def query_selector(self, selector):
-        return None
+        return object() if selector in self.present else None
 
 
 def make_browser(url: str = "about:blank", present=()) -> ProtonMailBrowser:
@@ -242,3 +242,78 @@ class TestSavedSession:
 
         await browser.close()
         assert json.loads(state_file.read_text())["protonfusion"] == {"account_slot": 1}
+
+
+class TestExpiredSession:
+    """A dead or missing session must say 'run login', not hang on a CAPTCHA."""
+
+    def _expired(self, headless, credentials=None, url="https://account.proton.me/login"):
+        browser = make_browser()
+        browser.headless = headless
+        browser.credentials = credentials
+        browser.session_loaded = True
+
+        async def goto(target, **kwargs):
+            browser.page.visited.append(target)
+            # Proton bounces a dead session to the login page.
+            browser.page.url = url
+
+        browser.page.goto = goto
+        return browser
+
+    @pytest.mark.asyncio
+    async def test_headless_expired_session_raises_with_fix(self):
+        browser = self._expired(headless=True)
+        with pytest.raises(SessionExpiredError, match="login"):
+            await browser.login()
+        assert browser.page.visited == ["https://mail.proton.me/u/0/inbox"]
+
+    @pytest.mark.asyncio
+    async def test_headless_expired_session_with_credentials_still_raises(self):
+        from src.utils.config import Credentials
+        browser = self._expired(headless=True, credentials=Credentials("u", "p"))
+        with pytest.raises(SessionExpiredError):
+            await browser.login()
+
+    @pytest.mark.asyncio
+    async def test_headed_expired_session_falls_back_to_login(self, monkeypatch):
+        browser = self._expired(headless=False)
+        manual = []
+
+        async def fake_manual():
+            manual.append(True)
+            return True
+
+        monkeypatch.setattr(browser, "_manual_login", fake_manual)
+        monkeypatch.setattr("src.scraper.browser.POST_LOGIN_SETTLE_MS", 1)
+        assert await browser.login() is True
+        assert manual == [True]
+        assert browser.page.visited[-1] == "https://account.proton.me/login"
+
+    @pytest.mark.asyncio
+    async def test_headless_without_session_or_credentials_raises(self):
+        browser = make_browser()
+        with pytest.raises(SessionExpiredError, match="No saved session"):
+            await browser.login()
+        assert browser.page.visited == []
+
+    @pytest.mark.asyncio
+    async def test_headless_with_credentials_and_no_session_tries_login(self, monkeypatch):
+        from src.utils.config import Credentials
+        browser = make_browser()
+        browser.credentials = Credentials("u", "p")
+        tried = []
+
+        async def fake_automated():
+            tried.append(True)
+            return True
+
+        monkeypatch.setattr(browser, "_automated_login", fake_automated)
+        assert await browser.login() is True
+        assert tried == [True]
+
+    @pytest.mark.asyncio
+    async def test_login_redirect_detected_without_waiting_out_timeout(self):
+        browser = make_browser("https://account.proton.me/login?product=mail")
+        # A 60s budget would hang the test if the redirect were not noticed.
+        assert await browser._wait_for_mail_app_or_login(60000) is False
