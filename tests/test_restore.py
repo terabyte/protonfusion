@@ -838,3 +838,44 @@ class TestRestoreFilterLimit:
         assert result.exit_code == 1, result.output
         assert "Could not switch back on:" in result.output
         assert "Could not disable:" not in result.output
+
+
+def test_legacy_exact_match_in_target_does_not_carry_the_corrected_live_rule(cli_env):
+    """A wildcard-less legacy :matches in the backed-up script is an exact match.
+
+    It handles less mail than the live "news*", so restore must not treat it as
+    carrying that rule: with the News filter deleted since the backup, restoring
+    would leave news mail filtered by nothing. Restore refuses instead.
+    """
+    from src.models.filter_models import (
+        FilterAction, FilterCondition, ConditionType, Operator, ActionType, ScrapeEvidence,
+    )
+    from src.backup.restore_engine import uncovered_live_rules
+
+    def news(enabled):
+        return ProtonMailFilter(
+            name="News", enabled=enabled, priority=0,
+            conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.STARTS_WITH, value="news")],
+            actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "News"})],
+            raw=ScrapeEvidence(conditions_text="c", actions_text="a"),
+        )
+
+    keep = ProtonMailFilter(
+        name="Keep", enabled=False, priority=1,
+        conditions=[FilterCondition(type=ConditionType.SENDER, operator=Operator.IS, value="k@x")],
+        actions=[FilterAction(type=ActionType.MOVE_TO, parameters={"folder": "K"})],
+        raw=ScrapeEvidence(conditions_text="c", actions_text="a"),
+    )
+    live = _section_for([news(False)])
+    assert '"news*"' in live
+    legacy = live.replace('"news*"', '"news"')  # what the pre-fix generator wrote
+    assert uncovered_live_rules(live, legacy, []) != []
+
+    BackupManager(cli_env).create_backup(
+        [news(False), keep, _sieve(SIEVE_FILTER_NAME, legacy, priority=2)], sieve_script=legacy,
+    )
+    FakeBrowser.current = [keep, _sieve(SIEVE_FILTER_NAME, live, priority=1)]
+    FakeBrowser.live_script = live
+    result = runner.invoke(app, ["restore", "--backup", "latest"], input="y\n")
+    assert result.exit_code == 1, result.output
+    assert not any(call[0] == "upload" for call in FakeBrowser.calls)

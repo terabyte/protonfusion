@@ -13,7 +13,7 @@ from typing import Dict, Iterable, List, Tuple
 
 from src.backup.backup_manager import format_predates_strict_parser
 from src.consolidator.carry_forward import filter_facts
-from src.generator.sieve_rules import Fact, compare_sections, current_forms, script_facts
+from src.generator.sieve_rules import Fact, compare_sections, correct_legacy_actions, current_forms, script_facts
 from src.models.backup_models import Backup
 from src.models.filter_models import ProtonMailFilter, FilterStatus, legacy_identity
 from src.scraper.protonmail_sync import ProtonMailSync
@@ -79,10 +79,15 @@ def uncovered_live_rules(
     Raises SieveParseError if either script cannot be parsed.
     """
     dropped = compare_sections(live_script, script_active_after).dropped
+    # Only the action fixes apply to the target side. A wildcard-less legacy
+    # :matches in the target is an exact match, narrower than the live
+    # "value*", so treating it as carrying the live rule would restore a rule
+    # that handles less mail. current_forms' wildcard variants are only sound
+    # from legacy live to corrected new, never the other way.
     in_target = set()
     if script_active_after:
         for fact in script_facts(script_active_after):
-            in_target |= current_forms(fact)
+            in_target |= {fact, correct_legacy_actions(fact)}
     carried = set()
     for f in filters_on_after:
         if f.is_sieve or not f.is_complete:
