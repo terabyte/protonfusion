@@ -48,6 +48,7 @@ class FakeSync:
     hit_limit = False  # what upload_hit_filter_limit reports after a failed upload
     toggle_fails: set = set()  # (name, enabled) pairs set_row_enabled refuses
     toggle_raises: set = set()  # (name, enabled) pairs set_row_enabled raises on
+    toggle_late: set = set()  # (name, enabled) pairs that change but are not seen to (W8)
     row_enabled: dict = {}  # name -> live toggle state, for require_current; default enabled
     upload_hit_filter_limit = False
     last_toggle_refused = False
@@ -70,6 +71,12 @@ class FakeSync:
         return type(self).live_script
 
     async def set_row_enabled(self, index, name, enabled, expected_names=None, require_current=None):
+        self.last_toggle_refused = False
+        if (name, enabled) in type(self).toggle_late:
+            # The click took, but only after the read-back gave up
+            type(self).calls.append(("enable" if enabled else "disable", name))
+            self.last_toggle_refused = True
+            return False
         if (name, enabled) in type(self).toggle_raises:
             raise RuntimeError(f"row for {name} detached")
         if (name, enabled) in type(self).toggle_fails:
@@ -134,6 +141,7 @@ def fake_sync(monkeypatch):
     FakeSync.hit_limit = False
     FakeSync.toggle_fails = set()
     FakeSync.toggle_raises = set()
+    FakeSync.toggle_late = set()
     FakeSync.row_enabled = {}
     FakeScraper.filters = []
     monkeypatch.setattr(src.scraper.protonmail_sync, "ProtonMailSync", FakeSync)
@@ -976,6 +984,23 @@ class TestSyncDisablesOnlyReplacedFilters:
         assert "Re-enabled 2 of the 3 filters" in result.output
         assert "Re-enabled 3 of the 3" not in result.output
         assert f"- {a.name}: row for {a.name} detached" in result.output
+
+    def test_unconfirmed_disable_is_reenabled_after_failed_upload(self, cli_snapshots_dir, fake_sync):
+        """W8: b's switch went off only after the read-back gave up. It may be off, so a
+        failed upload switches it back on with the rest."""
+        a, b = _filter("a@x.com"), _filter("b@x.com")
+        BackupManager(cli_snapshots_dir).create_backup([a, b])
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        FakeScraper.filters = [a, b]
+        fake_sync.toggle_late = {(b.name, False)}
+        fake_sync.upload_result = False
+
+        result = runner.invoke(app, ["sync"])
+        flat = " ".join(result.output.split())
+        assert result.exit_code == 1, result.output
+        assert self._toggled(fake_sync, "enable") == [a.name, b.name]
+        assert "Could not confirm 1 filter(s) off" in flat
+        assert "Re-enabled 2 of the 2 filters" in flat
 
     def test_failed_upload_does_not_enable_user_disabled_filter(self, cli_snapshots_dir, fake_sync):
         """A filter the user switched off is never disabled by sync, so never re-enabled."""

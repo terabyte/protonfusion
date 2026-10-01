@@ -1175,7 +1175,9 @@ async def _reenable_after_failed_upload(
     """Turn back on every filter this sync disabled, after its upload failed.
 
     Otherwise a failed upload leaves neither the old UI filters nor the new
-    script handling mail. Every filter is attempted even if an earlier one
+    script handling mail. `disabled` includes rows clicked off without the
+    switch being seen to change, which may be off; one still on is not
+    clicked. Every filter is attempted even if an earlier one
     raised, and each one that is not confirmed back on is listed with why,
     plus the `restore` command that brings it back. `snapshot_name` is the
     resolved snapshot directory name, never 'latest', which moves.
@@ -1195,7 +1197,8 @@ async def _reenable_after_failed_upload(
             if await sync_client.set_row_enabled(f.priority, f.name, True, expected_names=expected_names):
                 continue
             reason = (
-                "its switch did not change when clicked" if sync_client.last_toggle_refused
+                "its switch was clicked but not seen to turn on; check it in ProtonMail"
+                if sync_client.last_toggle_refused
                 else "its row could not be identified with certainty"
             )
         except Exception as e:
@@ -1207,7 +1210,7 @@ async def _reenable_after_failed_upload(
     color = "green" if not failed else "yellow"
     console.print(f"[{color}]Re-enabled {reenabled} of the {len(disabled)} filters this sync disabled.")
     if failed:
-        console.print(f"[bold red]Could not re-enable {len(failed)} filter(s); they are still disabled:")
+        console.print(f"[bold red]Could not re-enable {len(failed)} filter(s); they may still be disabled:")
         for f, reason in failed:
             console.print(f"  [red]- {escape(f.name)}: {escape(reason)}")
         console.print(f"[yellow]To re-enable them, run: restore --backup {snapshot_name}")
@@ -1643,6 +1646,10 @@ def sync(
             expected_names = _scraped_row_names(live_filters)
             disabled: List[ProtonMailFilter] = []
             not_disabled: List[ProtonMailFilter] = []
+            # Clicked, but the switch was not seen to go off: it may have gone
+            # off late, so a failed upload switches these back on with the
+            # rest (a no-op for one still on).
+            unconfirmed: List[ProtonMailFilter] = []
             for f in plan.to_disable:
                 try:
                     # require_current: a row the user switched off since the
@@ -1659,21 +1666,32 @@ def sync(
                         f"({escape(loggable_text(str(e)))}). Nothing was uploaded."
                     )
                     await _reenable_after_failed_upload(
-                        sync_client, disabled + [f], snapshot_dir.name, expected_names,
+                        sync_client, disabled + unconfirmed + [f], snapshot_dir.name, expected_names,
                     )
                     return False
                 if ok:
                     disabled.append(f)
+                elif sync_client.last_toggle_refused:
+                    unconfirmed.append(f)
                 else:
                     not_disabled.append(f)
             console.print(f"[green]Disabled {len(disabled)} filters")
             if not_disabled:
                 console.print(
                     f"[yellow]Could not disable {len(not_disabled)} filter(s): the row could not be "
-                    "identified with certainty, or was already switched off since the scrape. "
-                    "Any still enabled stay enabled alongside the Sieve script:"
+                    "identified with certainty, or was already switched off since the scrape, so it "
+                    "was not clicked. Any still enabled stay enabled alongside the Sieve script:"
                 )
                 for f in not_disabled:
+                    console.print(f"  [yellow]- {escape(f.name)}")
+            if unconfirmed:
+                console.print(
+                    f"[yellow]Could not confirm {len(unconfirmed)} filter(s) off: the switch was clicked "
+                    "but not seen to change, so the click may not have taken, or may have taken late. "
+                    "Either way the Sieve script also holds their rules; if the upload fails they are "
+                    "switched back on with the rest:"
+                )
+                for f in unconfirmed:
                     console.print(f"  [yellow]- {escape(f.name)}")
 
             upload_error = None
@@ -1701,7 +1719,7 @@ def sync(
                 if sync_client.upload_hit_filter_limit:
                     limit_sign = "The 'Add sieve filter' button was missing"
                 elif unchanged and sync_client.last_toggle_refused:
-                    limit_sign = f"The '{SIEVE_FILTER_NAME}' switch did not turn on when clicked"
+                    limit_sign = f"The '{SIEVE_FILTER_NAME}' switch was clicked but not seen to turn on"
                 if limit_sign:
                     console.print(
                         f"[yellow]{limit_sign}, which is how ProtonMail shows an account at its "
@@ -1709,7 +1727,9 @@ def sync(
                         "or delete enough of them by hand (or fold them in with 'backup' and "
                         "'consolidate'), then re-run sync."
                     )
-                await _reenable_after_failed_upload(sync_client, disabled, snapshot_dir.name, expected_names)
+                await _reenable_after_failed_upload(
+                    sync_client, disabled + unconfirmed, snapshot_dir.name, expected_names,
+                )
                 return False
 
             if not unchanged:
@@ -1721,7 +1741,8 @@ def sync(
                 f"[bold green]Sync complete![/]\n\n"
                 f"Sieve uploaded: {'No (already up to date)' if unchanged else 'Yes'}\n"
                 f"Filters disabled: {len(disabled)}\n"
-                f"Filters left enabled: {len(plan.left_enabled) + len(not_disabled)}\n\n"
+                + (f"Filters clicked off but not confirmed off: {len(unconfirmed)}\n" if unconfirmed else "")
+                + f"Filters left enabled: {len(plan.left_enabled) + len(not_disabled)}\n\n"
                 + _rollback_help(snapshot_dir),
                 title="Sync Complete",
             ))
@@ -1916,19 +1937,21 @@ def restore(
 
     Order, chosen so a failure part-way never leaves mail unfiltered: first
     enable the filters the backup has on, then replace the script, then
-    disable the filters the backup has off. Until the last step every rule
-    that was active before the restore is still active, so a failure leaves
-    extra filtering (possibly the same rule twice). It stops at the first
-    failed enable or a failed upload and reports exactly what state the
-    account is in.
+    disable the filters the backup has off. It stops at the first failed
+    enable or a failed upload, with every rule that was active before the
+    restore still active (possibly the same rule twice), and reports
+    exactly what state the account is in.
 
     One exception, for ProtonMail's active-filter limit (ProtonFusion's
     own filter counts toward it): when the backup has that filter off, it
     is switched off FIRST, so enabling the UI filters cannot exceed the
     limit because it was still on. Its rules then run only through the UI
-    filters being enabled (the check below makes sure they carry every one),
-    and if an enable fails it is switched back on before stopping. An
-    enable whose switch does not turn on is reported as the probable limit.
+    filters being enabled (the check below makes sure they carry every
+    one). If an enable fails, the filters this run enabled are switched
+    back off, newest first, to free their slots, and then it is switched
+    back on; if it still cannot be, they go back on and the rules left in
+    no running filter are listed. An enable whose switch was not seen to
+    turn on is reported as the probable limit.
 
     A completed restore does switch rules off: the ones the backed-up state
     does not have. Before changing anything it checks that every rule of
@@ -1942,7 +1965,8 @@ def restore(
     """
     from src.scraper.protonmail_scraper import ProtonMailScraper
     from src.scraper.protonmail_sync import ProtonMailSync, normalize_script
-    from src.backup.restore_engine import RestoreEngine
+    from src.backup.restore_engine import RestoreEngine, uncovered_live_rules
+    from src.generator.sieve_rules import SieveParseError
 
     creds = _get_credentials(credentials_file, False)
     _workers = max(1, min(workers, 10))
@@ -1999,9 +2023,10 @@ def restore(
                 return False
             script_action = "disable"
 
-        # Saving a script switches ProtonFusion's filter on (upload_sieve
-        # makes sure of it), so if the backup has it off, switch it off
-        # again in the disable step, after the upload.
+        # When the backup has ProtonFusion's filter off it goes off in the
+        # first step (see pf_first below). Saving a script switches it on
+        # again (upload_sieve makes sure of it), so with an upload it also
+        # goes off in the disable step, after the upload.
         pf_disable_pairs = []
         if script_action == "upload":
             backed_pf = [f for f in bkup.filters if f.is_sieve and f.name == SIEVE_FILTER_NAME and not f.enabled]
@@ -2015,15 +2040,32 @@ def restore(
                 pf_disable_pairs = [(live_pf[0], live_pf[0])]
         to_disable = plan.to_disable + pf_disable_pairs
 
+        # When the backup has ProtonFusion's filter off, switch it off FIRST:
+        # the active-filter limit counts it, so enabling the UI filters while
+        # it is still on can exceed the limit. Its rules then run only through
+        # the UI filters being switched on, which _restore_keeps_live_rules
+        # has checked carry every one of them; if any enable fails, the
+        # enables are undone and it is switched back on before stopping (see
+        # _undo_enables_then_pf_on).
+        pf_off_pairs = [(b, l) for b, l in to_disable if l.is_sieve and l.name == SIEVE_FILTER_NAME]
+        other_disable = [pair for pair in to_disable if pair not in pf_off_pairs]
+        pf_first = bool(pf_off_pairs) and pf_off_pairs[0][1].enabled
+
         # Preview
         console.print(Panel(f"[bold]Restore preview: backup '{escape(backup_name)}'[/]", border_style="cyan"))
         _print_restore_filter_preview(plan)
-        if pf_disable_pairs and script_action == "upload":
+        if pf_first:
+            again = " and again after the upload, which switches it on" if script_action == "upload" else ""
+            console.print(
+                f"[yellow]'{SIEVE_FILTER_NAME}' is off in the backup: it is switched off FIRST, before "
+                f"any filter is enabled (ProtonMail's active-filter limit counts it){again}."
+            )
+        elif pf_disable_pairs and script_action == "upload":
             console.print(f"[yellow]'{SIEVE_FILTER_NAME}' is off in the backup: it is switched off after the upload.")
         if script_action == "upload":
             _print_restore_script_preview(live_script, target_script, backup_name)
         elif script_action == "disable":
-            console.print(f"[bold yellow]Will DISABLE the '{SIEVE_FILTER_NAME}' filter (last step).")
+            console.print(f"[bold yellow]Will DISABLE the '{SIEVE_FILTER_NAME}' filter.")
         else:
             console.print("[cyan]Sieve script: already as in the backup, unchanged.")
 
@@ -2059,17 +2101,6 @@ def restore(
             f"(undo this restore with: restore --backup {safety_id})"
         )
 
-        # When the backup has ProtonFusion's filter off, switch it off FIRST:
-        # the active-filter limit counts it, so enabling the UI filters while
-        # it is still on can exceed the limit. Its rules then run only through
-        # the UI filters being switched on, which _restore_keeps_live_rules
-        # has checked carry every one of them; if any enable fails, it is
-        # switched back on before stopping, so a failure still leaves every
-        # rule that was active before active.
-        pf_off_pairs = [(b, l) for b, l in to_disable if l.is_sieve and l.name == SIEVE_FILTER_NAME]
-        other_disable = [pair for pair in to_disable if pair not in pf_off_pairs]
-        pf_first = bool(pf_off_pairs) and pf_off_pairs[0][1].enabled
-
         progress = RestoreState()
         sync_client = ProtonMailSync(headless=headless, credentials=creds, storage_state_path=state or None)
         try:
@@ -2084,14 +2115,60 @@ def restore(
                 done, errors = await engine.apply([(backed, live)], True)
                 progress.pf_back_on = bool(done)
                 progress.disabled = [n for n in progress.disabled if n != SIEVE_FILTER_NAME]
-                progress.disable_errors += errors
+                progress.switch_back_on_errors += errors
 
-            # 0. ProtonFusion's filter off, when the backup has it off
+            async def _undo_enables_then_pf_on(touched, confirmed_on) -> None:
+                """After a failed enable with ProtonFusion's filter off: get every rule running again.
+
+                `touched` is every pair the enable step may have switched on
+                (confirmed, or clicked without the switch being seen to
+                change), `confirmed_on` those confirmed on. They may hold the
+                active-filter slots ProtonFusion's filter needs, so they go
+                off first, newest first (a row already off is not clicked),
+                and then it is switched back on. If it still cannot be, the
+                ones confirmed on before go back on (they carry some of its
+                rules), and the rules left in no running filter are listed.
+                """
+                _, progress.rollback_errors = await engine.apply(list(reversed(touched)), False)
+                maybe_off = list(engine.last_touched)
+                was_on = {id(live) for _, live in confirmed_on}
+                # Reported: only those that had been on. One never seen on is
+                # just confirmed off, as it started.
+                progress.rolled_back = [b.name for b, live in engine.last_done if id(live) in was_on]
+                await _switch_pf_back_on()
+                if progress.pf_back_on:
+                    return
+                progress.reenabled, errors = await engine.apply(
+                    [pair for pair in reversed(maybe_off) if id(pair[1]) in was_on], True,
+                )
+                progress.switch_back_on_errors += errors
+                on_ids = was_on - {id(live) for _, live in maybe_off} | {id(live) for _, live in engine.last_done}
+                on_now = [f for f in current_filters if f.enabled and not f.is_sieve]
+                on_now += [live for _, live in touched if id(live) in on_ids]
+                _record_unfiltered(on_now)
+
+            def _record_unfiltered(on_now) -> None:
+                """With ProtonFusion's filter left off: list its rules no filter in `on_now` carries."""
+                try:
+                    progress.unfiltered = [
+                        fact.describe() for fact in uncovered_live_rules(live_script, "", on_now)
+                    ]
+                except SieveParseError:
+                    progress.unfiltered = None
+
+            # 0. ProtonFusion's filter off, when the backup has it off. If its
+            # row could not be identified, nothing was clicked and there is
+            # nothing to switch back on; if it was clicked but not seen to go
+            # off, it may have gone off late, so it is switched back on (a
+            # no-op when it is still on).
             if pf_first:
                 progress.disabled, progress.disable_errors = await engine.apply(pf_off_pairs, False)
                 if progress.disable_errors:
                     progress.stopped_at = "pf-disable"
-                    await _switch_pf_back_on()
+                    if engine.last_touched:
+                        await _switch_pf_back_on()
+                        if progress.pf_back_on is False:
+                            _record_unfiltered([f for f in current_filters if f.enabled and not f.is_sieve])
 
             # 1. Enable: only adds filtering
             if progress.stopped_at is None:
@@ -2100,7 +2177,7 @@ def restore(
                 if progress.enable_errors:
                     progress.stopped_at = "enable"
                     if pf_first:
-                        await _switch_pf_back_on()
+                        await _undo_enables_then_pf_on(list(engine.last_touched), list(engine.last_done))
 
             # 2. Replace the script (this switches ProtonFusion's filter on)
             if progress.stopped_at is None and script_action == "upload":
@@ -2153,8 +2230,17 @@ class RestoreState:
     ProtonFusion's filter off first), "enable", "upload", or None.
     pf_back_on says whether ProtonFusion's filter was switched back on
     after such a stop (None when that was not needed). enable_refused names
-    the filters whose switch did not turn on when clicked, which is how
-    ProtonMail refuses at the active-filter limit.
+    the filters whose switch was clicked but not seen to turn on, which is
+    how ProtonMail refuses at the active-filter limit.
+
+    After a failed enable with ProtonFusion's filter switched off,
+    rolled_back names the filters this run enabled and then switched off
+    again to free their slots for it; reenabled, those switched back on
+    because it still could not come back on; unfiltered, the rules of its
+    section then in no running filter (None if that could not be worked
+    out). rollback_errors are the failures switching those filters back
+    off; switch_back_on_errors those switching ProtonFusion's filter, or
+    them, back on.
     """
     enabled: List[str] = field(default_factory=list)
     enable_errors: List[str] = field(default_factory=list)
@@ -2164,6 +2250,11 @@ class RestoreState:
     script_status: str = "unchanged"
     stopped_at: Optional[str] = None
     pf_back_on: Optional[bool] = None
+    rolled_back: List[str] = field(default_factory=list)
+    rollback_errors: List[str] = field(default_factory=list)
+    switch_back_on_errors: List[str] = field(default_factory=list)
+    reenabled: List[str] = field(default_factory=list)
+    unfiltered: Optional[List[str]] = None
 
 
 def _print_restore_outcome(
@@ -2184,12 +2275,33 @@ def _print_restore_outcome(
             )
         else:
             lines.append(f"Disabled: none of {len(to_disable)} (not attempted: stopped before this step)")
+        if state.rolled_back:
+            lines.append(
+                f"Switched back off to free their active-filter slots for '{SIEVE_FILTER_NAME}': "
+                f"{len(state.rolled_back)}{_named(state.rolled_back)}"
+            )
+        if state.reenabled:
+            lines.append(
+                f"Switched on again, since '{SIEVE_FILTER_NAME}' stayed off and they carry some of its "
+                f"rules: {len(state.reenabled)}{_named(state.reenabled)}"
+            )
         if state.pf_back_on is False:
             lines.append(
                 f"[bold red]'{SIEVE_FILTER_NAME}' was switched off first (the backup has it off) and could "
-                "not be switched back on, so any of its rules whose UI filter is not on are filtering "
-                "nothing. Switch it on in ProtonMail.[/]"
+                "not be switched back on. Switch it on in ProtonMail.[/]"
             )
+            if state.unfiltered:
+                lines.append(
+                    f"[bold red]Until then these {len(state.unfiltered)} rule(s) of its section are in no "
+                    "running filter, so the mail they handle is filtered by nothing:[/]"
+                )
+                lines += [f"  [red]- {escape(rule)}[/]" for rule in state.unfiltered]
+            elif state.unfiltered == []:
+                lines.append("[yellow]Every rule of its section is carried by a UI filter that is on.[/]")
+            else:
+                lines.append(
+                    "[bold red]Any of its rules whose UI filter is not on are filtering nothing.[/]"
+                )
         else:
             caveat = " (apart from the rules --allow-rule-removal let go)" if allow_rule_removal else ""
             pf_note = (
@@ -2210,7 +2322,11 @@ def _print_restore_outcome(
     if not complete:
         lines.append("To finish: fix the cause and run the same restore again (it only changes what still differs).")
     console.print(Panel("\n".join(lines), title="Restore Report"))
-    for title, errors in (("Could not enable", state.enable_errors), ("Could not disable", state.disable_errors)):
+    for title, errors in (
+        ("Could not enable", state.enable_errors), ("Could not disable", state.disable_errors),
+        ("Could not switch back off", state.rollback_errors),
+        ("Could not switch back on", state.switch_back_on_errors),
+    ):
         if errors:
             console.print(f"[bold red]{title}:")
             for line in errors:
@@ -2218,7 +2334,7 @@ def _print_restore_outcome(
     if state.enable_refused:
         console.print(
             "[yellow]The switch of " + ", ".join(f"'{escape(n)}'" for n in state.enable_refused)
-            + " did not turn on when clicked, which is how ProtonMail refuses a filter when the account "
+            + " was clicked but not seen to turn on, which is how ProtonMail refuses a filter when the account "
             "is at its active-filter limit. The report above is the account's current state. Disable or "
             "delete filters you do not need (or fold them in with 'backup' and 'consolidate'), then run "
             "the same restore again."

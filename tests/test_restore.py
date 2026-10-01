@@ -127,6 +127,38 @@ class TestRestoreEngine:
         assert sync.calls == []
         assert len(report["ambiguous"]) == 1 and "cannot tell which is which" in report["ambiguous"][0]
 
+    @staticmethod
+    def _subject(kind, enabled, priority) -> ProtonMailFilter:
+        """Filter "N" (Trash) on subject "a, b": one literal value, or the two chips a and b.
+
+        Different filters (different content_hash) that share a legacy_identity."""
+        cond = {"type": "subject", "operator": "contains"}
+        cond.update({"value": "a, b"} if kind == "literal" else {"values": ["a", "b"]})
+        return ProtonMailFilter(
+            name="N", enabled=enabled, priority=priority, conditions=[cond],
+            actions=[{"type": "trash"}], raw={"conditions_text": "c", "actions_text": "a"},
+        )
+
+    def test_exact_content_pairs_before_legacy_identity(self):
+        """W2: a literal "a, b" and the chips [a, b] are different filters; after a reorder
+        each still pairs with itself, so nothing is toggled."""
+        lit, chips = self._subject("literal", True, 0), self._subject("chips", False, 1)
+        backup = Backup(version="1.3", filters=[lit, chips])
+        live = [self._subject("chips", False, 0), self._subject("literal", True, 1)]
+        plan = RestoreEngine.plan(backup, live)
+        assert plan.to_enable == [] and plan.to_disable == []
+        assert plan.ambiguous == [] and plan.already_correct == ["N", "N"]
+
+    def test_legacy_group_of_different_filters_is_ambiguous(self):
+        """W2: in a backup older than 1.3 a literal may be a legacy encoding of chips, so
+        exact content proves nothing; a legacy group of differing filters is never paired
+        by row order."""
+        backup = Backup(version="1.2", filters=[self._subject("literal", True, 0), self._subject("chips", False, 1)])
+        live = [self._subject("chips", False, 0), self._subject("literal", True, 1)]
+        plan = RestoreEngine.plan(backup, live)
+        assert plan.to_enable == [] and plan.to_disable == []
+        assert len(plan.ambiguous) == 2 and "cannot tell which is which" in plan.ambiguous[0]
+
     def test_sieve_filter_matched_by_name_and_script_change_reported(self):
         report, sync = _restore(
             [_sieve(SIEVE_FILTER_NAME, "keep;", enabled=False, priority=0)],
@@ -180,7 +212,9 @@ class TestRestoreEngine:
             sync=sync,
         )
         assert report["enabled"] == []
-        assert report["errors"] == ["A: failed to enable: its switch did not change when clicked"]
+        assert report["errors"] == [
+            "A: failed to enable: its switch was clicked but not seen to change (it may have changed after the check)"
+        ]
 
 
 def _section_for(filters) -> str:
@@ -203,6 +237,9 @@ class FakeBrowser:
     upload_result = True  # False, or an exception instance to raise
     toggle_fails: set = set()  # (name, enabled) pairs set_row_enabled refuses
     toggle_refuses: set = set()  # (name, enabled) pairs whose switch ignores the click
+    toggle_late: set = set()  # (name, enabled) pairs that change but are not seen to (W8)
+    limit = None  # active-filter limit, when set; enables over it are refused
+    switch_state: dict = {}  # row -> on, so a toggle to the current state clicks nothing
     last_toggle_refused = False
     calls: list = []
     account_email = "test@proton.me"
@@ -228,14 +265,43 @@ class FakeBrowser:
         return FakeBrowser.live_script
 
     async def set_row_enabled(self, index, name, enabled):
-        self.last_toggle_refused = (name, enabled) in FakeBrowser.toggle_refuses
-        if (name, enabled) in FakeBrowser.toggle_fails or self.last_toggle_refused:
+        self.last_toggle_refused = False
+        if (name, enabled) in FakeBrowser.toggle_fails:
             return False
+        on = FakeBrowser.switches()
+        if on[index] == enabled:
+            return True  # already in that state: not clicked, as the real one
+        if (name, enabled) in FakeBrowser.toggle_refuses:
+            self.last_toggle_refused = True
+            return False
+        if (name, enabled) in FakeBrowser.toggle_late:
+            # The click took, but only after the read-back gave up
+            on[index] = enabled
+            FakeBrowser.calls.append(("enable" if enabled else "disable", name))
+            self.last_toggle_refused = True
+            return False
+        if FakeBrowser.limit is not None and enabled and sum(on.values()) >= FakeBrowser.limit:
+            # ProtonMail's active-filter limit: an enable over it does not take
+            self.last_toggle_refused = True
+            return False
+        on[index] = enabled
         FakeBrowser.calls.append(("enable" if enabled else "disable", name))
         return True
 
+    @staticmethod
+    def switches() -> dict:
+        """Row -> switch on, starting from the scraped state."""
+        if not FakeBrowser.switch_state:
+            FakeBrowser.switch_state.update({f.priority: f.enabled for f in FakeBrowser.current})
+        return FakeBrowser.switch_state
+
     async def upload_sieve(self, script, filter_name=""):
         FakeBrowser.calls.append(("upload", script, filter_name))
+        # Saving switches the script's filter on
+        on = FakeBrowser.switches()
+        for f in FakeBrowser.current:
+            if f.is_sieve and f.name == filter_name:
+                on[f.priority] = True
         if isinstance(FakeBrowser.upload_result, Exception):
             raise FakeBrowser.upload_result
         return FakeBrowser.upload_result
@@ -265,6 +331,9 @@ def cli_env(tmp_path, monkeypatch):
     FakeBrowser.upload_result = True
     FakeBrowser.toggle_fails = set()
     FakeBrowser.toggle_refuses = set()
+    FakeBrowser.toggle_late = set()
+    FakeBrowser.limit = None
+    FakeBrowser.switch_state = {}
     FakeBrowser.calls = []
     return snapshots_dir
 
@@ -549,6 +618,31 @@ class TestRestoreLeavesNoRuleInNeitherPlace:
         assert 'address from :is "old@x"' not in result.output
 
 
+    def test_legacy_form_in_the_backed_up_script_carries_the_live_rule(self, cli_env):
+        """W4: the backup's script was written by the old generator (`discard;` for Trash),
+        the live one has the corrected `fileinto "trash";`. Same rule, so no refusal."""
+        t = _filter("T", "t@x", enabled=False, priority=0, action=ActionType.TRASH)
+        live = _section_for([t])
+        assert 'fileinto "trash";' in live
+        legacy = live.replace('fileinto "trash";', "discard;")
+        BackupManager(cli_env).create_backup([t, _sieve(SIEVE_FILTER_NAME, legacy, priority=1)], sieve_script=legacy)
+        FakeBrowser.current = [t, _sieve(SIEVE_FILTER_NAME, live, priority=1)]
+        FakeBrowser.live_script = live
+        result = runner.invoke(app, ["restore", "--backup", "latest"], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert "filtered by nothing" not in result.output
+        assert FakeBrowser.calls == [("upload", legacy, SIEVE_FILTER_NAME)]
+
+    def test_legacy_form_still_needs_the_same_rule(self):
+        """W4: accepting legacy forms does not accept a different rule."""
+        from src.backup.restore_engine import uncovered_live_rules
+        t = _filter("T", "t@x", action=ActionType.TRASH)
+        live = _section_for([t])
+        other = _section_for([_filter("T", "other@x", action=ActionType.TRASH)]).replace('fileinto "trash";', "discard;")
+        assert len(uncovered_live_rules(live, other, [])) == 1
+        assert uncovered_live_rules(live, live.replace('fileinto "trash";', "discard;"), []) == []
+
+
 class TestRestoreFilterLimit:
     """V8: ProtonMail limits active filters, and ProtonFusion's own filter counts."""
 
@@ -581,7 +675,7 @@ class TestRestoreFilterLimit:
         result = runner.invoke(app, ["restore", "--backup", "latest"], input="y\n")
         assert result.exit_code == 1, result.output
         assert FakeBrowser.calls == [
-            ("disable", SIEVE_FILTER_NAME), ("enable", "Old"), ("enable", SIEVE_FILTER_NAME),
+            ("disable", SIEVE_FILTER_NAME), ("enable", "Old"), ("disable", "Old"), ("enable", SIEVE_FILTER_NAME),
         ]
         assert "no mail is left unfiltered" in result.output
         assert "was switched back on" in result.output.replace("\n", "")
@@ -622,3 +716,125 @@ class TestRestoreFilterLimit:
         assert FakeBrowser.calls == [("enable", "Old")]
         assert "active-filter limit" in result.output
         assert "Enabled: 1 of 2 (Old)" in result.output
+
+    def test_protonfusion_not_found_is_not_reported_as_switched_off(self, pf_off_in_backup):
+        """W7: its row cannot be identified, so nothing is clicked and nothing went off;
+        the report must not say it was switched off and could not come back on."""
+        FakeBrowser.toggle_fails = {(SIEVE_FILTER_NAME, False), (SIEVE_FILTER_NAME, True)}
+        result = runner.invoke(app, ["restore", "--backup", "latest"], input="y\n")
+        flat = " ".join(result.output.split())
+        assert result.exit_code == 1, result.output
+        assert FakeBrowser.calls == []
+        assert "was switched off first" not in flat
+        assert "could not be switched back on" not in flat
+        assert "no mail is left unfiltered" in flat
+
+    @pytest.fixture
+    def two_on_in_backup(self, cli_env):
+        """Backup: ProtonFusion's filter off, A and B on. Now: it is on (its script holds A
+        and B), A and B are off."""
+        a = _filter("A", "a@x", enabled=True, priority=0)
+        b = _filter("B", "b@x", enabled=True, priority=1)
+        script = _section_for([a, b])
+        BackupManager(cli_env).create_backup(
+            [a, b, _sieve(SIEVE_FILTER_NAME, script, enabled=False, priority=2)], sieve_script=script,
+        )
+        FakeBrowser.current = [
+            _filter("A", "a@x", enabled=False, priority=0), _filter("B", "b@x", enabled=False, priority=1),
+            _sieve(SIEVE_FILTER_NAME, script, enabled=True, priority=2),
+        ]
+        FakeBrowser.live_script = script
+        return cli_env
+
+    def test_at_the_limit_enables_are_undone_before_protonfusion_goes_back_on(self, two_on_in_backup):
+        """W1: one active filter allowed. A takes the slot ProtonFusion's filter freed, B is
+        refused; A must go off again so ProtonFusion's filter can come back on, or B's rule
+        would be in no running filter."""
+        FakeBrowser.limit = 1
+        result = runner.invoke(app, ["restore", "--backup", "latest"], input="y\n")
+        flat = " ".join(result.output.split())
+        assert result.exit_code == 1, result.output
+        assert FakeBrowser.calls == [
+            ("disable", SIEVE_FILTER_NAME), ("enable", "A"), ("disable", "A"), ("enable", SIEVE_FILTER_NAME),
+        ]
+        assert "was switched back on" in flat
+        assert "could not be switched back on" not in flat
+        assert "Switched back off to free their active-filter slots" in flat
+
+    def test_protonfusion_still_off_lists_the_rules_filtered_by_nothing(self, two_on_in_backup):
+        """W1: it cannot come back on even with A off, so A goes back on (it carries A's rule)
+        and the report names exactly the rule now in no running filter: B's."""
+        FakeBrowser.toggle_refuses = {("B", True), (SIEVE_FILTER_NAME, True)}
+        result = runner.invoke(app, ["restore", "--backup", "latest"], input="y\n")
+        flat = " ".join(result.output.split())
+        assert result.exit_code == 1, result.output
+        assert FakeBrowser.calls == [
+            ("disable", SIEVE_FILTER_NAME), ("enable", "A"), ("disable", "A"), ("enable", "A"),
+        ]
+        assert "could not be switched back on" in flat
+        assert "1 rule(s) of its section are in no running filter" in flat
+        assert 'address from :is "b@x"' in flat
+        assert 'address from :is "a@x"' not in flat
+
+    def test_protonfusion_off_unconfirmed_is_switched_back_on(self, pf_off_in_backup):
+        """W8: the first step's click on ProtonFusion's switch took only after the read-back
+        gave up. It may be off, so it is switched back on before stopping."""
+        FakeBrowser.toggle_late = {(SIEVE_FILTER_NAME, False)}
+        result = runner.invoke(app, ["restore", "--backup", "latest"], input="y\n")
+        assert result.exit_code == 1, result.output
+        assert FakeBrowser.calls == [("disable", SIEVE_FILTER_NAME), ("enable", SIEVE_FILTER_NAME)]
+        assert "no mail is left unfiltered" in " ".join(result.output.split())
+
+    def test_unconfirmed_enable_is_rolled_back_too(self, two_on_in_backup):
+        """W8: A's switch went on only after the read-back gave up, at a limit of one. It
+        holds the slot, so it goes off before ProtonFusion's filter comes back on."""
+        FakeBrowser.limit = 1
+        FakeBrowser.toggle_late = {("A", True)}
+        result = runner.invoke(app, ["restore", "--backup", "latest"], input="y\n")
+        assert result.exit_code == 1, result.output
+        assert FakeBrowser.calls == [
+            ("disable", SIEVE_FILTER_NAME), ("enable", "A"), ("disable", "A"), ("enable", SIEVE_FILTER_NAME),
+        ]
+        assert "could not be switched back on" not in " ".join(result.output.split())
+
+    def test_protonfusion_off_unconfirmed_and_not_back_on_lists_its_rules(self, pf_off_in_backup):
+        """W8: the first step's click took late and it cannot be switched back on: nothing
+        else was enabled, so every rule of its section is named as filtered by nothing."""
+        FakeBrowser.toggle_late = {(SIEVE_FILTER_NAME, False)}
+        FakeBrowser.toggle_refuses = {(SIEVE_FILTER_NAME, True)}
+        result = runner.invoke(app, ["restore", "--backup", "latest"], input="y\n")
+        flat = " ".join(result.output.split())
+        assert result.exit_code == 1, result.output
+        assert "could not be switched back on" in flat
+        assert "2 rule(s) of its section are in no running filter" in flat
+
+    def test_refused_enable_is_not_reported_as_switched_back_off(self, two_on_in_backup):
+        """W8: B was refused (never on); rolling back confirms it off but must not report it
+        as one switched back off."""
+        FakeBrowser.limit = 1
+        result = runner.invoke(app, ["restore", "--backup", "latest"], input="y\n")
+        flat = " ".join(result.output.split())
+        assert "Switched back off to free their active-filter slots for 'ProtonFusion Consolidated': 1 (A)" in flat
+
+    def test_preview_says_protonfusion_goes_off_first(self, cli_env):
+        """W9: with --allow-empty-script the ProtonFusion filter is switched off in the first
+        step, so the preview must not call it the last step."""
+        a = _filter("A", "a@x", enabled=True, priority=0)
+        script = _section_for([a])
+        BackupManager(cli_env).create_backup([a])  # no script captured
+        FakeBrowser.current = [_filter("A", "a@x", enabled=False, priority=0), _sieve(SIEVE_FILTER_NAME, script, priority=1)]
+        FakeBrowser.live_script = script
+        result = runner.invoke(app, ["restore", "--backup", "latest", "--allow-empty-script"], input="y\n")
+        flat = " ".join(result.output.split())
+        assert result.exit_code == 0, result.output
+        assert FakeBrowser.calls[0] == ("disable", SIEVE_FILTER_NAME)
+        assert "(last step)" not in flat
+        assert "it is switched off FIRST, before any filter is enabled" in flat
+
+    def test_failed_switch_back_on_listed_under_its_own_heading(self, pf_off_in_backup):
+        """W9: a failed switch-back-on is not a failed disable."""
+        FakeBrowser.toggle_fails = {("New", True), (SIEVE_FILTER_NAME, True)}
+        result = runner.invoke(app, ["restore", "--backup", "latest"], input="y\n")
+        assert result.exit_code == 1, result.output
+        assert "Could not switch back on:" in result.output
+        assert "Could not disable:" not in result.output

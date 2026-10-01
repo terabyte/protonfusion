@@ -87,6 +87,14 @@ def normalize_script(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+# How a clicked switch is read back: up to TOGGLE_CONFIRM_POLLS reads,
+# TOGGLE_POLL_MS apart (5s in all). Proton may flip the switch only after
+# its API call returns, or re-render the row, so one read after a fixed wait
+# can report a click that worked as refused.
+TOGGLE_POLL_MS = 250
+TOGGLE_CONFIRM_POLLS = 20
+
+
 class ProtonMailSync(ProtonMailBrowser):
     """Handles sync operations: create/delete/toggle filters, upload Sieve."""
 
@@ -94,10 +102,13 @@ class ProtonMailSync(ProtonMailBrowser):
     # the "Add sieve filter" button was gone, which is how ProtonMail shows
     # an account at its active-filter limit. Lets the caller say so.
     upload_hit_filter_limit = False
-    # Set by set_row_enabled (and the name-keyed toggles) when a click on a
-    # filter's switch did not change it. ProtonMail refuses to switch a
-    # filter on that way when the account is at its active-filter limit, so
-    # a refused enable is reported as the probable limit.
+    # Set by set_row_enabled (and the name-keyed toggles) when a filter's
+    # switch was clicked but was not seen to change within
+    # TOGGLE_CONFIRM_POLLS reads. ProtonMail refuses to switch a filter on
+    # that way when the account is at its active-filter limit, so a refused
+    # enable is reported as the probable limit. The click may still have
+    # taken effect after the last read, so callers treat such a row as
+    # possibly changed.
     last_toggle_refused = False
 
     async def upload_sieve(
@@ -238,9 +249,12 @@ class ProtonMailSync(ProtonMailBrowser):
         if toggle_input and not await toggle_input.is_checked():
             toggle_label = await row.query_selector(selectors.FILTER_TOGGLE_LABEL)
             if toggle_label:
-                await toggle_label.click()
-                await page.wait_for_timeout(1000)
-                logger.info("Enabled filter: %s", name)
+                # Polled like any toggle, so _verify_upload's read of the
+                # switch does not race a late flip
+                async def relocate():
+                    section_now = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
+                    return section_now and await self._unique_row_named(section_now, name)
+                await self._click_toggle_and_confirm(toggle_label, relocate, name, True)
 
     async def _unique_row_named(self, section, name: str):
         """The single Custom filters row named exactly `name`, or None (with a warning).
@@ -452,31 +466,40 @@ class ProtonMailSync(ProtonMailBrowser):
             return False
         self.last_toggle_refused = False
         if await toggle_input.is_checked() != enabled:
-            return await self._click_toggle_and_confirm(row, toggle_label, name, enabled)
+            async def relocate():
+                section_now = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
+                return section_now and await self._unique_row_named(section_now, name)
+            return await self._click_toggle_and_confirm(toggle_label, relocate, name, enabled)
         logger.info("Filter '%s' already %s", name, "enabled" if enabled else "disabled")
         return True
 
-    async def _click_toggle_and_confirm(self, row, toggle_label, name: str, enabled: bool) -> bool:
+    async def _click_toggle_and_confirm(self, toggle_label, relocate, name: str, enabled: bool) -> bool:
         """Click a row's switch, then read it back; True only if it is now `enabled`.
 
         A click can be swallowed (a modal over the list, ProtonMail refusing
         an enable at the active-filter limit), and callers act on the result
         as proof of the filter's state: sync switches ProtonFusion's filter on
-        this way after the UI filters are off. So a switch still in the old
-        state sets last_toggle_refused and returns False. The switch is
-        looked up again because the list may re-render on click.
+        this way after the UI filters are off. So the switch is polled until
+        it shows `enabled`, up to TOGGLE_CONFIRM_POLLS reads; one still in the
+        old state after that sets last_toggle_refused and returns False.
+        Each read finds the row afresh with `relocate` (an async callable
+        returning the row, or None), since the list may re-render on click
+        and leave the old row node detached.
         """
         await toggle_label.click()
-        await self.page.wait_for_timeout(1000)
-        toggle_after = await row.query_selector(selectors.FILTER_TOGGLE)
-        if not toggle_after or await toggle_after.is_checked() != enabled:
-            self.last_toggle_refused = True
-            logger.warning(
-                "Clicked the switch of filter '%s' but it did not turn %s", name, "on" if enabled else "off",
-            )
-            return False
-        logger.info("%s filter: %s", "Enabled" if enabled else "Disabled", name)
-        return True
+        for _ in range(TOGGLE_CONFIRM_POLLS):
+            await self.page.wait_for_timeout(TOGGLE_POLL_MS)
+            row = await relocate()
+            toggle_after = row and await row.query_selector(selectors.FILTER_TOGGLE)
+            if toggle_after and await toggle_after.is_checked() == enabled:
+                logger.info("%s filter: %s", "Enabled" if enabled else "Disabled", name)
+                return True
+        self.last_toggle_refused = True
+        logger.warning(
+            "Clicked the switch of filter '%s' but it was not seen to turn %s within %.1fs",
+            name, "on" if enabled else "off", TOGGLE_CONFIRM_POLLS * TOGGLE_POLL_MS / 1000,
+        )
+        return False
 
     async def set_row_enabled(
         self, index: int, name: str, enabled: bool, *,
@@ -504,25 +527,15 @@ class ProtonMailSync(ProtonMailBrowser):
         Returns True once the row is in the requested state, read back after
         any click; False, without clicking, whenever the row cannot be
         identified with certainty, and False (with last_toggle_refused set)
-        when the switch did not change on click.
+        when the switch was clicked but not seen to change within the
+        read-back window. Such a row may still have changed late, so callers
+        treat it as possibly changed.
         """
-        page = self.page
         self.last_toggle_refused = False
-        section = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
-        if not section:
+        if not await self.page.query_selector(selectors.CUSTOM_FILTERS_SECTION):
             logger.warning("Custom filters section not found; not toggling '%s'", name)
             return False
-        rows = await section.query_selector_all(selectors.FILTER_TABLE_ROWS)
-        names = [await self._get_filter_name(r) for r in rows]
-
-        list_unchanged = expected_names is None or list(expected_names) == names
-        row = None
-        if list_unchanged and 0 <= index < len(rows) and names[index] == name:
-            row = rows[index]
-        else:
-            same_name = [r for r, n in zip(rows, names) if n == name]
-            if len(same_name) == 1:
-                row = same_name[0]
+        row = await self._locate_row(index, name, expected_names)
         if row is None:
             logger.warning("Filter '%s' (row %d) not found unambiguously; not toggling it", name, index)
             return False
@@ -540,9 +553,29 @@ class ProtonMailSync(ProtonMailBrowser):
             )
             return False
         if is_checked != enabled:
-            return await self._click_toggle_and_confirm(row, toggle_label, name, enabled)
+            async def relocate():
+                return await self._locate_row(index, name, expected_names)
+            return await self._click_toggle_and_confirm(toggle_label, relocate, name, enabled)
         logger.info("Filter '%s' already %s", name, "enabled" if enabled else "disabled")
         return True
+
+    async def _locate_row(self, index: int, name: str, expected_names: Optional[Sequence[str]]):
+        """The Custom filters row set_row_enabled means, or None if it is not certain.
+
+        The row at `index` when it has `name` and the list as a whole still
+        matches `expected_names` (if given); otherwise the single row with
+        that name, if exactly one has it.
+        """
+        section = await self.page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
+        if not section:
+            return None
+        rows = await section.query_selector_all(selectors.FILTER_TABLE_ROWS)
+        names = [await self._get_filter_name(r) for r in rows]
+        list_unchanged = expected_names is None or list(expected_names) == names
+        if list_unchanged and 0 <= index < len(rows) and names[index] == name:
+            return rows[index]
+        same_name = [r for r, n in zip(rows, names) if n == name]
+        return same_name[0] if len(same_name) == 1 else None
 
     async def delete_filter(self, name: str) -> bool:
         """Delete one disabled filter by name from the Custom filters section.
