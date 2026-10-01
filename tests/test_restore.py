@@ -59,8 +59,20 @@ class FakeSync:
 
 
 def _restore(backed_up, current, sync=None):
+    """Plan, then apply enables and disables as the restore command does; return (report, sync)."""
     sync = sync or FakeSync()
-    report = asyncio.run(RestoreEngine(sync).restore_from_backup(Backup(filters=backed_up), current))
+    engine = RestoreEngine(sync)
+    plan = RestoreEngine.plan(Backup(filters=backed_up), current)
+    enabled, enable_errors = asyncio.run(engine.apply(plan.to_enable, True))
+    disabled, disable_errors = asyncio.run(engine.apply(plan.to_disable, False))
+    report = {
+        "enabled": enabled,
+        "disabled": disabled,
+        "not_found": plan.not_found,
+        "ambiguous": plan.ambiguous,
+        "errors": enable_errors + disable_errors,
+        "script_not_restored": plan.script_differs,
+    }
     return report, sync
 
 
