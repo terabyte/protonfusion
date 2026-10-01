@@ -119,7 +119,7 @@ The `enabled: bool` field is kept in sync with `status` via a Pydantic model val
 
 ### Archive System
 
-`ArchiveEntry` wraps a `ProtonMailFilter` with metadata (`archived_at`, `source_snapshot`). The `Archive` model contains a list of entries and is stored as `archive.json` in each snapshot directory.
+`ArchiveEntry` wraps a `ProtonMailFilter` with metadata (`archived_at`, `source_snapshot`, `source_format`). `source_format` is the backup format whose reader produced the filter: the source backup's version for a scraped filter, the current format for one rebuilt from Sieve or scraped live by `cleanup`. An entry without it (written before the field existed) counts as older than 1.3. Entries older than 1.3 may hold misread operators, so `consolidate` and `sync` treat them like an old snapshot (see `unverified_old_entries` in `backup_manager.py`) unless the current backup holds a filter with the same `content_hash`. The `Archive` model contains a list of entries and is stored as `archive.json` in each snapshot directory.
 
 Archive entries are carried forward automatically: when a new backup is created, the `archive.json` from the previous snapshot (via the `latest` symlink) is copied into the new snapshot directory.
 
@@ -237,7 +237,7 @@ snapshots/
 
 Contains the full Pydantic-serialized `Backup` object: metadata (filter counts, account email, tool version), the list of `ProtonMailFilter` objects, the existing Sieve script (captured from the account at backup time), and a SHA-256 checksum for integrity verification.
 
-`version` is `1.3`: each filter carries `raw`, `scrape_issues` (added in 1.1) and `is_sieve` (added in 1.2); 1.3 adds no fields and marks a backup written by the strict parser (older ones may hold misread operators, so `consolidate` warns about them and `sync` refuses them without `--allow-old-snapshot`). Older backups still load, and their checksum is verified without the fields their format lacked. For a backup without `is_sieve`, a filter with a captured `raw.sieve_text` is read as a Sieve filter.
+`version` is `1.3`: each filter carries `raw`, `scrape_issues` (added in 1.1) and `is_sieve` (added in 1.2); 1.3 adds no fields and marks a backup written by the strict parser (older ones may hold misread operators, so `consolidate` warns about them and archives nothing from them, and `sync` refuses them without `--allow-old-snapshot`). Older backups still load, and their checksum is verified without the fields their format lacked. For a backup without `is_sieve`, a filter with a captured `raw.sieve_text` is read as a Sieve filter.
 
 `cleanup` deletes a disabled filter only if the latest snapshot's `backup.json` or `archive.json` holds a copy with the same `content_hash`, no `scrape_issues`, and non-null `raw` (see `unverified_for_deletion` in `backup_manager.py`). Override with `--allow-incomplete`.
 

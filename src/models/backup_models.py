@@ -45,6 +45,13 @@ class ArchiveEntry(BaseModel):
     filter: ProtonMailFilter
     archived_at: str = ""
     source_snapshot: str = ""
+    # The backup format whose reader produced `filter`: the source backup's
+    # version for a scraped filter, BACKUP_FORMAT_VERSION for one rebuilt
+    # from Sieve (carry-forward) or scraped live (cleanup). None means
+    # unknown: an entry written before this field existed, which is
+    # treated as predating the strict parser (see
+    # backup_manager.entry_predates_strict_parser).
+    source_format: Optional[str] = None
 
 
 class Archive(BaseModel):

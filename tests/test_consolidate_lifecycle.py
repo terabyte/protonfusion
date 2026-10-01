@@ -225,8 +225,22 @@ class TestOldSnapshot:
         result = runner.invoke(app, ["consolidate"])
         assert result.exit_code == 0, result.output
         assert "Old Snapshot" in result.output
-        assert '"is not" was stored as "is"' in result.output
+        assert '"is not" stored as "is"' in result.output
         assert "Run 'backup' again" in result.output
+
+    def test_warning_does_not_claim_the_backup_was_misread(self, old_snapshot):
+        """V1: format 1.2 was also written by strict-parser builds, and the file
+        cannot say which, so the panel says "may", never "was"."""
+        result = runner.invoke(app, ["consolidate"])
+        assert "may have been written by a ProtonFusion that misread" in result.output
+        assert "written by an older ProtonFusion that misread" not in result.output
+
+    def test_consolidate_archives_nothing_from_old_snapshot(self, old_snapshot):
+        """V1: archive.json is carried into every later snapshot, so a misread
+        rule archived now would outlive the fresh backup the warning asks for."""
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        assert "Work" in _script(old_snapshot)
+        assert BackupManager(old_snapshot).load_archive(old_snapshot / "latest") == []
 
     def test_current_snapshot_not_warned(self, snapshots_dir):
         BackupManager(snapshots_dir).create_backup([_filter("Work", [SENDER_A], [LABEL_WORK])])
@@ -248,6 +262,104 @@ class TestOldSnapshot:
         assert result.exit_code == 0, result.output
         assert "--allow-old-snapshot given" in result.output
         assert "DRY RUN" in result.output
+
+    # --- V1: archive entries from old backups ---
+
+    MISREAD = _filter("Old rule", [SENDER_B], [DELETE])
+
+    @staticmethod
+    def _write_legacy_archive(snapshots_dir, filters, source_format=None):
+        """Write archive.json as an older version would: entries with no
+        source_format key at all (or, given one, stamped with it)."""
+        entries = []
+        for f in filters:
+            archived = f.model_copy(update={"status": FilterStatus.ARCHIVED, "enabled": False})
+            entry = {"filter": archived.model_dump(mode="json"), "archived_at": "", "source_snapshot": "old"}
+            if source_format is not None:
+                entry["source_format"] = source_format
+            entries.append(entry)
+        (snapshots_dir / "latest" / "archive.json").write_text(json.dumps({"version": "1.0", "entries": entries}))
+
+    @pytest.fixture
+    def old_archive(self, snapshots_dir):
+        """A current backup whose archive.json holds an unstamped entry the
+        backup does not confirm."""
+        BackupManager(snapshots_dir).create_backup([_filter("Work", [SENDER_A], [LABEL_WORK])])
+        self._write_legacy_archive(snapshots_dir, [self.MISREAD])
+        return snapshots_dir
+
+    def test_unstamped_archive_entry_left_out_with_warning(self, old_archive):
+        result = runner.invoke(app, ["consolidate"])
+        assert result.exit_code == 0, result.output
+        assert "Old Archive Entries" in result.output
+        assert "- Old rule (from snapshot old)" in result.output
+        assert "left out of this script" in result.output
+        script = _script(old_archive)
+        assert "a@x.com" in script and "b@x.com" not in script
+        # Kept in the archive (not silently deleted), still unstamped
+        entries = BackupManager(old_archive).load_archive(old_archive / "latest")
+        old = [e for e in entries if e.filter.name == "Old rule"]
+        assert len(old) == 1 and old[0].source_format is None
+
+    def test_pre_1_3_stamped_entry_left_out(self, snapshots_dir):
+        BackupManager(snapshots_dir).create_backup([_filter("Work", [SENDER_A], [LABEL_WORK])])
+        self._write_legacy_archive(snapshots_dir, [self.MISREAD], source_format="1.2")
+        result = runner.invoke(app, ["consolidate"])
+        assert "Old Archive Entries" in result.output
+        assert "b@x.com" not in _script(snapshots_dir)
+
+    def test_current_stamped_entry_used(self, snapshots_dir):
+        from src.models.backup_models import BACKUP_FORMAT_VERSION
+        BackupManager(snapshots_dir).create_backup([_filter("Work", [SENDER_A], [LABEL_WORK])])
+        self._write_legacy_archive(snapshots_dir, [self.MISREAD], source_format=BACKUP_FORMAT_VERSION)
+        result = runner.invoke(app, ["consolidate"])
+        assert "Old Archive Entries" not in result.output
+        assert "b@x.com" in _script(snapshots_dir)
+
+    def test_old_entry_confirmed_by_current_backup_used(self, snapshots_dir):
+        """The fresh strict scrape read the same content, so it was not misread."""
+        BackupManager(snapshots_dir).create_backup([
+            _filter("Work", [SENDER_A], [LABEL_WORK]), _filter("Old rule", [SENDER_B], [DELETE], enabled=False),
+        ])
+        self._write_legacy_archive(snapshots_dir, [self.MISREAD])
+        result = runner.invoke(app, ["consolidate"])
+        assert "Old Archive Entries" not in result.output
+        assert "b@x.com" in _script(snapshots_dir)
+
+    def test_consolidate_stamps_new_entries(self, snapshots_dir):
+        from src.models.backup_models import BACKUP_FORMAT_VERSION
+        BackupManager(snapshots_dir).create_backup([_filter("Work", [SENDER_A], [LABEL_WORK])])
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        entries = BackupManager(snapshots_dir).load_archive(snapshots_dir / "latest")
+        assert [e.source_format for e in entries] == [BACKUP_FORMAT_VERSION]
+
+    def test_sync_after_consolidate_left_entry_out_proceeds(self, old_archive):
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        result = runner.invoke(app, ["sync", "--dry-run"])
+        assert result.exit_code == 0, result.output
+
+    @pytest.fixture
+    def script_with_old_rule(self, old_archive, tmp_path):
+        """A --sieve script (no manifest describes it) holding the old entry's rule."""
+        from src.generator.sieve_generator import SieveGenerator
+        consolidated, _ = ConsolidationEngine().consolidate(
+            [_filter("Work", [SENDER_A], [LABEL_WORK]), self.MISREAD], include_disabled=True,
+        )
+        path = tmp_path / "s.sieve"
+        path.write_text(SieveGenerator.merge_with_existing(SieveGenerator().generate(consolidated), ""))
+        return str(path)
+
+    def test_sync_refuses_script_drawing_on_old_entry(self, script_with_old_rule):
+        result = runner.invoke(app, ["sync", "--dry-run", "--sieve", script_with_old_rule])
+        assert result.exit_code == 1, result.output
+        assert "Old Archive Entries" in result.output
+        assert "This script holds their rules" in result.output
+        assert "--allow-old-snapshot" in result.output
+
+    def test_sync_old_entry_override_proceeds(self, script_with_old_rule):
+        result = runner.invoke(app, ["sync", "--dry-run", "--allow-old-snapshot", "--sieve", script_with_old_rule])
+        assert result.exit_code == 0, result.output
+        assert "--allow-old-snapshot given" in result.output
 
     def test_format_1_0_is_old(self):
         from src.backup.backup_manager import predates_strict_parser

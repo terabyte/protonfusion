@@ -38,6 +38,16 @@ def _version_tuple(version: str) -> Tuple[int, ...]:
         return (0,)
 
 
+def format_predates_strict_parser(version: Optional[str]) -> bool:
+    """True if data in backup format `version` may come from the old, misreading parser.
+
+    None (format not recorded) counts as old: nothing shows it is not.
+    """
+    if version is None:
+        return True
+    return _version_tuple(version) < _version_tuple(STRICT_PARSER_FORMAT_VERSION)
+
+
 def predates_strict_parser(backup: Backup) -> bool:
     """True if the backup was written before the parser matched values exactly.
 
@@ -45,7 +55,27 @@ def predates_strict_parser(backup: Backup) -> bool:
     STRICT_PARSER_FORMAT_VERSION), so building a script from it can widen
     or invert rules.
     """
-    return _version_tuple(backup.version) < _version_tuple(STRICT_PARSER_FORMAT_VERSION)
+    return format_predates_strict_parser(backup.version)
+
+
+def unverified_old_entries(entries: List[ArchiveEntry], backup: Backup) -> List[ArchiveEntry]:
+    """The archive entries that may hold a misread rule, so must not feed a script.
+
+    An entry predates the strict parser when its source_format does (or is
+    unrecorded). It is still trusted when `backup` is itself strict and
+    holds a filter with the same content_hash: the fresh, strict scrape
+    read exactly the same rule, so it was not misread. archive.json is
+    carried from snapshot to snapshot, so without this check a misread
+    filter archived from an old backup would outlive the re-backup that
+    the old-snapshot warning asks for.
+    """
+    strict_hashes = set()
+    if not predates_strict_parser(backup):
+        strict_hashes = {f.content_hash for f in backup.filters}
+    return [
+        e for e in entries
+        if format_predates_strict_parser(e.source_format) and e.filter.content_hash not in strict_hashes
+    ]
 
 
 def compute_checksum(filters: List[ProtonMailFilter], sieve_script: str, version: str) -> str:

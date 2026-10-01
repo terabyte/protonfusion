@@ -598,6 +598,7 @@ class TestSyncRefusesIncompleteSources:
         manager.write_archive(snapshot_dir, [ArchiveEntry(
             filter=partial.model_copy(update={"scrape_issues": [self.ISSUE], "enabled": False}),
             archived_at="2026-01-01T00:00:00+00:00", source_snapshot=snapshot_dir.name,
+            source_format="1.3",
         )])
         FakeScraper.filters = [good]
         path = tmp_path / "s.sieve"
@@ -1041,3 +1042,47 @@ class TestSyncDisablesOnlyReplacedFilters:
         assert "Would disable 1 UI filters" in result.output
         assert "2 created or changed after backup 'latest' would be left enabled" in result.output
         assert fake_sync.calls == []
+
+
+def test_misread_rule_from_old_snapshot_does_not_survive_rebackup(cli_snapshots_dir, fake_sync):
+    """V1: consolidating an old (pre-1.3) backup must not archive its possibly
+    misread filters, or the fresh backup the old-snapshot warning asks for
+    carries them forward and sync uploads the misread rule.
+
+    The old scraper read "Subject does not contain 'receipt' -> Trash" as
+    "contains", stored complete with evidence.
+    """
+    import json
+    from src.backup.backup_manager import compute_checksum
+    misread = ProtonMailFilter(
+        name="Trash non-receipts from shop", logic="and",
+        conditions=[{"type": "subject", "operator": "contains", "value": "receipt"}],
+        actions=[{"type": "trash"}], raw={"conditions_text": "does not contain receipt", "actions_text": "Trash"})
+    old_dir = cli_snapshots_dir / "2026-09-01_00-00-00"
+    old_dir.mkdir()
+    (old_dir / "backup.json").write_text(json.dumps({
+        "version": "1.2", "timestamp": "2026-09-01T00:00:00", "metadata": {"filter_count": 1},
+        "filters": [misread.model_dump(mode="json")], "sieve_script": "",
+        "checksum": compute_checksum([misread], "", "1.2"),
+    }))
+    (cli_snapshots_dir / "latest").symlink_to(old_dir.name)
+
+    result = runner.invoke(app, ["consolidate"])
+    assert "Old Snapshot" in result.output
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 1 and "--allow-old-snapshot" in result.output
+
+    # The user follows the advice: backup again. The strict scraper flags the operator.
+    correct = ProtonMailFilter(
+        name="Trash non-receipts from shop", logic="and", conditions=[],
+        actions=[{"type": "trash"}], raw={"conditions_text": "does not contain receipt", "actions_text": "Trash"},
+        scrape_issues=["condition 1: unknown operator 'does not contain'"])
+    BackupManager(cli_snapshots_dir).create_backup([correct])
+    result = runner.invoke(app, ["consolidate"])
+    assert result.exit_code == 0, result.output
+    script = (cli_snapshots_dir / "latest" / "consolidated.sieve").read_text()
+    assert '"receipt"' not in script
+    FakeScraper.filters = [correct]
+    result = runner.invoke(app, ["sync"])
+    uploads = [c[1] for c in FakeSync.calls if c[0] == "upload"]
+    assert not any('"receipt"' in u for u in uploads), result.output
