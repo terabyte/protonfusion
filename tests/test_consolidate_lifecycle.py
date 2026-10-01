@@ -342,6 +342,51 @@ class TestOldSnapshot:
         assert "Old Archive Entries" in result.output
         assert "b@x.com" not in _script(snapshots_dir)
 
+    def test_cleanup_stamps_old_entry_it_confirms(self, snapshots_dir):
+        """W6: cleanup deletes the live filter matching an unverified old entry.
+        Its strict scrape just confirmed the entry, so the entry is stamped and
+        its rule survives the next backup, which no longer holds the filter."""
+        import src.main
+        from src.models.backup_models import BACKUP_FORMAT_VERSION
+        live_copy = self.MISREAD.model_copy(update={"enabled": False})
+        m = BackupManager(snapshots_dir)
+        m.create_backup([_filter("Work", [SENDER_A], [LABEL_WORK]), live_copy])
+        self._write_legacy_archive(snapshots_dir, [self.MISREAD])
+        src.main._archive_before_deletion(m, [live_copy], set())
+        entries = m.load_archive(snapshots_dir / "latest")
+        assert [(e.filter.name, e.source_format) for e in entries] == [("Old rule", BACKUP_FORMAT_VERSION)]
+        m.create_backup([_filter("Work", [SENDER_A], [LABEL_WORK])])
+        result = runner.invoke(app, ["consolidate"])
+        assert result.exit_code == 0, result.output
+        assert "Old Archive Entries" not in result.output
+        assert "b@x.com" in _script(snapshots_dir)
+
+    def test_consolidate_stamps_old_entry_the_backup_confirms(self, snapshots_dir):
+        """Sibling of W6: the filter leaves the account some other way than
+        cleanup (deleted by hand). The confirmation consolidate saw is kept."""
+        from src.models.backup_models import BACKUP_FORMAT_VERSION
+        m = BackupManager(snapshots_dir)
+        m.create_backup([_filter("Work", [SENDER_A], [LABEL_WORK]), self.MISREAD.model_copy(update={"enabled": False})])
+        self._write_legacy_archive(snapshots_dir, [self.MISREAD])
+        assert runner.invoke(app, ["consolidate"]).exit_code == 0
+        old = [e for e in m.load_archive(snapshots_dir / "latest") if e.filter.name == "Old rule"]
+        assert [e.source_format for e in old] == [BACKUP_FORMAT_VERSION]
+        m.create_backup([_filter("Work", [SENDER_A], [LABEL_WORK])])
+        result = runner.invoke(app, ["consolidate"])
+        assert "Old Archive Entries" not in result.output
+        assert "b@x.com" in _script(snapshots_dir)
+
+    def test_cleanup_does_not_stamp_from_incomplete_live_read(self, snapshots_dir):
+        """A live filter the scrape could not fully read confirms nothing."""
+        import src.main
+        partial = _filter("Old rule", [SENDER_B, UNKNOWN_BODY], [DELETE], enabled=False)
+        assert partial.content_hash == self.MISREAD.content_hash
+        m = BackupManager(snapshots_dir)
+        m.create_backup([_filter("Work", [SENDER_A], [LABEL_WORK])])
+        self._write_legacy_archive(snapshots_dir, [self.MISREAD])
+        src.main._archive_before_deletion(m, [partial], set())
+        assert [e.source_format for e in m.load_archive(snapshots_dir / "latest")] == [None]
+
     def test_consolidate_stamps_new_entries(self, snapshots_dir):
         from src.models.backup_models import BACKUP_FORMAT_VERSION
         BackupManager(snapshots_dir).create_backup([_filter("Work", [SENDER_A], [LABEL_WORK])])

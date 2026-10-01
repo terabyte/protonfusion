@@ -25,8 +25,8 @@ from src.utils.config import (
 from src.models.filter_models import ProtonMailFilter, FilterStatus
 from src.models.backup_models import Backup, ArchiveEntry, BACKUP_FORMAT_VERSION
 from src.backup.backup_manager import (
-    BackupManager, BackupIntegrityError, predates_strict_parser,
-    unverified_for_deletion, classify_old_entries, suspect_matches,
+    BackupManager, BackupIntegrityError, format_predates_strict_parser, predates_strict_parser,
+    unverified_for_deletion, classify_old_entries, strict_confirmations, suspect_matches,
     OLD_BACKUP_ENTRY, CARRIED_COPY_ENTRY,
 )
 from src.backup.diff_engine import DiffEngine
@@ -961,6 +961,14 @@ def consolidate(
                 source_snapshot=snapshot_dir.name,
                 source_format=bkup.version,
             ))
+    # An old entry this backup's strict read confirms is stamped, so it stays
+    # confirmed once its filter leaves the account and no later backup can
+    # confirm it again (cleanup does the same for the filters it deletes).
+    confirmed_hashes = strict_confirmations(bkup)
+    for e in archive_entries:
+        if (not is_carried(e.filter) and format_predates_strict_parser(e.source_format)
+                and e.filter.content_hash in confirmed_hashes):
+            e.source_format = bkup.version
     manager.write_archive(snapshot_dir, archive_entries)
 
     # Save consolidation_args.json
@@ -2536,7 +2544,13 @@ def _archive_before_deletion(
     (id in uncovered_ids) is archived as DEPRECATED: its rules are not
     live, and it was disabled, so consolidating it would switch on a rule
     the user had switched off. It stays recoverable with
-    'snapshot set-status'. A hash already in the archive is left as it is.
+    'snapshot set-status'. A hash already in the archive is not added again.
+
+    An existing entry from a pre-1.3 backup (unverified_old_entries) with
+    the hash of a fully read filter being deleted is stamped with the
+    current format: this version's strict scrape just read exactly that
+    rule. Once the filter is gone nothing else could confirm it, and the
+    next consolidate would leave its rule out.
     """
     try:
         latest_dir = manager.snapshot_dir_for("latest")
@@ -2546,8 +2560,15 @@ def _archive_before_deletion(
     archive_hashes = {e.filter.content_hash for e in archive_entries}
     now_ts = datetime.now(timezone.utc).isoformat()
     added = {FilterStatus.ARCHIVED: 0, FilterStatus.DEPRECATED: 0}
+    confirmed = 0
     for f in to_delete:
         if f.content_hash in archive_hashes:
+            if f.is_complete and f.raw is not None:
+                for e in archive_entries:
+                    if (e.filter.content_hash == f.content_hash and not is_carried(e.filter)
+                            and format_predates_strict_parser(e.source_format)):
+                        e.source_format = BACKUP_FORMAT_VERSION
+                        confirmed += 1
             continue
         archive_hashes.add(f.content_hash)
         status = FilterStatus.DEPRECATED if id(f) in uncovered_ids else FilterStatus.ARCHIVED
@@ -2560,8 +2581,14 @@ def _archive_before_deletion(
             source_format=BACKUP_FORMAT_VERSION,
         ))
         added[status] += 1
-    if any(added.values()):
+    if any(added.values()) or confirmed:
         manager.write_archive(latest_dir, archive_entries)
+    if confirmed:
+        console.print(
+            f"[cyan]Confirmed {confirmed} archive entr{'y' if confirmed == 1 else 'ies'} from a backup "
+            "older than format 1.3: the filter being deleted was just read with the same content."
+        )
+    if any(added.values()):
         console.print(
             f"[cyan]Archived before deletion: {added[FilterStatus.ARCHIVED]} (rules live), "
             f"{added[FilterStatus.DEPRECATED]} deprecated (rules not live, kept for the record)"
