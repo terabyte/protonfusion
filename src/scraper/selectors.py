@@ -15,11 +15,11 @@ LOGIN_BUTTON = 'button[type="submit"]'
 # Navigation - after login
 SETTINGS_GEAR = '[data-testid="settings-drawer-app-button:settings-icon"]'
 ALL_SETTINGS_LINK = 'a:has-text("All settings")'
-FILTERS_NAV_LINK = 'a[href="/u/0/mail/filters"]'
+FILTERS_NAV_LINK = 'a[href$="/mail/filters"]'  # href is /u/<slot>/mail/filters
 COMPOSE_BUTTON = '[data-testid="sidebar:compose"]'
 USER_DROPDOWN_EMAIL = '[data-testid="heading:userdropdown"] span.user-dropdown-displayName + span'
 
-# Filter list page (account.proton.me/u/0/mail/filters)
+# Filter list page (account.proton.me/u/<slot>/mail/filters)
 # Page structure: two <section> blocks, each with an <h2>.
 #   Section 1: h2 "Custom filters"   -> user-created filters (table.simple-table)
 #   Section 2: h2 "Spam, block, and allow lists" -> spam/allow entries

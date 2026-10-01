@@ -10,7 +10,7 @@ from src.scraper import selectors
 from src.scraper.browser import (
     ProtonMailBrowser, MODAL_TRANSITION_MS, DROPDOWN_MS, FILTERS_PAGE_LOAD_MS,
 )
-from src.utils.config import FILTERS_DIRECT_URL, PAGE_LOAD_TIMEOUT_MS
+from src.utils.config import FILTERS_PATH, PAGE_LOAD_TIMEOUT_MS
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ class ProtonMailScraper(ProtonMailBrowser):
             return await self._scrape_all_sequential(filter_items, total)
 
         # Parallel path - workers navigate to the same filters page
-        self._filters_page_url = page.url or FILTERS_DIRECT_URL
+        self._filters_page_url = page.url or self.account_url(FILTERS_PATH)
         workers = min(workers, total)
         chunks = _distribute_indices(total, workers)
         logger.info("Scraping with %d parallel workers", workers)
@@ -137,7 +137,7 @@ class ProtonMailScraper(ProtonMailBrowser):
         """Scrape assigned filter indices using a dedicated browser tab."""
         page = await self.create_worker_page()
         try:
-            url = getattr(self, '_filters_page_url', FILTERS_DIRECT_URL)
+            url = getattr(self, '_filters_page_url', None) or self.account_url(FILTERS_PATH)
             await page.goto(
                 url,
                 wait_until="domcontentloaded",

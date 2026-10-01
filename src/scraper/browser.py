@@ -9,7 +9,8 @@ from playwright.async_api import async_playwright, Browser, Page, BrowserContext
 from src.scraper import selectors
 from src.utils.config import (
     Credentials,
-    PROTONMAIL_LOGIN_URL,
+    PROTONMAIL_LOGIN_URL, MAIL_HOST, ACCOUNT_HOST, INBOX_PATH,
+    DEFAULT_ACCOUNT_SLOT, proton_url, slot_from_url,
     LOGIN_TIMEOUT_MS, PAGE_LOAD_TIMEOUT_MS, ELEMENT_TIMEOUT_MS,
 )
 
@@ -29,8 +30,6 @@ ALL_SETTINGS_LOAD_MS = 5000
 FILTERS_PAGE_LOAD_MS = 3000
 MODAL_TRANSITION_MS = 1500
 DROPDOWN_MS = 500
-
-INBOX_URL = "https://mail.proton.me/u/0/inbox"
 
 # Saved Playwright session (cookies + localStorage) from a prior human login.
 # Proton puts a CAPTCHA in front of automated logins, so the practical way to run
@@ -56,6 +55,24 @@ class ProtonMailBrowser:
         self.page: Optional[Page] = None
         self._playwright = None
         self.account_email: str = ""
+        # Session slot from the /u/<slot>/ part of Proton URLs; updated from the
+        # URL the browser lands on after login or session reuse.
+        self.account_slot: int = DEFAULT_ACCOUNT_SLOT
+
+    def mail_url(self, path: str) -> str:
+        """URL of a mail.proton.me page for this account's session slot."""
+        return proton_url(MAIL_HOST, path, self.account_slot)
+
+    def account_url(self, path: str) -> str:
+        """URL of an account.proton.me page for this account's session slot."""
+        return proton_url(ACCOUNT_HOST, path, self.account_slot)
+
+    def _record_account_slot(self):
+        """Adopt the session slot from the current page URL, if it has one."""
+        slot = slot_from_url(self.page.url)
+        if slot is not None and slot != self.account_slot:
+            logger.info("Account session slot is /u/%d/", slot)
+            self.account_slot = slot
 
     async def initialize(self):
         """Launch Playwright browser."""
@@ -95,12 +112,13 @@ class ProtonMailBrowser:
         if not self.storage_state_path or not os.path.exists(self.storage_state_path):
             return False
         page = self.page
-        await page.goto(INBOX_URL, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
+        await page.goto(self.mail_url(INBOX_PATH), wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
         try:
             await page.wait_for_selector(selectors.COMPOSE_BUTTON, timeout=SESSION_CHECK_MS)
         except Exception:
             logger.warning("Saved session did not reach the mail app (%s); logging in normally", page.url)
             return False
+        self._record_account_slot()
         logger.info("Reused saved session")
         return True
 
@@ -125,6 +143,7 @@ class ProtonMailBrowser:
                 timeout=LOGIN_TIMEOUT_MS,
             )
             logger.info("Login successful (redirected to: %s)", page.url)
+            self._record_account_slot()
             return True
 
         except Exception as e:
@@ -142,6 +161,7 @@ class ProtonMailBrowser:
                 timeout=LOGIN_TIMEOUT_MS,
             )
             logger.info("Manual login detected (redirected to: %s)", page.url)
+            self._record_account_slot()
             return True
         except Exception:
             raise RuntimeError("Login timed out. Please try again.")
@@ -158,7 +178,7 @@ class ProtonMailBrowser:
         page = self.page
 
         await page.goto(
-            INBOX_URL,
+            self.mail_url(INBOX_PATH),
             wait_until="domcontentloaded",
             timeout=PAGE_LOAD_TIMEOUT_MS,
         )
