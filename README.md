@@ -174,7 +174,7 @@ A GitHub Actions workflow runs unit + integration tests on every push and pull r
 
 All commands that interact with ProtonMail accept these flags:
 
-- `--state PATH` - Saved session file from `login` (default: `$PROTONFUSION_STORAGE_STATE`, else `~/.config/protonfusion/storage_state.json`). Used whenever it exists.
+- `--state PATH` - Saved session file from `login` (default: `$PROTONFUSION_STORAGE_STATE`, else `~/.config/protonfusion/storage_state.json`). Used whenever it exists; if `--credentials-file` names a different account than the one the session was saved for, the command refuses (exit 1).
 - `--headless` - Run browser without a visible window
 - `--credentials-file .credentials` - Use stored credentials instead of manual login
 - `--manual-login` - Force manual login even if credentials file exists

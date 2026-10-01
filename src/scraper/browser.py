@@ -40,8 +40,8 @@ MAX_ONBOARDING_MODALS = 6
 
 # How long a saved session gets to open the mail app before it counts as dead.
 SESSION_CHECK_MS = 30000
-# Our own metadata key inside the saved storage-state JSON (the account slot);
-# stripped before the state is handed to Playwright.
+# Our own metadata key inside the saved storage-state JSON (the account slot
+# and email); stripped before the state is handed to Playwright.
 STATE_META_KEY = "protonfusion"
 SESSION_POLL_S = 0.5
 
@@ -50,12 +50,43 @@ class SessionExpiredError(RuntimeError):
     """No usable saved session, and logging in here would need a human."""
 
 
+class SessionAccountMismatchError(SessionExpiredError):
+    """The saved session belongs to a different account than --credentials-file.
+
+    A subclass of SessionExpiredError because the fix is the same (sign in
+    to the right account with `login`) and so is the handling: exit cleanly.
+    """
+
+
 class SieveReadError(RuntimeError):
     """The live Sieve script could not be read.
 
     Distinct from there being no script (read_sieve_script returns "" for
     that): a failed read must never be treated as an empty script.
     """
+
+
+# Proton serves every account at all of these domains, and the mail app shows
+# just one of them, so an address at any of them names the same account.
+PROTON_DOMAINS = {"proton.me", "protonmail.com", "protonmail.ch", "pm.me"}
+
+
+def same_account(username: str, email: str) -> bool:
+    """True if a login username and an account email name the same Proton account.
+
+    Case-insensitive. A bare username ("alice") matches the email's local
+    part, as Proton accepts either at login; two Proton-domain addresses
+    match on the local part.
+    """
+    username = username.strip().lower()
+    email = email.strip().lower()
+    if username == email:
+        return True
+    local, _, domain = email.partition("@")
+    if "@" not in username:
+        return username == local
+    user_local, _, user_domain = username.partition("@")
+    return user_domain in PROTON_DOMAINS and domain in PROTON_DOMAINS and user_local == local
 
 
 class ProtonMailBrowser:
@@ -85,6 +116,8 @@ class ProtonMailBrowser:
         self.page: Optional[Page] = None
         self._playwright = None
         self.account_email: str = ""
+        # Account the loaded saved session was saved for ("" if unknown).
+        self.session_account_email: str = ""
         # Session slot from the /u/<slot>/ part of Proton URLs; updated from the
         # URL the browser lands on after login or session reuse.
         self.account_slot: int = DEFAULT_ACCOUNT_SLOT
@@ -130,7 +163,8 @@ class ProtonMailBrowser:
         """Read the saved session file, or None if absent or unreadable.
 
         Also restores the account slot recorded when the session was saved, so
-        session reuse goes straight to the right /u/<slot>/.
+        session reuse goes straight to the right /u/<slot>/, and the account
+        email, so reuse can be checked against --credentials-file.
         """
         path = self.storage_state_path
         if not path.exists():
@@ -147,6 +181,8 @@ class ProtonMailBrowser:
         slot = meta.get("account_slot")
         if isinstance(slot, int) and slot >= 0:
             self.account_slot = slot
+        email = meta.get("account_email")
+        self.session_account_email = email if isinstance(email, str) else ""
         self.session_loaded = True
         logger.info("Loading saved session from %s", path)
         return state
@@ -160,7 +196,12 @@ class ProtonMailBrowser:
         """
         path = Path(path) if path else self.storage_state_path
         state = await self.context.storage_state()
-        state[STATE_META_KEY] = {"account_slot": self.account_slot}
+        state[STATE_META_KEY] = {
+            "account_slot": self.account_slot,
+            # The live email if read this run, else the one the session was
+            # saved with: a refresh must not forget whose session this is.
+            "account_email": self.account_email or self.session_account_email,
+        }
         write_private_file(path, json.dumps(state))
         logger.info("Saved browser session to %s", path)
         return path
@@ -171,7 +212,8 @@ class ProtonMailBrowser:
         Uses stored credentials if available, otherwise waits for manual login.
         """
         page = self.page
-        if not await self._reuse_saved_session():
+        reused = await self._reuse_saved_session()
+        if not reused:
             self._check_login_is_possible()
             await page.goto(
                 PROTONMAIL_LOGIN_URL,
@@ -188,7 +230,38 @@ class ProtonMailBrowser:
                 # Headed fallback after an expired session: replace the dead file.
                 self._save_state_on_close = True
         await self._after_login()
+        if reused:
+            self._check_session_account()
         return True
+
+    def _check_session_account(self):
+        """Refuse a reused session that belongs to another account than the credentials.
+
+        Without this, --credentials-file naming account B would silently run
+        against the saved session for account A. Only checked when credentials
+        were given; the account is the email read from the mail app, else the
+        one recorded when the session was saved.
+        """
+        if not self.credentials:
+            return
+        username = self.credentials.username
+        account = self.account_email or self.session_account_email
+        if not account:
+            logger.warning(
+                "Could not tell which account the saved session at %s belongs to; "
+                "not checked against %s", self.storage_state_path, username,
+            )
+            return
+        if same_account(username, account):
+            return
+        # Refusing: leave the other account's session file exactly as it was.
+        self._save_state_on_close = False
+        raise SessionAccountMismatchError(
+            f"The saved session at {self.storage_state_path} is for {account}, but the "
+            f"credentials file is for {username}. Run 'python -m src.main login' to save a "
+            "session for that account (use --state to keep both), or pass --state with "
+            "that account's session file."
+        )
 
     def _check_login_is_possible(self):
         """Fail fast, with the fix, instead of stalling on a login nobody can finish.
