@@ -13,7 +13,7 @@ from src.models.filter_models import (
 )
 from src.scraper import selectors
 from src.scraper.browser import (
-    ProtonMailBrowser, MODAL_TRANSITION_MS, DROPDOWN_MS, FILTERS_PAGE_LOAD_MS, row_filter_name,
+    ProtonMailBrowser, MODAL_TRANSITION_MS, DROPDOWN_MS, row_filter_name,
 )
 from src.utils.config import FILTERS_PATH, PAGE_LOAD_TIMEOUT_MS
 
@@ -279,7 +279,7 @@ class ProtonMailScraper(ProtonMailBrowser):
                 wait_until="domcontentloaded",
                 timeout=PAGE_LOAD_TIMEOUT_MS,
             )
-            await page.wait_for_timeout(FILTERS_PAGE_LOAD_MS)
+            await self.wait_for_filter_rows(page)
 
             section = await page.query_selector(selectors.CUSTOM_FILTERS_SECTION)
             if not section:
