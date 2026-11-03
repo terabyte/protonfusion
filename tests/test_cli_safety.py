@@ -419,3 +419,58 @@ class TestCleanupWritesOnlyAfterConfirmation:
         assert "Gone@example.com" not in script
         assert "discard" not in script
 
+
+class _ScraperFindingNoFilters:
+    """Stands in for the real scraper when the filters page shows no rows."""
+
+    account_email = "test@proton.me"
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def initialize(self):
+        pass
+
+    async def login(self):
+        pass
+
+    async def navigate_to_filters(self):
+        pass
+
+    async def scrape_all_filters(self, workers=1):
+        return []
+
+    async def read_sieve_script(self, filter_name=""):
+        return ""
+
+    async def close(self):
+        pass
+
+
+def _run_backup_finding_no_filters(tmp_path, monkeypatch, *flags):
+    """Run `backup` against an empty scrape; returns the result and the snapshots directory."""
+    import src.backup.backup_manager
+    import src.scraper.protonmail_scraper
+    import src.utils.config
+    from typer.testing import CliRunner
+    from src.main import app
+
+    snapshots_dir = tmp_path / "snapshots"
+    snapshots_dir.mkdir()
+    monkeypatch.setattr(src.utils.config, "SNAPSHOTS_DIR", snapshots_dir)
+    monkeypatch.setattr(src.backup.backup_manager, "SNAPSHOTS_DIR", snapshots_dir)
+    monkeypatch.setattr(src.scraper.protonmail_scraper, "ProtonMailScraper", _ScraperFindingNoFilters)
+    return CliRunner().invoke(app, ["backup", "--headless", *flags]), snapshots_dir
+
+
+def test_backup_refuses_when_no_filters_are_found(tmp_path, monkeypatch):
+    result, snapshots_dir = _run_backup_finding_no_filters(tmp_path, monkeypatch)
+    assert result.exit_code == 1, result.output
+    assert "Backup NOT saved" in result.output
+    assert list(snapshots_dir.iterdir()) == []
+
+
+def test_backup_allow_empty_saves_an_empty_snapshot(tmp_path, monkeypatch):
+    result, snapshots_dir = _run_backup_finding_no_filters(tmp_path, monkeypatch, "--allow-empty")
+    assert result.exit_code == 0, result.output
+    assert (snapshots_dir / "latest" / "backup.json").exists()

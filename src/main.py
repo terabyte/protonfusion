@@ -316,12 +316,17 @@ def backup(
         False, "--allow-incomplete",
         help="Save the snapshot even if some filters could not be fully read (they are flagged in backup.json)",
     ),
+    allow_empty: bool = typer.Option(
+        False, "--allow-empty",
+        help="Save the snapshot even if no filters were found (for an account that really has none)",
+    ),
 ):
     """Scrape current filters and save to a timestamped snapshot.
 
-    Fails (exit 1, nothing saved) if any filter could not be fully read,
-    unless --allow-incomplete is given, and always if the live Sieve script
-    could not be read.
+    Fails (exit 1, nothing saved) if no filters were found, unless
+    --allow-empty is given; if any filter could not be fully read, unless
+    --allow-incomplete is given; and always if the live Sieve script could
+    not be read.
     """
     from src.scraper.protonmail_scraper import ProtonMailScraper
 
@@ -349,6 +354,18 @@ def backup(
 
             # Parse filters
             filters = parse_scraped_filters(raw_filters)
+
+            # Zero rows can mean a page that never finished loading rather
+            # than an account with no filters, and saving it would move
+            # `latest`, the default for consolidate and sync, onto an empty
+            # snapshot. Refuse before anything is written.
+            if not filters and not allow_empty:
+                console.print(
+                    "[bold red]Backup NOT saved.[/] No filters were found, which can mean the "
+                    "filters page did not finish loading. `latest` was not changed.\n"
+                    "Run it again, or if this account really has no filters, re-run with --allow-empty."
+                )
+                raise typer.Exit(1)
 
             # A filter the scraper could not fully read must not be saved
             # as though it were whole: consolidate would build Sieve without
