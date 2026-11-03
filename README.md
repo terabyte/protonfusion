@@ -170,6 +170,7 @@ A GitHub Actions workflow runs unit + integration tests on every push and pull r
 | `show-backup` | Display filters from a backup file (offline, no login) |
 | `show-backup --show-raw` | Also print each filter's raw scrape evidence (wizard text or Sieve script) and scrape issues |
 | `backup` | Scrape current filters and save to a timestamped backup |
+| `backup --allow-empty` | Save even if no filters were found; without it `backup` refuses, since an empty read can mean the page did not finish loading |
 | `list-snapshots` | Show all available snapshots with statistics |
 | `analyze` | View filter statistics and consolidation opportunities |
 | `consolidate` | Generate optimized Sieve script from a backup |

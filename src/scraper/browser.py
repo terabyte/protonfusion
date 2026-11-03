@@ -34,6 +34,9 @@ SETTINGS_DRAWER_MS = 2000
 ALL_SETTINGS_LOAD_MS = 5000
 FILTERS_PAGE_LOAD_MS = 3000
 FILTERS_PAGE_WAIT_MS = 30000
+# The heading renders before the filter list arrives from the API, so an empty
+# table right after the heading appears does not mean the account has no filters.
+FILTER_ROWS_WAIT_MS = 20000
 # How long the 'Add filter' button gets to appear after the Custom filters
 # heading has. Only spent in full when the button really is absent.
 ADD_FILTER_WAIT_MS = 5000
@@ -524,6 +527,24 @@ class ProtonMailBrowser:
         await self.page.wait_for_selector(
             selectors.CUSTOM_FILTERS_HEADING, timeout=FILTERS_PAGE_WAIT_MS,
         )
+        await self.wait_for_filter_rows(self.page)
+
+    async def wait_for_filter_rows(self, page: Page) -> None:
+        """Wait for the Custom filters rows, because they load after the heading.
+
+        Reading the table before they arrive records "0 filters" and "no Sieve
+        script" as if they were facts, which produced a successful-looking empty
+        backup. A real empty account has no row to wait for, so the timeout is
+        not an error, but it is logged in case the page was merely slow.
+        """
+        rows = f"{selectors.CUSTOM_FILTERS_SECTION} {selectors.FILTER_TABLE_ROWS}"
+        try:
+            await page.wait_for_selector(rows, timeout=FILTER_ROWS_WAIT_MS)
+        except PlaywrightTimeoutError:
+            logger.warning(
+                "No filter rows appeared within %d seconds; treating the account as having no custom filters",
+                FILTER_ROWS_WAIT_MS // 1000,
+            )
 
     async def _capture_account_email(self):
         """Read the account email from the mail app's user dropdown, if present."""

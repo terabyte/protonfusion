@@ -39,7 +39,7 @@ def _isolate_saved_session(request, tmp_path, monkeypatch):
 # nothing: about 55s per mock scrape. Shortening the sleeps here changes
 # only the tests; production keeps its real-site timings.
 MOCK_PAGE_SETTLE_MS = 50
-_SCRAPER_SLEEP_CONSTANTS = ("MODAL_TRANSITION_MS", "DROPDOWN_MS", "FILTERS_PAGE_LOAD_MS")
+_SCRAPER_SLEEP_CONSTANTS = ("MODAL_TRANSITION_MS", "DROPDOWN_MS")
 # The constants are imported by value, so each consuming module needs its
 # own copy patched.
 _SCRAPER_MODULES = ("src.scraper.browser", "src.scraper.protonmail_scraper")
@@ -59,6 +59,7 @@ def _fast_mock_page_sleeps(request):
         for module in _SCRAPER_MODULES:
             for name in _SCRAPER_SLEEP_CONSTANTS:
                 patcher.setattr(f"{module}.{name}", MOCK_PAGE_SETTLE_MS)
+        patcher.setattr("src.scraper.browser.FILTERS_PAGE_LOAD_MS", MOCK_PAGE_SETTLE_MS)
         yield
 
 

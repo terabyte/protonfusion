@@ -55,6 +55,43 @@ async def test_direct_navigation_rejects_wrong_page(monkeypatch):
         await browser.close()
 
 
+# The real page shows the heading first and fills the table from an API call.
+DELAYED_ROWS_HTML = """
+<html><body><div class='container-section-sticky'><h1>Filters</h1></div>
+<section id="custom"><h2>Custom filters</h2><button>Add filter</button>
+<table class="simple-table"><tbody></tbody></table></section>
+<section><h2>Spam, block, and allow lists</h2></section>
+<script>setTimeout(() => {
+  document.querySelector("#custom tbody").innerHTML = "<tr><td>late filter</td></tr>";
+}, 1500);</script>
+</body></html>
+"""
+
+
+@pytest.mark.asyncio
+async def test_navigation_waits_for_rows_that_load_after_the_heading():
+    browser = await _browser_serving(DELAYED_ROWS_HTML, [])
+    try:
+        browser.account_slot = 1
+        await browser.navigate_to_filters()
+        rows = await browser.page.query_selector_all("#custom tbody tr")
+        assert len(rows) == 1
+    finally:
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_navigation_accepts_an_account_with_no_rows(monkeypatch):
+    empty_html = DELAYED_ROWS_HTML.split("<script>")[0] + "</body></html>"
+    monkeypatch.setattr("src.scraper.browser.FILTER_ROWS_WAIT_MS", 200)
+    browser = await _browser_serving(empty_html, [])
+    try:
+        browser.account_slot = 1
+        await browser.navigate_to_filters()
+    finally:
+        await browser.close()
+
+
 WELCOME_TOUR_HTML = """
 <html><body>
 <button id="behind">Compose</button>
